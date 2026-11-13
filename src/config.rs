@@ -84,9 +84,8 @@ pub struct SystemConfig {
     pub cpu_pinning: CpuPinningConfig,
     #[serde(default)]
     pub memory_allocation: MemoryAllocationConfig,
-    /// Memory channel count for stride calculation (default 2 for consumer DDR5 dual-channel). Higher values produce larger strides to
-    /// match DDR interleave boundaries.
-    /// Consumer: 2, Server: 4-12+.
+    /// TM5-style stride multiplier (default 2): `channels * parameter` lines between visits. This does not determine the controller's
+    /// channel mapping. Explicit `period_lines` is independent of it (TODO 126).
     #[serde(default = "default_channels")]
     pub channels: u32,
     /// The seal (TODO 74, `seal.rs`): `"tmr"` (the default), `"tm5"`, or `"off"` to run without it. The mirror tests' data is the seal
@@ -739,14 +738,28 @@ impl AccessGeometry {
         if period_lines == 0 || period_lines > Self::MAX_PERIOD {
             return Err(format!("\"period_lines\" must be 1 to {}", Self::MAX_PERIOD));
         }
-        if group_lines != 1 {
-            return Err("\"group_lines\" currently supports 1 only".to_string());
+        if !matches!(group_lines, 1 | 2 | 4 | 8 | 16) {
+            return Err("\"group_lines\" supports 1, 2, 4, 8 or 16 (experimental)".to_string());
         }
         if period_lines < group_lines || !period_lines.is_multiple_of(group_lines) {
             return Err("\"period_lines\" must be at least \"group_lines\" and divisible by it".to_string());
         }
         Ok(Self { period_lines, group_lines })
     }
+}
+
+/// Grouped walks only have native kernels. Recheck after command-line pattern overrides too.
+pub(crate) fn validate_access(config: &TestMemoryConfig) -> Result<(), String> {
+    if let Some(access) = config.parameter_context.as_ref().and_then(|c| c.access) {
+        AccessGeometry::new(access.period_lines, access.group_lines)?;
+        if access.group_lines > 1 && config.native_program().is_none() {
+            return Err("\"group_lines\" greater than 1 requires native patterns; numbered legacy modes have no grouped kernel".to_string());
+        }
+        if config.sequence.is_some() {
+            check_sequence(&config.sequence(), config)?;
+        }
+    }
+    Ok(())
 }
 
 fn explicit_access(test: &TestConfig) -> Result<Option<AccessGeometry>, String> {
@@ -1403,6 +1416,7 @@ impl ModernConfig {
         }
         apply_repetition(test, &mut config);
         validate_repetition(test, &config).map_err(|e| Self::test_error(i, test, e))?;
+        validate_access(&config).map_err(|e| Self::test_error(i, test, e))?;
 
         Ok(config)
     }
@@ -2385,6 +2399,75 @@ mod tests {
         ] {
             modern.test_sequence[0] = entry;
             assert!(modern.get_test_configs().unwrap_err().contains(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn grouped_geometry_rejects_unread_settings_and_legacy_overrides() {
+        let mut modern = legacy(100, vec![test(1, "SimpleTest", 100, 16)]).to_modern_config().unwrap();
+        for function in ["Mem-SimpleV2-Auto", "Mem-Sequence"] {
+            for group in [2, 4, 8, 16] {
+                modern.test_sequence[0] = TestConfig {
+                    enabled: true,
+                    function: function.into(),
+                    period_lines: Some(512),
+                    group_lines: Some(group),
+                    order: (function == "Mem-Sequence").then(|| "stride".into()),
+                    ..Default::default()
+                };
+                let mut config = modern.get_test_configs().unwrap()[0].1.clone();
+                assert_eq!(config.parameter_context.as_ref().unwrap().access.unwrap().group_lines, group);
+                config.pattern_mode = Some(0);
+                config.program = None;
+                assert!(validate_access(&config).unwrap_err().contains("requires native patterns"), "a CLI legacy override");
+                config.pattern_mode = None;
+                config.sequence = Some(Box::new(crate::sequence::Sequence::default()));
+                assert!(validate_access(&config).unwrap_err().contains("requires a strided pass"), "a CLI sequence override");
+                modern.test_sequence[0].pattern_mode = Some(crate::pattern::Family::Random.number());
+                assert!(modern.get_test_configs().is_ok(), "numeric native family aliases remain native");
+                modern.test_sequence[0].pattern_mode = None;
+                modern.test_sequence[0].period_lines = Some(513);
+                assert!(modern.get_test_configs().unwrap_err().contains("divisible"));
+            }
+        }
+        assert!(AccessGeometry::new(2, 4).unwrap_err().contains("at least"));
+        assert!(AccessGeometry::new(16, 0).unwrap_err().contains("\"group_lines\""));
+    }
+
+    #[test]
+    fn access_geometry_examples_load_with_equal_work_per_geometry() {
+        let inputs = [
+            include_str!("../research/access_geometry/configs/combined.json"),
+            include_str!("../research/access_geometry/configs/combined-reverse.json"),
+            include_str!("../research/access_geometry/configs/baseline-compatible.json"),
+        ];
+        for (i, text) in inputs.into_iter().enumerate() {
+            let config: ModernConfig = serde_json::from_str(text).unwrap();
+            config.validate_system().unwrap();
+            let plan = config.plan().unwrap();
+            assert_eq!(plan.steps.len(), if i < 2 { 12 } else { 3 });
+            if i < 2 {
+                for function in ["Mem-SimpleV2-Auto", "Mem-Sequence"] {
+                    let defs: Vec<_> = plan.tests.iter().filter(|t| t.function == function).collect();
+                    assert_eq!(defs.len(), 6);
+                    let mut geometries: Vec<_> = defs
+                        .iter()
+                        .map(|t| {
+                            let a = t.config.parameter_context.as_ref().unwrap().access.unwrap();
+                            (a.period_lines, a.group_lines)
+                        })
+                        .collect();
+                    geometries.sort_unstable();
+                    assert_eq!(geometries, [(512, 1), (512, 2), (512, 4), (512, 8), (512, 16), (513, 1)]);
+                    let first = &defs[0].config;
+                    for def in &defs {
+                        assert_eq!(def.config.write_read_cycles, first.write_read_cycles);
+                        assert_eq!(def.config.verify_reps, first.verify_reps);
+                        assert_eq!(def.config.native_program(), first.native_program());
+                        assert_eq!(def.config.calculate_chunk_size(function, 1 << 30), first.calculate_chunk_size(function, 1 << 30));
+                    }
+                }
+            }
         }
     }
 

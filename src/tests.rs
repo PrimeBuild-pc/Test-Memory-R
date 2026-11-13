@@ -3971,6 +3971,9 @@ macro_rules! for_each_strided_line {
 /// from there to 256 (about level: two shapes moved 8% and 16%, opposite ways); 128 is the middle of it.
 const STRIDED_AHEAD: usize = 128;
 
+mod grouped;
+use grouped::grouped_walk;
+
 /// The strided walk's lookahead in words: `STRIDED_AHEAD` steps, but no more than the shortest pass has lines, so a step past a pass's end
 /// lands in the next pass.
 #[inline(always)]
@@ -6349,6 +6352,7 @@ pub(crate) struct NativeChunk {
     pub(crate) end: usize,
     pub(crate) lid0: u64,
     pub(crate) period: usize,
+    pub(crate) group: usize,
     pub(crate) phase: crate::pattern::Phase,
 }
 
@@ -6511,6 +6515,42 @@ macro_rules! native_differs_strided {
     }};
 }
 
+/// One constant group at one SIMD width. Each line is generated and consumed before the next; four accumulators stay independent.
+macro_rules! native_grouped_fns {
+    ($write:ident, $differs:ident, [$($kind:tt)*], $simd:ty, $w:tt, $tf:literal, [$($j:literal),+]) => {
+        #[inline(never)]
+        #[target_feature(enable = $tf)]
+        unsafe fn $write<L: Fn(u64) -> native_line_ty!([$($kind)*])>(c: NativeChunk, line: L) {
+            let NativeChunk { base, start, end, period, lid0, .. } = c;
+            grouped_walk!(prefetch_line, base, start, end, period, lid0, [$($j),+], |p, lid, _j| {
+                for (v, x) in line(lid).into_iter().enumerate() {
+                    *(p.add(v * $w) as *mut $simd) = x;
+                }
+            });
+        }
+
+        #[inline(never)]
+        #[target_feature(enable = $tf)]
+        unsafe fn $differs<L: Fn(u64) -> native_line_ty!([$($kind)*])>(c: NativeChunk, line: L) -> u64 {
+            const VPL: usize = LINE_WORDS / $w;
+            const GROUP: usize = [$($j),+].len();
+            let NativeChunk { base, start, end, period, lid0, .. } = c;
+            let mut acc = [<$simd>::splat(0); 4];
+            grouped_walk!(prefetch_line, base, start, end, period, lid0, [$($j),+], |p, lid, j| {
+                let words = line(lid);
+                for v in 0..VPL {
+                    acc[(j * VPL + v) % 4] |= *(p.add(v * $w) as *const $simd) ^ words[v];
+                }
+                // At 512 bits, group 2 supplies two vectors; alternate the two pairs of chains between visits.
+                if j + 1 == GROUP {
+                    acc.rotate_left((GROUP * VPL) % 4);
+                }
+            });
+            ((acc[0] | acc[1]) | (acc[2] | acc[3])).reduce_or()
+        }
+    };
+}
+
 /// The cold path of a native verify: rescan the chunk against its phase (TODO 27).
 #[cold]
 #[inline(never)]
@@ -6531,7 +6571,7 @@ unsafe fn native_rescan(ctx: &ChunkCtx, lid0: u64, phase: crate::pattern::Phase,
 
 /// A native SimpleTest at one width, `[u64xN, N]`, and its walks module `$walks`.
 macro_rules! native_simple_impl {
-    ($fn_name:ident, $walks:ident, $test_name:literal, [$($kind:tt)*], $tf:literal) => {
+    ($fn_name:ident, $walks:ident, $test_name:literal, [$simd:ty, $w:tt], $tf:literal) => {
         /// The native SimpleTest's walks at this width, called once a chunk (`NativeChunk`). The phase's family and beat are matched once a
         /// chunk, here, and each walk is generic over the line function it gets, so each family and beat has its own function of each walk,
         /// `#[inline(never)]` with the width's target features: in one function holding every family's walk, what the walks share was kept
@@ -6543,8 +6583,15 @@ macro_rules! native_simple_impl {
             #[inline]
             #[target_feature(enable = $tf)]
             pub(super) unsafe fn write(c: NativeChunk) {
-                native_with_line!([$($kind)*], c.phase, |line| {
-                    if c.period == 0 { write_seq(c, line) } else { write_strided(c, line) }
+                native_with_line!([$simd, $w], c.phase, |line| {
+                    match c.group {
+                        2 => write_group2(c, line),
+                        4 => write_group4(c, line),
+                        8 => write_group8(c, line),
+                        16 => write_group16(c, line),
+                        _ if c.period == 0 => write_seq(c, line),
+                        _ => write_strided(c, line),
+                    }
                 })
             }
 
@@ -6555,53 +6602,57 @@ macro_rules! native_simple_impl {
                 // `header`'s line id hidden from loop strength reduction (`opaque_u64`); the family is known in each arm, so each arm keeps
                 // one of the two
                 let hide = c.phase.family == crate::pattern::Family::Header;
-                native_with_line!([$($kind)*], c.phase, |line| {
-                    if c.period != 0 {
-                        differs_strided(c, line)
-                    } else if hide {
-                        differs_seq::<_, true>(c, line)
-                    } else {
-                        differs_seq::<_, false>(c, line)
+                native_with_line!([$simd, $w], c.phase, |line| {
+                    match c.group {
+                        2 => differs_group2(c, line),
+                        4 => differs_group4(c, line),
+                        8 => differs_group8(c, line),
+                        16 => differs_group16(c, line),
+                        _ if c.period != 0 => differs_strided(c, line),
+                        _ if hide => differs_seq::<_, true>(c, line),
+                        _ => differs_seq::<_, false>(c, line),
                     }
                 })
             }
 
             #[inline(never)]
             #[target_feature(enable = $tf)]
-            unsafe fn write_seq<L: Fn(u64) -> native_line_ty!([$($kind)*])>(c: NativeChunk, line: L) {
-                native_write_seq!([$($kind)*], c, line)
+            unsafe fn write_seq<L: Fn(u64) -> native_line_ty!([$simd, $w])>(c: NativeChunk, line: L) {
+                native_write_seq!([$simd, $w], c, line)
             }
 
             #[inline(never)]
             #[target_feature(enable = $tf)]
-            unsafe fn write_strided<L: Fn(u64) -> native_line_ty!([$($kind)*])>(c: NativeChunk, line: L) {
-                native_write_strided!([$($kind)*], c, line)
+            unsafe fn write_strided<L: Fn(u64) -> native_line_ty!([$simd, $w])>(c: NativeChunk, line: L) {
+                native_write_strided!([$simd, $w], c, line)
             }
 
             /// `HIDE_LID`: the line id hidden from loop strength reduction (`opaque_u64`)
             #[inline(never)]
             #[target_feature(enable = $tf)]
-            unsafe fn differs_seq<L: Fn(u64) -> native_line_ty!([$($kind)*]), const HIDE_LID: bool>(c: NativeChunk, line: L) -> u64 {
-                native_differs_seq!([$($kind)*], c, line, HIDE_LID)
+            unsafe fn differs_seq<L: Fn(u64) -> native_line_ty!([$simd, $w]), const HIDE_LID: bool>(c: NativeChunk, line: L) -> u64 {
+                native_differs_seq!([$simd, $w], c, line, HIDE_LID)
             }
 
             #[inline(never)]
             #[target_feature(enable = $tf)]
-            unsafe fn differs_strided<L: Fn(u64) -> native_line_ty!([$($kind)*])>(c: NativeChunk, line: L) -> u64 {
-                native_differs_strided!([$($kind)*], c, line)
+            unsafe fn differs_strided<L: Fn(u64) -> native_line_ty!([$simd, $w])>(c: NativeChunk, line: L) -> u64 {
+                native_differs_strided!([$simd, $w], c, line)
             }
+
+            native_grouped_fns!(write_group2, differs_group2, [$simd, $w], $simd, $w, $tf, [0, 1]);
+            native_grouped_fns!(write_group4, differs_group4, [$simd, $w], $simd, $w, $tf, [0, 1, 2, 3]);
+            native_grouped_fns!(write_group8, differs_group8, [$simd, $w], $simd, $w, $tf, [0, 1, 2, 3, 4, 5, 6, 7]);
+            native_grouped_fns!(write_group16, differs_group16, [$simd, $w], $simd, $w, $tf, [
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+            ]);
         }
 
         /// A native SimpleTest (pattern spec v2) at this width; see the section comment.
         #[target_feature(enable = $tf)]
         unsafe fn $fn_name(
-            blocks: &[crate::runner::AllocationBlock],
-            thread_id: usize,
-            error_mode: ErrorMode,
-            timing: &TestTiming,
-            config: &TestMemoryConfig,
-            progress: Option<&TestProgress>,
-            run: NativeRun,
+            blocks: &[crate::runner::AllocationBlock], thread_id: usize, error_mode: ErrorMode, timing: &TestTiming,
+            config: &TestMemoryConfig, progress: Option<&TestProgress>, run: NativeRun,
         ) -> TestStats {
             let test_name = $test_name;
             let program = run.program;
@@ -6612,6 +6663,7 @@ macro_rules! native_simple_impl {
             let stride = config.parameter_context.as_ref().and_then(|c| c.stride_elements).unwrap_or(0);
             // TM5's strided walk's period, or 0 for the sequential walk
             let period = if stride > 0 { strided_period(stride) } else { 0 };
+            let group = config.parameter_context.as_ref().and_then(|c| c.access).map_or(1, |a| a.group_lines);
             let pinned = run.pinned;
             // A step that verifies its fill writes one image a suite cycle, so its pairs span two; a Bench pair is pinned to pair 0's P,
             // its Init's and its Verify's alike
@@ -6626,21 +6678,29 @@ macro_rules! native_simple_impl {
                 end: ctx.chunk_end,
                 lid0: lid_base + (ctx.chunk_start / LINE_WORDS) as u64,
                 period,
+                group,
                 phase: phase_of(ctx),
             };
             let write = |ctx: &ChunkCtx| $walks::write(chunk(ctx));
             run_phased_test(
-                blocks, thread_id, error_mode, timing, config, progress,
-                test_name, run.action, 1, config.skip_init, run.test_reps, run.verify_reps,
-                write, write,
+                blocks,
+                thread_id,
+                error_mode,
+                timing,
+                config,
+                progress,
+                test_name,
+                run.action,
+                1,
+                config.skip_init,
+                run.test_reps,
+                run.verify_reps,
+                write,
+                write,
                 |ctx: &ChunkCtx| -> u64 {
                     let c = chunk(ctx);
                     let seen = $walks::differs(c);
-                    if seen != 0 {
-                        native_rescan(ctx, c.lid0, c.phase, test_name, seen)
-                    } else {
-                        0
-                    }
+                    if seen != 0 { native_rescan(ctx, c.lid0, c.phase, test_name, seen) } else { 0 }
                 },
             )
         }
@@ -7123,6 +7183,31 @@ fn sequence_wrap(p: *const u64, stop: *const u64, period: usize) -> usize {
 /// `$access`; returns the differences the reads found, ORed (0 for a write). Each order's loop is a function of its own, with the width's
 /// features, taking the walk by value (TODO 99): in one function for every family and order, the loops kept their bounds, keys and at 512
 /// bits their accumulators on the stack. Each takes the access too, so a unit test's recorder runs the pass the test does (`access`).
+macro_rules! sequence_grouped {
+    ($name:ident, $op:tt, $access:ident, $simd:ty, $w:tt, $tf:literal, $kind:tt, $walk:ident, [$($j:literal),+]) => {{
+        #[target_feature(enable = $tf)]
+        #[inline(never)]
+        unsafe fn $name<A: Access>(walk: SequenceWalk, access: A) -> u64 {
+            const GROUP: usize = [$($j),+].len();
+            const VPL: usize = LINE_WORDS / $w;
+            let SequenceWalk { ptr, start, end, lid0, period, pkey, mask, .. } = walk;
+            let mask = <$simd>::splat(mask);
+            sequence_acc!(init $op, acc, ones, $simd);
+            grouped_walk!(prefetch_line, ptr, start, end, period, lid0, [$($j),+], |p, lid, j| {
+                let words = sequence_line!($w, $kind, opaque_u64(lid), pkey).map(|x| x ^ mask);
+                for v in 0..VPL {
+                    sequence_visit!($op, access, p.add(v * $w) as *mut $simd, words[v], acc[(j * VPL + v) % 4], ones);
+                }
+                if j + 1 == GROUP {
+                    sequence_acc!(rotate $op, acc, (GROUP * VPL) % 4);
+                }
+            });
+            sequence_acc!(result $op, acc)
+        }
+        $name($walk, $access)
+    }};
+}
+
 macro_rules! sequence_orders {
     ($op:tt, $access:ident, $simd:ty, $w:tt, $tf:literal, $step:tt, $lform:ident, $rform:ident, $walk:ident, $order:expr, $kind:tt) => {
         match $order {
@@ -7156,7 +7241,15 @@ macro_rules! sequence_orders {
                 unsafe fn stride<A: Access>(walk: SequenceWalk, access: A) -> u64 {
                     sequence_strided!($op, access, $simd, $w, $step, $kind, walk)
                 }
-                stride($walk, $access)
+                match $walk.group {
+                    2 => sequence_grouped!(group2, $op, $access, $simd, $w, $tf, $kind, $walk, [0, 1]),
+                    4 => sequence_grouped!(group4, $op, $access, $simd, $w, $tf, $kind, $walk, [0, 1, 2, 3]),
+                    8 => sequence_grouped!(group8, $op, $access, $simd, $w, $tf, $kind, $walk, [0, 1, 2, 3, 4, 5, 6, 7]),
+                    16 => sequence_grouped!(group16, $op, $access, $simd, $w, $tf, $kind, $walk, [
+                        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+                    ]),
+                    _ => stride($walk, $access),
+                }
             }
         }
     };
@@ -7191,6 +7284,7 @@ struct SequenceChunk {
     end: usize,
     lid0: u64,
     period: usize,
+    group: usize,
 }
 
 /// What one Mem-Sequence pass's walk takes, by value (TODO 99): its chunk, the random order's key, and the phase's key and polarity (its
@@ -7202,6 +7296,7 @@ struct SequenceWalk {
     end: usize,
     lid0: u64,
     period: usize,
+    group: usize,
     key: u64,
     pkey: u64,
     mask: u64,
@@ -7209,8 +7304,8 @@ struct SequenceWalk {
 
 impl SequenceWalk {
     fn new(c: SequenceChunk, key: u64, phase: crate::pattern::Phase) -> Self {
-        let SequenceChunk { ptr, start, end, lid0, period } = c;
-        SequenceWalk { ptr, start, end, lid0, period, key, pkey: phase.key, mask: phase.mask }
+        let SequenceChunk { ptr, start, end, lid0, period, group } = c;
+        SequenceWalk { ptr, start, end, lid0, period, group, key, pkey: phase.key, mask: phase.mask }
     }
 }
 
@@ -7269,6 +7364,7 @@ macro_rules! sequence_impl {
             // A stride of 0 (a parameter of 1 on one channel) is TM5's jump 0: in order, as SimpleTest
             let stride = config.parameter_context.as_ref().and_then(|c| c.stride_elements).unwrap_or(0);
             let period = if stride > 0 { strided_period(stride) } else { 0 };
+            let group = config.parameter_context.as_ref().and_then(|c| c.access).map_or(1, |a| a.group_lines);
             let (mut runner, extent) = crate::test_scaffolding::TestRunner::new(
                 blocks,
                 thread_id,
@@ -7291,7 +7387,7 @@ macro_rules! sequence_impl {
                     let start = spread.start(k) / std::mem::size_of::<u64>();
                     let end = start + spread.chunk() / std::mem::size_of::<u64>();
                     let lid0 = lid_base + (start / LINE_WORDS) as u64;
-                    let chunk = SequenceChunk { ptr: base, start, end, lid0, period };
+                    let chunk = SequenceChunk { ptr: base, start, end, lid0, period, group };
                     runner.check_seal(spread.start(k), spread.chunk());
                     halt_here!(runner, cycle_errors, ops(&runner));
 
@@ -9405,7 +9501,7 @@ mod random_replay_tests {
                         let (phase, lid0) = (Phase { family, key: 0x5A5A_1234_C0FF_EE00, mask, beat }, (3u64 << 37) + lid0);
                         for period in [0, strided_period(15 * 8), strided_period(4095 * 8)] {
                             let what = format!("{width} {} lid0 {lid0:#x} period {period}", phase.label());
-                            let c = super::NativeChunk { base, start, end, lid0, period, phase };
+                            let c = super::NativeChunk { base, start, end, lid0, period, group: 1, phase };
                             for i in 0..total {
                                 unsafe { *base.add(i) = UNTOUCHED };
                             }
@@ -9432,6 +9528,81 @@ mod random_replay_tests {
             }
         }
         assert_eq!(ran, widths.len() * 19 * 4 * 3);
+    }
+
+    /// TODO 126: constant groups preserve the address-derived image and detect corruption, including in overlapping chunks and when the
+    /// requested period exceeds the chunk. All families/beat profiles/polarities run at every available width; ident checks every word.
+    #[test]
+    fn native_grouped_images_overlap_and_detect_corruption() {
+        type Walks = (unsafe fn(super::NativeChunk), unsafe fn(super::NativeChunk) -> u64);
+        let mut widths: Vec<(usize, Walks)> = vec![
+            (128, (super::simple_native_128_walks::write, super::simple_native_128_walks::differs)),
+            (256, (super::simple_native_256_walks::write, super::simple_native_256_walks::differs)),
+        ];
+        if sequence_widths().contains(&512) {
+            widths.push((512, (super::simple_native_512_walks::write, super::simple_native_512_walks::differs)));
+        }
+        const GUARD: u64 = 0xA55A_F00D_CAFE_0123;
+        let (pad, lines) = (3, 64);
+        let mut memory = vec![std::simd::u64x8::splat(GUARD); pad + lines + 32 + pad];
+        let base = memory.as_mut_ptr().cast::<u64>();
+        let (start, end) = (pad * LINE_WORDS, (pad + lines) * LINE_WORDS);
+        for (width, (write, differs)) in widths {
+            for group in [2, 4, 8, 16] {
+                for period in [group, 3 * group, 128] {
+                    for phase in sequence_kinds().into_iter().flat_map(|p| [p, crate::pattern::Phase { mask: !p.mask, ..p }]) {
+                        memory.fill(std::simd::u64x8::splat(GUARD));
+                        let chunk = super::NativeChunk {
+                            base,
+                            start,
+                            end,
+                            lid0: crate::pattern::line_base(7) + pad as u64,
+                            period: period * LINE_WORDS,
+                            group,
+                            phase,
+                        };
+                        let what = format!("{width}/{period}/{group}, {phase:?}");
+                        unsafe { write(chunk) };
+                        for i in 0..memory.len() * LINE_WORDS {
+                            let want = if (start..end).contains(&i) {
+                                phase.line(chunk.lid0 + ((i - start) / LINE_WORDS) as u64)[(i - start) % LINE_WORDS]
+                            } else {
+                                GUARD
+                            };
+                            assert_eq!(unsafe { *base.add(i) }, want, "{what}, word {i}");
+                        }
+                        assert_eq!(unsafe { differs(chunk) }, 0, "{what}, clean");
+                        let faults: Vec<_> = if phase.family == crate::pattern::Family::Ident {
+                            (start..end).collect()
+                        } else {
+                            (0..lines).map(|line| start + line * LINE_WORDS + line % LINE_WORDS).collect()
+                        };
+                        for word in faults {
+                            let flip = 1u64 << (word % 64);
+                            unsafe { *base.add(word) ^= flip };
+                            assert_eq!(unsafe { differs(chunk) }, flip, "{what}, word {word}");
+                            unsafe { *base.add(word) ^= flip };
+                        }
+                        // Equal differences on two different lanes must not cancel in the reduction.
+                        unsafe {
+                            *base.add(start) ^= 1 << 31;
+                            *base.add(end - 1) ^= 1 << 31;
+                        }
+                        assert_eq!(unsafe { differs(chunk) }, 1 << 31, "{what}, two errors");
+                        unsafe { write(chunk) };
+                        let overlap = super::NativeChunk {
+                            start: start + 32 * LINE_WORDS,
+                            end: end + 32 * LINE_WORDS,
+                            lid0: chunk.lid0 + 32,
+                            ..chunk
+                        };
+                        unsafe { write(overlap) };
+                        assert_eq!(unsafe { differs(chunk) }, 0, "{what}, overlapping write");
+                        assert_eq!(unsafe { differs(overlap) }, 0, "{what}, overlapping verify");
+                    }
+                }
+            }
+        }
     }
 
     /// TODO 89: the strided accumulate sees a bad word wherever its walk passes, at any stride and remainder; the rescans count each bad
@@ -9702,7 +9873,7 @@ mod random_replay_tests {
         use crate::sequence::Order;
         #[target_feature(enable = "avx2,avx,fma,bmi1,bmi2")]
         unsafe fn pass(op: u8, ptr: *mut u64, words: usize, order: Order, key: u64, phase: crate::pattern::Phase) -> u64 {
-            let chunk = super::SequenceChunk { ptr, start: 0, end: words, lid0: 0, period: super::strided_period(15 * 8) };
+            let chunk = super::SequenceChunk { ptr, start: 0, end: words, lid0: 0, period: super::strided_period(15 * 8), group: 1 };
             match op {
                 0 => super::sequence_write_256(chunk, order, key, phase, super::Direct),
                 1 => super::sequence_read_256(chunk, order, key, phase, super::Direct),
@@ -9837,6 +10008,7 @@ mod random_replay_tests {
                                 end: (pad + lines) * LINE_WORDS,
                                 lid0: lid_base + pad as u64,
                                 period: strided_period(stride),
+                                group: 1,
                             };
                             let what = format!("{width} bits, {} {order:?} by {}", phase.label(), chunk.period);
                             // The first word that differs from the image of `p`: its index, what it holds, what it should
@@ -9903,6 +10075,7 @@ mod random_replay_tests {
                         end: (pad + lines) * LINE_WORDS,
                         lid0: lid_base + pad as u64,
                         period: strided_period(stride),
+                        group: 1,
                     };
                     let period_lines = chunk.period / LINE_WORDS;
                     let visits = sequence_visits(order, lines, period_lines, 77);
@@ -10035,6 +10208,7 @@ mod random_replay_tests {
                 end: (pad + lines) * LINE_WORDS,
                 lid0: crate::pattern::line_base(6) + pad as u64,
                 period: 0,
+                group: 1,
             };
             for phase in sequence_kinds() {
                 for width in sequence_widths() {
@@ -10066,7 +10240,7 @@ mod random_replay_tests {
             let mut mem = vec![std::simd::u64x8::splat(0); 2 * pad + lines];
             let ptr = mem.as_mut_ptr() as *mut u64;
             let (start, end, period) = (pad * LINE_WORDS, (pad + lines) * LINE_WORDS, period_lines * LINE_WORDS);
-            let chunk = super::SequenceChunk { ptr, start, end, lid0: crate::pattern::line_base(7) + pad as u64, period };
+            let chunk = super::SequenceChunk { ptr, start, end, lid0: crate::pattern::line_base(7) + pad as u64, period, group: 1 };
             // The first loop's lines: those whose line `ahead` on is in the chunk
             let ahead = strided_lookahead(start, end, period);
             let first_loop = (0..lines).filter(|line| line * LINE_WORDS + ahead < lines * LINE_WORDS).count();
@@ -10079,6 +10253,47 @@ mod random_replay_tests {
                 for width in sequence_widths() {
                     let what = format!("{width} bits, {} by {period_lines} lines, {lines} lines", phase.label());
                     check_sequence_visits(width, chunk, Order::Stride, phase, |_| tm5.clone(), &what);
+                }
+            }
+        }
+    }
+
+    /// TODO 126: grouped Sequence reads, writes and moving inversions use exactly the requested visits. The independent reference sorts
+    /// all line numbers, rather than reproducing the kernel's pointer loops. Corruption is checked through both read-bearing operations.
+    #[test]
+    fn sequence_grouped_order_images_and_detection() {
+        use crate::sequence::Order;
+        for group in [2, 4, 8, 16] {
+            for (lines, period) in [(64, group), (192, 3 * group), (192, 512)] {
+                let pad = 3;
+                let guard = std::simd::u64x8::splat(0xA55A_0123_F00D_5678);
+                let mut memory = vec![guard; pad + lines + pad];
+                let ptr = memory.as_mut_ptr().cast::<u64>();
+                let chunk = super::SequenceChunk {
+                    ptr,
+                    start: pad * LINE_WORDS,
+                    end: (pad + lines) * LINE_WORDS,
+                    lid0: crate::pattern::line_base(5) + pad as u64,
+                    period: period * LINE_WORDS,
+                    group,
+                };
+                let mut order: Vec<_> = (0..lines).collect();
+                order.sort_unstable_by_key(|&line| (std::cmp::Reverse((line % period) / group), line / period, line % group));
+                for phase in sequence_kinds().into_iter().flat_map(|p| [p, crate::pattern::Phase { mask: !p.mask, ..p }]) {
+                    for width in sequence_widths() {
+                        let what = format!("{width}/{lines}/{period}/{group}, {phase:?}");
+                        check_sequence_visits(width, chunk, Order::Stride, phase, |_| order.clone(), &what);
+                        for op in [1, 2] {
+                            sequence_walk(width, 0, chunk, Order::Stride, 42, phase);
+                            // One bit per vector position within a group; spread the faults over the entire chunk.
+                            for word in (chunk.start..chunk.end).step_by(width / 64) {
+                                unsafe { *ptr.add(word) ^= 1 << (word % 64) };
+                            }
+                            let want = (chunk.start..chunk.end).step_by(width / 64).fold(0, |bits, word| bits | (1 << (word % 64)));
+                            assert_eq!(sequence_walk(width, op, chunk, Order::Stride, 42, phase), want, "{what}, op {op}");
+                        }
+                        assert!(memory[..pad].iter().chain(&memory[pad + lines..]).all(|&v| v == guard), "{what}, guards");
+                    }
                 }
             }
         }

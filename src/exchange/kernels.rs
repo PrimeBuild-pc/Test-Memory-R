@@ -215,7 +215,7 @@ macro_rules! exchange_kernels {
             #[inline(never)]
             #[target_feature(enable = $tf)]
             unsafe fn fill_cached<L: Fn(u64) -> Line>(ptr: *mut u64, words: usize, phase: Phase, line: L) {
-                native_write_seq!([$simd, $w], NativeChunk { base: ptr, start: 0, end: words, lid0: 0, period: 0, phase }, line)
+                native_write_seq!([$simd, $w], NativeChunk { base: ptr, start: 0, end: words, lid0: 0, period: 0, group: 1, phase }, line)
             }
 
             #[inline(never)]

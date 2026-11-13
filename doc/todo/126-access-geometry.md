@@ -24,7 +24,8 @@ not proof of hitting a specific channel.
   fixture and ordinary missing-section compatibility; neither remains a prerequisite.
 - The owner requested a hardware-stress rationale and assessment of larger groups before implementation. The proposal now
   includes TM5's stated intention (one DIMM before the next), conditional concentration/distribution effects, and G=2/4/8/16.
-  This is an expanded assessment, not approval of every candidate as a runtime setting.
+  On 2026-11-13 the owner approved evaluating G=1/2/4/8, with 16 as an additional candidate, and starting implementation on
+  a separate branch. Odd groups remain deferred.
 
 ## Full proposal and research
 
@@ -37,7 +38,38 @@ not proof of hitting a specific channel.
   commit `8675f6c` that found the code-0 chunk-doubling regression (independently verified, then fixed by reverting the floor
   rather than reordering it — see commit `3517ed7`).
 
-## Open questions before building
+## Implementation experiment, 2026-11-13
+
+Branch: `experiment/access-geometry`, based on `57369c4`. The baseline was rebuilt before code changes, using the same
+compiler/SDK, and retained under `target/access-geometry/baseline*`.
+
+- `d9981d3`: per-test explicit period and group-1 plumbing; 575 tests passed, six hardware-dependent skips, quick CI clean.
+  `channels=` still recalculates the legacy `parameter` path, but never changes an explicit period.
+- Grouped native SimpleTest kernels at 128/256/512; Mem-Sequence's stride passes at its existing 256/512 widths.
+  Dispatch is outside the memory loops. Constant offsets share one traversal macro. No new pattern generator, physical
+  mapping, default test-program change, or TM5-import geometry change.
+- G=1/2/4/8/16 accepted on the experiment branch; G16 labeled experimental. P must be positive, at least G, and divisible
+  by G. G>1 with legacy patterns fails validation, including after CLI overrides. A Sequence with explicit geometry must
+  actually contain a stride pass.
+- Four independent error accumulators. Group-2 at 512 bits rotates the two pairs between visits. A failed reduction still
+  uses the existing rescan/error/halt path.
+- Prefetch remains one per visited line, up to 128 visited lines ahead, rounded to a complete group and limited by the
+  shortest offset pass. Empty offset passes are skipped when the period exceeds the chunk. The plan explains when no
+  period hop fits; it does not claim a hardware destination.
+- Plan notes and results retain the requested geometry. Example configs compare all six shapes, in both test types, with
+  equal work within each type; a reversed-order version and a baseline-compatible group-1 config are supplied.
+
+The isolated AVX2 ident probe compares constant bounds, explicit expansion, and a runtime group of two-line tiles. Its
+inner loops have no stack accesses, but counts are not timings. Explicit G16 expands to roughly four times G4's instructions;
+the compiler leaves a loop in the constant-bound G16 alternative. Full data and commands:
+[`research/access_geometry/README.md`](../../research/access_geometry/README.md).
+
+Tests exercise the actual kernels: complete recorded visit order, every pattern family/beat profile/polarity, corruption
+and non-cancelling differences, guard words, overlapping writes, periods above chunk length, and grouped read/write/invert
+passes. Harness tests extend seal restoration and error-count/halt checks to grouped walks. SIMD execution is limited to
+the host's supported widths; compilation and post-LTO inspection cover all emitted widths.
+
+## Gates for accepting the experiment
 
 1. Macro cost: compare constant-offset expansion against a bounded runtime/microtile candidate at one width. Macros keep the
    source shared but may emit specialized code across family/beat/operation/group/ISA. Auto dispatches the three real widths
@@ -51,5 +83,6 @@ not proof of hitting a specific channel.
 
 ## Next
 
-Pick up after the current round (117, 119, 122). Review the expanded hardware rationale and one-width implementation sketch,
-then run the bounded kernel experiment before selecting the first grouped implementation. Importer work is settled.
+Complete the release assembly/spill review and full local CI, retain the candidate binary, then have the owner run the
+comparison kit. Hardware throughput and detection results determine whether the expanded group set should merge or be
+reshaped. No live TMR run is authorized as part of these development checks; importer work is settled.

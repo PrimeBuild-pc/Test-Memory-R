@@ -7,6 +7,44 @@ All per-test parameters are stored in `TestParameterContext` (`src/config.rs`). 
 ### `raw_parameter: u32`
 The original TM5 parameter value, preserved for debugging and display. Not directly consumed by test logic — it's the input that gets interpreted into the typed fields below.
 
+### Explicit access geometry: `period_lines`, `group_lines` (TODO 126)
+
+Per-test JSON fields for native `Mem-SimpleV2-128/-256/-512/-Auto` and `Mem-Sequence`:
+
+| Field | Meaning | Accepted values |
+|---|---|---|
+| `period_lines` | Distance between visit starts, in 64-byte lines | Positive integer; at least the group size and divisible by it |
+| `group_lines` | Consecutive complete lines accessed per visit | 1 (default), 2, 4, 8; 16 is experimental |
+
+For example, `"period_lines": 512, "group_lines": 4` visits 256 B at a time, stepping 32 KiB between visit starts.
+Other offset passes cover the remaining lines. Each sweep checks the entire chunk exactly once; it does not sample memory.
+The offset passes run from the highest group offset downwards, while lines within a group run upwards.
+
+These are software access shapes, independent of `channels`, DDR type, transfer width and SIMD width. They do not select a
+hardware channel or configure interleaving. Compare several shapes over the same allocation:
+
+| P / G | Shape | Why try it |
+|---|---|---|
+| 512 / 1 | 64 B per visit, 32 KiB between starts | Repeatedly visits the same offset in successive 32 KiB intervals |
+| 513 / 1 | 64 B per visit, 32,832 B between starts | Changes the low address bits between visits |
+| 512 / 2 | 128 B per visit, 32 KiB between starts | Adds the adjacent line before each jump |
+| 512 / 4 or 8 | 256 or 512 B per visit, 32 KiB between starts | Larger local runs between jumps |
+| 512 / 16 | 1 KiB per visit, 32 KiB between starts | Experimental larger local run; measure its cost |
+
+These may concentrate or distribute requests differently under different mappings. None guarantees either effect on a
+particular channel. They also change prefetch and cache behavior; stronger error detection must be established on hardware.
+
+Use `period_lines` or the existing TM5-style `parameter`, never both. `group_lines` requires `period_lines`. Mem-Sequence must
+have at least one `stride` pass; its forward/reverse/random passes keep their own order. Groups above 1 require native patterns,
+including after CLI overrides: a legacy numbered-pattern override is rejected. No global geometry override is added.
+
+If the period is at least the chunk length, every offset pass contains one visit. Coverage remains complete, but no period hop
+occurs; the plan reports this for the smallest resolved chunks. It also prints bytes per visit, bytes between starts and the
+experimental group-16 marker. Saved results retain the requested geometry. Default plans and TM5 imports remain group 1.
+
+See [the comparison kit](../research/access_geometry/README.md) and
+[the design and coverage proof](access_geometry_proposal_2026-11-12.md).
+
 ### `stride_cachelines: Option<usize>`
 **Used by:** SimpleTest (`Mem-SimpleV2-128/-256/-512/-Auto`, every width; `"parameter"` sets it for each)
 
@@ -14,7 +52,7 @@ The jump in cache lines (64-byte units) after each line the test writes or reads
 
 - **Formula:** `channels × parameter - 1` (from TM5 `JumpStep = BlkSize × (Channels × Parameter - 1)`)
 - **Example:** channels=2, parameter=8 → stride = 15 cache lines
-- **The walk** (TODO 93, TM5's `mtests0.asm` ~336-394): each step writes or reads one whole 64 B line, then jumps the stride, so the period is `stride + 1` lines (`64 × channels × parameter` bytes). Each line of a period starts an interleave pass, the last line first, and a pass steps a period at a time to the chunk's end, so every line is touched once per pass over the chunk. Reads walk the same way. The image is the sequential test's (strided mode 2 writes mode 20's lines, at every width). Each step prefetches the line the walk reaches 128 steps on (TM5 prefetches 8 periods on, which can land outside the chunk), so requests stay queued while every access still opens a new row. Measurements: `doc/todo/93-strided-simpletest-lines.md`
+- **The walk** (TODO 93, TM5's `mtests0.asm` ~336-394): each step writes or reads one whole 64 B line, then jumps the stride, so the period is `stride + 1` lines (`64 × channels × parameter` bytes). Each line of a period starts an offset pass, the last line first, and a pass steps a period at a time to the chunk's end, so every line is touched once per sweep of the chunk. Reads walk the same way. The image is the sequential test's (strided mode 2 writes mode 20's lines, at every width). Prefetch looks up to 128 visited lines ahead, limited by the shortest offset pass. The walk does not establish which channel, bank or row a request reaches. Measurements: `doc/todo/93-strided-simpletest-lines.md`
 - **Source:** TM5 `.cfg` parameter field + channels config, or direct value in JSON config
 - **Display:** Shown in Test Configuration table as `Stride(15cl/960B)`
 
@@ -281,14 +319,14 @@ spaces or commas; `write_read_cycles` is how many times the sequence runs a chun
 | Where | Field | Meaning |
 |---|---|---|
 | test entry | `"sequence": "W 2R RW 2R@random"` | The passes, in order. Unset: `W 5R` (the built-in suite's: `W 2R RW 2R@random`, twice) |
-| test entry | `"order": "forward"` | The order of the steps that name none: `forward`, `reverse`, `random` (every line once, scrambled anew each pass) or `stride` (TM5's walk, from the entry's `parameter`, as SimpleTest's; a stride of 0 is in order) |
-| command line | `sequence=W,4R,RW@random,R`, `order=random` | The same, on every Mem-Sequence step; `stride` needs a config entry's `parameter` |
+| test entry | `"order": "forward"` | The order of the steps that name none: `forward`, `reverse`, `random` (every line once, scrambled anew each pass) or `stride` (from `parameter` or explicit `period_lines`/`group_lines`; a stride of 0 is in order) |
+| command line | `sequence=W,4R,RW@random,R`, `order=random` | The same, on every Mem-Sequence step; `stride` needs a config entry's `parameter` or `period_lines` |
 
 The rounds come in pairs, as SimpleTest's: a `W` writes the next round, and an `RW` the inverse of
 what it read, which is the next round when it read a pattern's P (so no `W` rewrites what an `RW`
 left). A sequence whose rounds a cycle are odd runs once more where that makes them even, with a
 warning. Checked when the config loads: a sequence that never reads, a step of 0 or more than 64
-passes, and `@stride` with no `parameter` are refused, as is a numbered `pattern_mode`
+passes, and `@stride` with neither `parameter` nor `period_lines` are refused, as is a numbered legacy `pattern_mode`
 (`pattern-mode=` with one leaves Mem-Sequence's program). `WR` isn't a step: a read straight after
 a write of the same line is answered by the cache. A sequence that starts with a read reads a fill.
 A write no read checks (`2W R`, or a write last) is allowed, as write stress, with a warning. It runs

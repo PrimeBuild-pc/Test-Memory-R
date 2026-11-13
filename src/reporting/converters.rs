@@ -206,6 +206,15 @@ pub fn create_test_configuration_report_v2(
 
     let tests = firsts.iter().enumerate().map(|(i, &(test_def, steps))| {
         let config = &test_def.config;
+        let access = config.parameter_context.as_ref().and_then(|ctx| ctx.access);
+        if let Some(access) = access {
+            let experimental = if access.group_lines == 16 { " (group 16 is experimental)" } else { "" };
+            notes.push(format!(
+                "ℹ  Test {} Access: {} B per visit ({} lines), {} B between visit starts ({} lines){experimental}. \
+                 Every line is checked; this describes the software walk, not a hardware channel.",
+                i + 1, access.group_lines * 64, access.group_lines, access.period_lines * 64, access.period_lines,
+            ));
+        }
 
         let timing = match (&config.timing.cycles, &config.timing.duration_secs) {
             (Some(c), Some(d)) => format!("{}cycles/{}s", c, d),
@@ -251,6 +260,12 @@ pub fn create_test_configuration_report_v2(
             };
             let resolution = sized.resolve_chunk(name, lo);
             let spread = ChunkSpread::new(lo, resolution.resolved);
+            if access.is_some_and(|a| a.period_lines >= spread.chunk() / 64) {
+                notes.push(format!(
+                    "ℹ  Test {}: on the smallest chunks ({}), each offset pass has one visit; no period hop fits. \
+                     Full coverage is retained.", i + 1, size(spread.chunk()),
+                ));
+            }
             let overlap = if spread.overlap() > 0 { format!(", {} overlap", size(spread.overlap())) } else { String::new() };
             let source = match &config.chunk_mode {
                 ChunkMode::Tm5Block { divisor: 1, .. } => " (.cfg window)".to_string(),
@@ -739,6 +754,27 @@ mod tests {
 
     const MIB: usize = 1 << 20;
     const GIB: usize = 1 << 30;
+
+    #[test]
+    fn access_plan_explains_the_walk_and_short_chunks() {
+        let cache = crate::tests::get_cache_info();
+        let suite = crate::runner::create_test_definitions(cache);
+        let mut def = suite.iter().find(|d| d.actual_name == "Mem-Sequence").unwrap().clone();
+        def.config.chunk_mode = crate::tests::ChunkMode::Whole;
+        let notes = |def: crate::runner::TestDefinition| {
+            let sequence = PlanSequence { order: None, seal: None, seal_off_reason: "seal=off", tm5: false, width: None };
+            create_test_configuration_report_v2(&[def], &Default::default(), cache, &[4096], None, &sequence).notes.join("\n")
+        };
+        assert!(!notes(def.clone()).contains("per visit"));
+        let ctx = def.config.parameter_context.get_or_insert_default();
+        ctx.access = Some(crate::config::AccessGeometry::new(512, 2).unwrap());
+        let text = notes(def.clone());
+        assert!(text.contains("128 B per visit (2 lines), 32768 B between visit starts (512 lines)"));
+        assert!(text.contains("no period hop fits") && text.contains("Full coverage is retained"));
+        def.config.parameter_context.as_mut().unwrap().access = Some(crate::config::AccessGeometry::new(32, 16).unwrap());
+        let text = notes(def);
+        assert!(text.contains("group 16 is experimental") && !text.contains("no period hop fits"));
+    }
 
     /// TODO 117: a loaded latency test's settings show as its step's parameter, each one given, its window in the largest unit that holds
     /// it whole; its defaults, none
