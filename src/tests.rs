@@ -4034,8 +4034,10 @@ macro_rules! strided_walk {
         let ahead = strided_lookahead(start, end, period);
         let stop = base.wrapping_add(end);
         // Each pass's first line, from the last line of the first period down
-        let mut first = base.wrapping_add(start + period);
-        for _ in 0..period / LINE_WORDS {
+        // Empty offset passes above the chunk do no work. Skip them, retaining the original period and prefetch targets.
+        let offsets = period.min(end - start);
+        let mut first = base.wrapping_add(start + offsets);
+        for _ in 0..offsets / LINE_WORDS {
             first = first.wrapping_sub(LINE_WORDS);
             let mut $p = first;
             // While the line `ahead` words on is in the chunk, `strided_ahead` takes it; from there it steps back `strided_wrap` words from
@@ -7077,7 +7079,7 @@ macro_rules! sequence_strided {
         let ahead = strided_lookahead(start, end, period);
         let (bottom, stop, lid_step) = (ptr.wrapping_add(start), ptr.add(end), (period / LINE_WORDS) as u64);
         // The first pass's first line: the last of the chunk's first period
-        let mut p = bottom.wrapping_add(period - LINE_WORDS);
+        let mut p = bottom.wrapping_add(period.min(end - start) - LINE_WORDS);
         loop {
             // `strided_wrap` in bytes, from the pointers: a pass can be a line or two, so its start keeps no more than the walk does
             let wrap = sequence_wrap(p, stop, period);

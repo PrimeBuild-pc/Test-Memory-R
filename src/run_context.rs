@@ -501,6 +501,9 @@ pub struct TestConfigSnapshot {
     /// `-` for a test with none. Absent in results written before it.
     #[serde(default)]
     pub parameter: Option<String>,
+    /// Explicit period/group in 64-byte lines; absent for legacy inputs and in older results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<crate::config::AccessGeometry>,
     /// Stage-2 per-test working set.
     pub extent_mode: String,
     /// Stage-3 iteration unit within the extent.
@@ -751,6 +754,7 @@ impl TestConfigSnapshot {
             label: def.step_label(tm5),
             function: def.actual_name.to_string(),
             parameter: Some(crate::reporting::converters::format_parameter_context(&def.config.parameter_context)),
+            access: def.config.parameter_context.as_ref().and_then(|c| c.access),
             extent_mode: formatter.format_extent_mode_with_size(&def.config.extent_mode, cache_info, thread_count),
             chunk_mode: formatter.format_chunk_mode_with_size(&def.config.chunk_mode, cache_info, thread_count),
             verify_reps: def.config.verify_reps,
@@ -1579,6 +1583,15 @@ mod tests {
         json.as_object_mut().unwrap().remove("parameter");
         let older: TestConfigSnapshot = serde_json::from_value(json).unwrap();
         assert_eq!(older.parameter, None);
+        assert_eq!(older.access, None);
+
+        let mut explicit = def("Mem-Sequence");
+        let access = crate::config::AccessGeometry::new(513, 1).unwrap();
+        explicit.config.parameter_context = Some(crate::config::TestParameterContext { access: Some(access), ..Default::default() });
+        let snapshot = capture(&explicit);
+        assert_eq!(snapshot.parameter.as_deref(), Some("Access(64B/visit,32832B/start)"));
+        let roundtrip: TestConfigSnapshot = serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        assert_eq!(roundtrip.access, Some(access));
     }
 
     /// TODO 72: a test whose parameter differs, as a stride on other channels does, isn't like for like: a setting of it that differs, by

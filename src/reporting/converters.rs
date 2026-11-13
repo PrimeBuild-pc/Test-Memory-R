@@ -20,6 +20,9 @@ fn whole_unit(ms: u64) -> String {
 pub(crate) fn format_parameter_context(ctx: &Option<crate::config::TestParameterContext>) -> String {
     match ctx {
         Some(c) => {
+            if let Some(access) = c.access {
+                return format!("Access({}B/visit,{}B/start)", access.group_lines * 64, access.period_lines * 64);
+            }
             if let Some(mirror) = c.mirror {
                 return mirror.to_string();
             }
