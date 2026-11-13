@@ -65,6 +65,29 @@ uses `candidate.*`. `audit.py FILE.s` examines grouped loops with no length cuto
 compares existing SimpleTest, Sequence and bandwidth memory-loop instructions/constants independently of chunk setup.
 These inspect innermost memory loops; they do not establish that the enclosing visit/pass loops are free of stack traffic.
 
+## Final development validation, 2026-11-13
+
+Code commit `72ab3b8`, same compiler/SDK as the baseline:
+
+- Full `python tools/ci_local.py` passed: formatting, build-tool checks, all three Clippy runs, release build, 581 tests
+  (six existing opt-in tests skipped), and `cargo audit`.
+- All 456 grouped memory loops use the intended SIMD width and contain no calls. None has a SIMD spill or a spill/reload
+  round trip. 232 have no stack accesses; 224 reload loop-invariant GPR values. The longest is 193 instructions. Those
+  remaining reloads and enclosing loop costs still need hardware timing.
+- `.text`: 7,124,126 bytes, 5.6% above baseline; full expansion had added 51.9%. The grouped implementation adds 228
+  specialized functions across patterns/operations/widths, shared across G=2/4/8/16, rather than 912 functions for four
+  separate group kernels.
+- Existing loop comparison: 78 name groups match instruction/constant fingerprints; 24 strided name groups differ.
+  Sequential/reverse/random and bandwidth loops match. Strided code is not claimed byte-identical, which is why the
+  baseline-compatible G1 A/B remains part of the kit.
+- The normal CI release executable's entire `.text` section matches the assembly-audited executable byte for byte.
+  `candidate.exe`/`candidate.pdb` are the normal release copies; `candidate.build.json` retains the original build manifest
+  (whose artifact keys are `tmr.exe`/`tmr.pdb`). `validation.json` records both executable hashes and the common code hash.
+  The standard archive is `../builds/72ab3b8b87e2-165d7eeea894ded3/`.
+
+No live TMR run or hardware speed/detection claim is part of this validation. The branch remains an experiment pending
+the owner's comparison runs.
+
 ## Hardware comparison kit
 
 The files in `configs/` are ordinary TMR JSON configs:

@@ -73,20 +73,25 @@ and non-cancelling differences, guard words, overlapping writes, periods above c
 passes. Harness tests extend seal restoration and error-count/halt checks to grouped walks. SIMD execution is limited to
 the host's supported widths; compilation and post-LTO inspection cover all emitted widths.
 
-## Gates for accepting the experiment
+## Validation complete; hardware gate remains
 
-1. Macro cost: compare constant-offset expansion against a bounded runtime/microtile candidate at one width. Macros keep the
-   source shared but may emit specialized code across family/beat/operation/group/ISA. Auto dispatches the three real widths
-   (128/256/512); it is not a fourth width. A separate kernel per G is an implementation choice, not a consequence of the rule.
-2. Grouped prefetch lookahead and speed must be measured (`bench_ab.py`, `hot_loop_spills.py`), not assumed free.
-3. Whether `period_lines`/`group_lines` reuse the group-1 hot path unchanged for the direct-period case (should be yes; confirm
-   via post-LTO asm per this repo's asm-check rule).
-4. Select the shipped group set after the bounded experiment. G=2/4/8 are the primary candidates; G=16 differs under coarser
-   interleave models. Keep P divisible by G. Defer odd G: different per-visit imbalance is possible, but adds tail/period cases
-   without evidence of a required error-detection benefit.
+Code commit `72ab3b8`: full local CI passed, including 581 tests (six opt-in skips), all Clippy variants, release build and
+dependency audit. The 364 offline coverage/model cases also passed. The release is archived at
+`../builds/72ab3b8b87e2-165d7eeea894ded3/` from the app root, and copied to `target/access-geometry/candidate.exe`.
+
+Final post-LTO audit: 456 grouped memory loops, maximum 193 instructions, correct widths, no calls, no SIMD spills or
+spill/reload round trips. 224 loops still reload invariant GPR values; outer visit/pass loops have their own control cost.
+`.text` is 7,124,126 bytes versus baseline's 6,744,350 (+5.6%). Groups share 228 added specialized functions, rather than
+912 for separate G kernels. The normal release's entire `.text` matches the assembly-audited build.
+
+The baseline comparison confirms 78 existing loop-name groups unchanged; 24 strided groups differ in generated code.
+The existing G1 paths are retained, but no claim of identical G1 performance is made. Results, scripts, exact counts and
+commands are in `research/access_geometry/README.md`; complete local audits/manifest are under `target/access-geometry/`.
+
+The owner still needs to measure G1 regressions, grouped prefetch/control cost, and error detection on hardware. This is
+why G16 remains experimental and why the branch has not merged. P stays divisible by G; odd groups remain deferred.
 
 ## Next
 
-Complete the release assembly/spill review and full local CI, retain the candidate binary, then have the owner run the
-comparison kit. Hardware throughput and detection results determine whether the expanded group set should merge or be
-reshaped. No live TMR run is authorized as part of these development checks; importer work is settled.
+The owner runs the baseline-compatible A/B and combined/reversed geometry configs. Use those results to choose the shipped
+group set and assess throughput/detection before merging `experiment/access-geometry`. Importer work is settled.
