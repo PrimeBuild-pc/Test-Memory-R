@@ -79,12 +79,19 @@ Code commit `72ab3b8`: full local CI passed, including 581 tests (six opt-in ski
 dependency audit. The 364 offline coverage/model cases also passed. The release is archived at
 `../builds/72ab3b8b87e2-165d7eeea894ded3/` from the app root, and copied to `target/access-geometry/candidate.exe`.
 
-Final post-LTO audit: 456 grouped memory loops, maximum 193 instructions, correct widths, no calls, no SIMD spills or
-spill/reload round trips. 224 loops still reload invariant GPR values; outer visit/pass loops have their own control cost.
+Final post-LTO memory-body audit: 456 grouped ranges, maximum 193 instructions, correct widths, no calls, no SIMD spills or
+spill/reload round trips within those bodies. 224 reload invariant GPR values. The original audit omitted control-only
+ranges: the standard tool reports 229 GPR round-trip ranges versus baseline's 2, all 227 new flags in grouped traversal.
+The corrected audit reports those alongside the memory bodies; these kernels are not spill-free. Group-control work
+executes once per G visited lines, with offset-pass setup once per pass. It is a real cost requiring timing, not a
+whole-program per-line count. Full reconciliation and bounds:
+[`review_followup_2026-11-13.md`](../../research/access_geometry/review_followup_2026-11-13.md).
 `.text` is 7,124,126 bytes versus baseline's 6,744,350 (+5.6%). Groups share 228 added specialized functions, rather than
 912 for separate G kernels. The normal release's entire `.text` matches the assembly-audited build.
 
-The baseline comparison confirms 78 existing loop-name groups unchanged; 24 strided groups differ in generated code.
+The baseline comparison confirms 78 selected memory-loop name groups unchanged; 24 strided groups differ in generated code.
+Whole-function fingerprints instead report 230 changed name groups and 24 added: the narrower loop figures do not
+describe all code-generation changes.
 The existing G1 paths are retained, but no claim of identical G1 performance is made. Results, scripts, exact counts and
 commands are in `research/access_geometry/README.md`; complete local audits/manifest are under `target/access-geometry/`.
 
@@ -96,9 +103,15 @@ why G16 remains experimental and why the branch has not merged. P stays divisibl
 The owner's requested local before/after check is complete (2026-11-13): 16 measured runs and two pilots on the dev VM,
 fixed 8 GiB / four workers / 256 bits / 2 MiB pages, all passed with zero errors. The first set was noisy, including
 observed concurrent CPU activity; a longer ABBA follow-up measured +0.87% for existing strided SimpleTest and +0.12%
-for strided Sequence. No repeatable G1 regression was established. Keep the compact implementation for physical testing;
+for strided Sequence, while same-build differences reached 5.61%. No repeatable G1 regression was established. Every
+block used the same ABBA slot assignment; future comparisons should alternate ABBA/BAAB. The unsupported 76% CPU
+observation has been withdrawn from the report; its retained sample shows 11%. Keep the compact implementation for physical testing;
 these runs do not establish sub-percent equivalence or grouped-loop cost. Full unfiltered results and per-run CSV:
 [`research/access_geometry/local_comparison_2026-11-13.md`](../../research/access_geometry/local_comparison_2026-11-13.md).
 
-The owner runs the baseline-compatible A/B and combined/reversed geometry configs. Use those results to choose the shipped
+Review follow-up: both combined geometry configs now passed end-to-end locally on the retained release, 12 steps each,
+with G2/G4/G8/G16 in both test types, 4 GiB/four workers/256 bits/2 MiB pages and zero errors. Saved geometry, cycles and
+processed work were checked. These are functional checks, not isolated spill-cost measurements or detection comparisons.
+
+The owner runs the baseline-compatible A/B and combined/reversed geometry configs on physical machines. Use those results to choose the shipped
 group set and assess throughput/detection before merging `experiment/access-geometry`. Importer work is settled.

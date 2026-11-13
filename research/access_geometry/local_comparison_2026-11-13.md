@@ -18,6 +18,8 @@ This compares the same G1 workloads across builds. It does not compare G1 agains
   Its reference lasted only about 0.14 seconds, so the main config adds sequential controls and uses 16 reference sweeps.
 - Three ABBA blocks, six runs per build, using `configs/local-regression.json`. Same configuration and data inputs
   for each build; physical placement can change between allocations. Each run has a 180-second cap.
+- All blocks, including the longer follow-up, put the baseline in the outer slots and the candidate in the inner
+  slots. ABBA cancels linear drift, but repeated use of this order does not balance a repeatable slot-dependent effect.
 - Throughput uses each test's internal time, excluding setup/seal work. Absolute rates and within-run ratios to the
   unchanged bandwidth reference are retained. Normalization is a cross-check: sequential and strided walks need not
   respond identically to host contention.
@@ -68,9 +70,10 @@ The blocks disagree:
 | Sequence, forward | +0.37% | -14.13% | -1.47% |
 | Unchanged bandwidth reference | +0.05% | -6.21% | -0.72% |
 
-During block 2 a concurrent Claude process was observed using about 76% of one logical CPU, then 11% on a subsequent
-sample. This establishes a local contention confound, not the cause of every slow step. Later CPU-time samples showed
-that process largely idle, but step-to-step variation continued. Both binaries' sequential controls varied substantially:
+During block 2 the retained `activity.jsonl` sample records a concurrent Claude process using 11% of one logical CPU.
+The earlier report of about 76% has no retained measurement and is withdrawn. The saved sample establishes concurrent
+activity, not the cause of the slow block. Later CPU-time samples showed that process largely idle, but step-to-step
+variation continued. Both binaries' sequential controls varied substantially:
 the same candidate's sequential SimpleTest changed by +11.88% between consecutive runs, and the same baseline changed
 by -9.65% between the first and last runs of block 3. The middle block is retained, not silently discarded.
 
@@ -111,9 +114,14 @@ Layout and dispatch can still affect performance, which is why timings were need
 
 The scope is limited: one VM, four workers, 256-bit SIMD, a 32-bit switching profile, and the existing G1/sequential
 paths. The original noisy set does not justify a clean performance claim, and one longer block cannot establish
-sub-percent equivalence. Other SIMD widths, AMD CPUs, grouped-loop overhead and error-finding effectiveness remain
+sub-percent equivalence. The fixed arm-to-slot order is another limitation: subsequent comparisons should alternate
+ABBA and BAAB, preserving each arm's first/last labels, rather than merely repeating ABBA.
+Other SIMD widths, AMD CPUs, grouped-loop overhead and error-finding effectiveness remain
 for the physical-machine campaign. G16 stays experimental.
 
 In total, 16 measured runs and two setup pilots passed with zero test, seal or guest-reported WHEA errors. The 16
 measured runs counted 20 TiB of reads/writes; that is repeated logical traffic, not 20 TiB of unique memory or proof
 that every read reached DRAM. Both binaries were the already-built releases; no product source or compiler changed.
+
+The separate [review follow-up](review_followup_2026-11-13.md) reconciles control-loop spills and records the later
+G2/G4/G8/G16 functional runs. Those runs do not change this G1 comparison's scope or conclusions.

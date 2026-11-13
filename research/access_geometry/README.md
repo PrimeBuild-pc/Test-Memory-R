@@ -61,9 +61,10 @@ are kept locally under `target/access-geometry/baseline*`. This uses the reposit
 10.0.28000.2957. No live TMR run was performed to obtain it.
 
 The first product candidate's artifacts and audit are retained as `target/access-geometry/expanded-*`; the final candidate
-uses `candidate.*`. `audit.py FILE.s` examines grouped loops with no length cutoff. `compare_loops.py BEFORE.s AFTER.s`
+uses `candidate.*`. `audit.py FILE.s` examines grouped backward-branch ranges with no length cutoff. It now reports
+memory-body and control-only ranges separately; the initial audit filtered out the latter. `compare_loops.py BEFORE.s AFTER.s`
 compares existing SimpleTest, Sequence and bandwidth memory-loop instructions/constants independently of chunk setup.
-These inspect innermost memory loops; they do not establish that the enclosing visit/pass loops are free of stack traffic.
+Neither tool's memory-body counts establish that the enclosing visit/pass loops are free of stack traffic.
 
 ## Final development validation, 2026-11-13
 
@@ -73,20 +74,26 @@ Code commit `72ab3b8`, same compiler/SDK as the baseline:
   (six existing opt-in tests skipped), and `cargo audit`.
 - All 456 grouped memory loops use the intended SIMD width and contain no calls. None has a SIMD spill or a spill/reload
   round trip. 232 have no stack accesses; 224 reload loop-invariant GPR values. The longest is 193 instructions. Those
-  remaining reloads and enclosing loop costs still need hardware timing.
+  counts exclude control-only ranges. The standard `hot_loop_spills.py` total is 229 GPR round-trip ranges, against
+  baseline's 2: all 227 added flags belong to grouped traversal control. The corrected audit reports 551 grouped
+  control ranges: 227 round-trip, 182 reload-only, 142 clean. This is real stack traffic, not a spill-free kernel.
+  These are static ranges across specialisations, not spills per memory access. Their frequency and an example are in
+  [the review follow-up](review_followup_2026-11-13.md); their throughput cost remains to be measured.
 - `.text`: 7,124,126 bytes, 5.6% above baseline; full expansion had added 51.9%. The grouped implementation adds 228
   specialized functions across patterns/operations/widths, shared across G=2/4/8/16, rather than 912 functions for four
   separate group kernels.
 - Existing loop comparison: 78 name groups match instruction/constant fingerprints; 24 strided name groups differ.
   Sequential/reverse/random and bandwidth loops match. Strided code is not claimed byte-identical, which is why the
   baseline-compatible G1 A/B remains part of the kit.
+- Whole-function fingerprints have a wider scope: 230 name groups changed and 24 were added, including changes in
+  modules whose source was untouched. The 78/24 figures describe selected memory loops, not the entire executable.
 - The normal CI release executable's entire `.text` section matches the assembly-audited executable byte for byte.
   `candidate.exe`/`candidate.pdb` are the normal release copies; `candidate.build.json` retains the original build manifest
   (whose artifact keys are `tmr.exe`/`tmr.pdb`). `validation.json` records both executable hashes and the common code hash.
   The standard archive is `../builds/72ab3b8b87e2-165d7eeea894ded3/`.
 
-No live TMR run or hardware speed/detection claim is part of this validation. The branch remains an experiment pending
-the owner's comparison runs.
+The original validation above did not run TMR live. Later G1 measurements and grouped functional checks are recorded
+below; the branch remains an experiment pending physical-machine speed/detection comparisons.
 
 ## Hardware comparison kit
 
@@ -133,6 +140,10 @@ needed to establish detection benefit. No BIOS mapping, channel-count or interle
 It checks successful completion, errors, allocation/page mix, worker placement, test settings and processed bytes before
 comparing complete ABBA blocks. It reports raw and reference-normalized changes, plus same-build first/last differences.
 Those same-build differences help identify order effects and run-to-run variation; they are not a confidence interval.
+For subsequent comparisons, alternate ABBA and BAAB blocks. `bench_ab.py` uses the labels' command-line order:
+use `base_first, new_first, new_last, base_last` for ABBA and `new_first, base_first, base_last, new_last` for BAAB,
+with their respective executable paths as above. Use a separate output directory for each invocation to preserve every
+block. Reversing the four ABBA labels alone still gives ABBA and does not exchange the arms' inner/outer slots.
 
 ## Local before/after measurements, 2026-11-13
 
@@ -147,3 +158,11 @@ The full results, including the noisy block and background activity, are in
 [`local_comparison_2026-11-13.md`](local_comparison_2026-11-13.md); per-run rates are in the adjacent CSV.
 The scripts validate matching settings/work and preserve the raw local logs. Grouped costs and the other CPUs/widths
 remain unmeasured by this comparison.
+
+## Review follow-up
+
+Both `combined.json` and `combined-reverse.json` subsequently completed through the retained `candidate.exe` locally:
+four workers, 4 GiB actually allocated, 256-bit SIMD, 2 MiB pages, all 12 steps in each, and zero test/seal/WHEA errors.
+The saved plans confirm every requested P/G pair, and the results have the expected work and completed cycles.
+This closes the missing end-to-end grouped sanity check at 256 bits, not the physical detection or performance gate.
+See [the full follow-up](review_followup_2026-11-13.md) for commands, artifact locations and the spill reconciliation.
