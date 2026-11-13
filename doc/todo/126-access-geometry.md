@@ -93,5 +93,12 @@ why G16 remains experimental and why the branch has not merged. P stays divisibl
 
 ## Next
 
+The owner's requested local before/after check is complete (2026-11-13): 16 measured runs and two pilots on the dev VM,
+fixed 8 GiB / four workers / 256 bits / 2 MiB pages, all passed with zero errors. The first set was noisy, including
+observed concurrent CPU activity; a longer ABBA follow-up measured +0.87% for existing strided SimpleTest and +0.12%
+for strided Sequence. No repeatable G1 regression was established. Keep the compact implementation for physical testing;
+these runs do not establish sub-percent equivalence or grouped-loop cost. Full unfiltered results and per-run CSV:
+[`research/access_geometry/local_comparison_2026-11-13.md`](../../research/access_geometry/local_comparison_2026-11-13.md).
+
 The owner runs the baseline-compatible A/B and combined/reversed geometry configs. Use those results to choose the shipped
 group set and assess throughput/detection before merging `experiment/access-geometry`. Importer work is settled.

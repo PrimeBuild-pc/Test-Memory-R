@@ -1,0 +1,106 @@
+{
+  "config_format_version": "2.0",
+  "application_name": "Test Memory R",
+  "metadata": {
+    "name": "local-regression",
+    "author": "TMR",
+    "version": "1.0",
+    "description": "Same-work before/after comparison: legacy group-1 strided and sequential controls, with a longer unchanged bandwidth reference.",
+    "tested_with_version": "0.1.1"
+  },
+  "system": {
+    "memory_strategy": {
+      "allocation_mode": "percentage_reserve",
+      "reserve_percent": 20.0,
+      "default_extent": {
+        "mode": "full_allocation"
+      },
+      "default_chunk": {
+        "mode": "absolute",
+        "size": "256MiB"
+      }
+    },
+    "cpu_config": {
+      "type": "cores",
+      "usage_percent": 100
+    },
+    "error_mode": "log",
+    "timing": {
+      "global_cycles": 1,
+      "default_test_cycles": 1
+    },
+    "large_pages": true
+  },
+  "test_sequence": [
+    {
+      "id": "simple-g1",
+      "enabled": true,
+      "function": "Mem-SimpleV2-Auto",
+      "cycles": 1,
+      "write_read_cycles": 8,
+      "verify_reps": 2,
+      "program": [
+        "ident",
+        "switch",
+        "random",
+        "switch"
+      ],
+      "parameter": 256
+    },
+    {
+      "id": "sequence-g1",
+      "enabled": true,
+      "function": "Mem-Sequence",
+      "cycles": 1,
+      "write_read_cycles": 8,
+      "verify_reps": 2,
+      "program": [
+        "ident",
+        "switch",
+        "random",
+        "switch"
+      ],
+      "parameter": 256,
+      "sequence": "W 2R",
+      "order": "stride"
+    },
+    {
+      "id": "simple-sequential",
+      "enabled": true,
+      "function": "Mem-SimpleV2-Auto",
+      "cycles": 1,
+      "write_read_cycles": 8,
+      "verify_reps": 2,
+      "program": [
+        "ident",
+        "switch",
+        "random",
+        "switch"
+      ],
+      "parameter": 0
+    },
+    {
+      "id": "sequence-sequential",
+      "enabled": true,
+      "function": "Mem-Sequence",
+      "cycles": 1,
+      "write_read_cycles": 8,
+      "verify_reps": 2,
+      "program": [
+        "ident",
+        "switch",
+        "random",
+        "switch"
+      ],
+      "parameter": 0,
+      "sequence": "W 2R",
+      "order": "forward"
+    },
+    {
+      "id": "reference",
+      "enabled": true,
+      "function": "Spd-DRAMFull-Read-256",
+      "cycles": 16
+    }
+  ]
+}
