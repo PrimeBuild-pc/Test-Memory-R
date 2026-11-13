@@ -43,10 +43,11 @@ not proof of hitting a specific channel.
 Branch: `experiment/access-geometry`, based on `57369c4`. The baseline was rebuilt before code changes, using the same
 compiler/SDK, and retained under `target/access-geometry/baseline*`.
 
-- `d9981d3`: per-test explicit period and group-1 plumbing; 575 tests passed, six hardware-dependent skips, quick CI clean.
+- `d9981d3`: per-test explicit period and group-1 plumbing; 575 tests passed, six opt-in skips, quick CI clean.
   `channels=` still recalculates the legacy `parameter` path, but never changes an explicit period.
 - Grouped native SimpleTest kernels at 128/256/512; Mem-Sequence's stride passes at its existing 256/512 widths.
-  Dispatch is outside the memory loops. Groups share a bounded two-line body and one traversal macro. No new pattern generator, physical
+  Dispatch is outside the memory loops. Groups share a bounded body (one line at 128 bits, two at 256/512) and one traversal macro.
+  No new pattern generator, physical
   mapping, default test-program change, or TM5-import geometry change.
 - G=1/2/4/8/16 accepted on the experiment branch; G16 labeled experimental. P must be positive, at least G, and divisible
   by G. G>1 with legacy patterns fails validation, including after CLI overrides. A Sequence with explicit geometry must
@@ -62,8 +63,9 @@ compiler/SDK, and retained under `target/access-geometry/baseline*`.
 The isolated AVX2 ident probe compares constant bounds, explicit expansion, and a runtime group of two-line tiles. Its
 inner loops have no stack accesses, but counts are not timings. The first product candidate (`d71d1d1`) exposed what that
 small probe missed: expanding every pattern grew `.text` 51.9%, the longest grouped loop was 1,682 instructions, and the
-worst had 178 stack accesses. There were no grouped calls or wrong-width accesses. This prompted the shared two-line body;
-the original candidate is retained for comparison. Full data and commands:
+worst had 178 stack accesses. There were no grouped calls or wrong-width accesses. This prompted the shared bounded body;
+the all-two-line version cut `.text` growth to 5.9%, but one SIMD spill at 128 bits prompted a one-line body at that width.
+The intermediate candidates are retained for comparison. Full data and commands:
 [`research/access_geometry/README.md`](../../research/access_geometry/README.md).
 
 Tests exercise the actual kernels: complete recorded visit order, every pattern family/beat profile/polarity, corruption

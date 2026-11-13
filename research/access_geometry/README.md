@@ -46,10 +46,15 @@ No grouped loop had calls or a wrong-width memory access. The worst loop had 178
 these were not merely a larger counter or cold-path spill. The executable's `.text` grew from 6,744,350 to 10,243,502 bytes
 (51.9%). These product results supersede what the small ident probe alone suggested.
 
-The revised candidate shares a two-line inner body across groups 2/4/8/16. A visit repeats that body G/2 times before the
-period jump. Selection remains outside the memory loop, four accumulators remain independent, and the requested visit order
-and prefetch targets are unchanged. This adds bounded loop control in exchange for smaller code and less register pressure.
-Group 16 remains experimental. Hardware comparisons, rather than instruction counts, must establish the throughput cost.
+The revised candidate shares a bounded inner body across groups 2/4/8/16: one line at 128 bits (already four SIMD vectors),
+two lines at 256/512. A visit repeats that body before the period jump. Selection remains outside the memory loop, four
+accumulators remain independent, and the requested visit order and prefetch targets are unchanged. This adds bounded loop
+control in exchange for smaller code and less register pressure. Group 16 remains experimental. Hardware comparisons,
+rather than instruction counts, must establish the throughput cost, including outer-loop control and invariant reloads.
+
+The intermediate all-two-line version (`5cb54c9`, retained as `two-line-*`) reduced `.text` to 7,139,918 bytes (+5.9% over
+baseline), and its longest memory loop to 220 instructions. One 128-bit loop still had a SIMD spill/reload, prompting the
+one-line inner body at that width. This does not change G's meaning or introduce separate kernels per group.
 
 The baseline for the product comparison is commit `57369c4`. Its rebuilt EXE, post-LTO assembly, fingerprints and spill details
 are kept locally under `target/access-geometry/baseline*`. This uses the repository's selected MSVC 14.52.37025 and Windows SDK
@@ -58,6 +63,7 @@ are kept locally under `target/access-geometry/baseline*`. This uses the reposit
 The first product candidate's artifacts and audit are retained as `target/access-geometry/expanded-*`; the final candidate
 uses `candidate.*`. `audit.py FILE.s` examines grouped loops with no length cutoff. `compare_loops.py BEFORE.s AFTER.s`
 compares existing SimpleTest, Sequence and bandwidth memory-loop instructions/constants independently of chunk setup.
+These inspect innermost memory loops; they do not establish that the enclosing visit/pass loops are free of stack traffic.
 
 ## Hardware comparison kit
 

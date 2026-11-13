@@ -1,4 +1,4 @@
-//! Grouped strided visits (TODO 126). Groups share a bounded two-line body; no group-size dispatch inside the memory loop.
+//! Grouped strided visits (TODO 126). Groups share a bounded body; no group-size dispatch inside the memory loop.
 
 /// Descending offset passes, ascending lines within each visit. G divides both the period and chunk length; callers validate it before
 /// allocating. Prefetch one line per visited line, at most 128 visited lines ahead and no further than the shortest offset pass.

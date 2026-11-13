@@ -29,6 +29,7 @@ def main():
                 "name": name, "symbol": symbol, "loop": i, "group": int(match[1]) if match[1] != "ed" else "shared",
                 "instructions": len(loop),
                 "stack": [x for x in loop if spills.STACK.search(x) and not x.startswith("lea")],
+                "stack_kind": (spills.classify(loop) or ("unclassified",))[0],
                 "calls": [x for x in loop if x.startswith("call")],
                 "wrong_width": spills.off_width(name, loop),
             })
@@ -38,12 +39,15 @@ def main():
     out.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
     for g in [2, 4, 8, 16, "shared"]:
         group = [r for r in rows if r["group"] == g]
+        if not group:
+            continue
         totals = collections.Counter(
             loops=len(group), stack_loops=sum(bool(r["stack"]) for r in group),
             call_loops=sum(bool(r["calls"]) for r in group), width_loops=sum(r["wrong_width"] for r in group),
             over_600=sum(r["instructions"] > 600 for r in group),
         )
         print(f"G{g}: {dict(totals)}, max instructions {max((r['instructions'] for r in group), default=0)}")
+        print(f"  Stack classifications: {dict(collections.Counter(r['stack_kind'] for r in group))}")
     print(out)
 
 

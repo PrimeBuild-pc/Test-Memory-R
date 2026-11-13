@@ -6515,7 +6515,8 @@ macro_rules! native_differs_strided {
     }};
 }
 
-/// A shared two-line body at one SIMD width, repeated within each group. Four accumulators stay independent.
+/// A shared bounded body at one SIMD width, repeated within each group: one line at 128 bits, two at 256/512.
+/// Four accumulators stay independent; the narrower body avoids a SIMD spill at 128 bits.
 macro_rules! native_grouped_fns {
     ($write:ident, $differs:ident, [$($kind:tt)*], $simd:ty, $w:tt, $tf:literal, [$($j:literal),+]) => {
         #[inline(never)]
@@ -6571,7 +6572,7 @@ unsafe fn native_rescan(ctx: &ChunkCtx, lid0: u64, phase: crate::pattern::Phase,
 
 /// A native SimpleTest at one width, `[u64xN, N]`, and its walks module `$walks`.
 macro_rules! native_simple_impl {
-    ($fn_name:ident, $walks:ident, $test_name:literal, [$simd:ty, $w:tt], $tf:literal) => {
+    ($fn_name:ident, $walks:ident, $test_name:literal, [$simd:ty, $w:tt], $tf:literal, $tile:tt) => {
         /// The native SimpleTest's walks at this width, called once a chunk (`NativeChunk`). The phase's family and beat are matched once a
         /// chunk, here, and each walk is generic over the line function it gets, so each family and beat has its own function of each walk,
         /// `#[inline(never)]` with the width's target features: in one function holding every family's walk, what the walks share was kept
@@ -6634,7 +6635,7 @@ macro_rules! native_simple_impl {
                 native_differs_strided!([$simd, $w], c, line)
             }
 
-            native_grouped_fns!(write_grouped, differs_grouped, [$simd, $w], $simd, $w, $tf, [0, 1]);
+            native_grouped_fns!(write_grouped, differs_grouped, [$simd, $w], $simd, $w, $tf, $tile);
         }
 
         /// A native SimpleTest (pattern spec v2) at this width; see the section comment.
@@ -6696,9 +6697,9 @@ macro_rules! native_simple_impl {
     };
 }
 
-native_simple_impl!(simple_native_128, simple_native_128_walks, "Mem-SimpleV2-128", [u64x2, 2], "sse4.2,sse4.1,ssse3,sse3,sse2,popcnt");
-native_simple_impl!(simple_native_256, simple_native_256_walks, "Mem-SimpleV2-256", [u64x4, 4], "avx2,avx,fma,bmi1,bmi2");
-native_simple_impl!(simple_native_512, simple_native_512_walks, "Mem-SimpleV2-512", [u64x8, 8], "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2");
+native_simple_impl!(simple_native_128, simple_native_128_walks, "Mem-SimpleV2-128", [u64x2, 2], "sse4.2,sse4.1,ssse3,sse3,sse2,popcnt", [0]);
+native_simple_impl!(simple_native_256, simple_native_256_walks, "Mem-SimpleV2-256", [u64x4, 4], "avx2,avx,fma,bmi1,bmi2", [0, 1]);
+native_simple_impl!(simple_native_512, simple_native_512_walks, "Mem-SimpleV2-512", [u64x8, 8], "avx512f,avx512bw,avx512cd,avx512dq,avx512vl,avx2,avx,fma,bmi1,bmi2", [0, 1]);
 
 // ─── Mem-Sequence (TODO 97) ──────────────────────────────────────────────────────────────────────
 //
