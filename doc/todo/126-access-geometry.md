@@ -46,12 +46,12 @@ compiler/SDK, and retained under `target/access-geometry/baseline*`.
 - `d9981d3`: per-test explicit period and group-1 plumbing; 575 tests passed, six hardware-dependent skips, quick CI clean.
   `channels=` still recalculates the legacy `parameter` path, but never changes an explicit period.
 - Grouped native SimpleTest kernels at 128/256/512; Mem-Sequence's stride passes at its existing 256/512 widths.
-  Dispatch is outside the memory loops. Constant offsets share one traversal macro. No new pattern generator, physical
+  Dispatch is outside the memory loops. Groups share a bounded two-line body and one traversal macro. No new pattern generator, physical
   mapping, default test-program change, or TM5-import geometry change.
 - G=1/2/4/8/16 accepted on the experiment branch; G16 labeled experimental. P must be positive, at least G, and divisible
   by G. G>1 with legacy patterns fails validation, including after CLI overrides. A Sequence with explicit geometry must
   actually contain a stride pass.
-- Four independent error accumulators. Group-2 at 512 bits rotates the two pairs between visits. A failed reduction still
+- Four independent error accumulators. At 512 bits, each two-line tile rotates the two pairs. A failed reduction still
   uses the existing rescan/error/halt path.
 - Prefetch remains one per visited line, up to 128 visited lines ahead, rounded to a complete group and limited by the
   shortest offset pass. Empty offset passes are skipped when the period exceeds the chunk. The plan explains when no
@@ -60,8 +60,10 @@ compiler/SDK, and retained under `target/access-geometry/baseline*`.
   equal work within each type; a reversed-order version and a baseline-compatible group-1 config are supplied.
 
 The isolated AVX2 ident probe compares constant bounds, explicit expansion, and a runtime group of two-line tiles. Its
-inner loops have no stack accesses, but counts are not timings. Explicit G16 expands to roughly four times G4's instructions;
-the compiler leaves a loop in the constant-bound G16 alternative. Full data and commands:
+inner loops have no stack accesses, but counts are not timings. The first product candidate (`d71d1d1`) exposed what that
+small probe missed: expanding every pattern grew `.text` 51.9%, the longest grouped loop was 1,682 instructions, and the
+worst had 178 stack accesses. There were no grouped calls or wrong-width accesses. This prompted the shared two-line body;
+the original candidate is retained for comparison. Full data and commands:
 [`research/access_geometry/README.md`](../../research/access_geometry/README.md).
 
 Tests exercise the actual kernels: complete recorded visit order, every pattern family/beat profile/polarity, corruption

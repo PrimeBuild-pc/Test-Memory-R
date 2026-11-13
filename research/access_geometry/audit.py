@@ -17,7 +17,7 @@ def main():
     rows = []
     for symbol, body in kernels.items():
         name = spills.short_name(symbol)
-        match = re.search(r"group(2|4|8|16)(?!\d)", name)
+        match = re.search(r"group(2|4|8|16|ed)(?!\d)", name)
         if not match:
             continue
         for i, loop in enumerate(spills.innermost_loops(body)):
@@ -26,7 +26,7 @@ def main():
             ):
                 continue
             rows.append({
-                "name": name, "symbol": symbol, "loop": i, "group": int(match[1]),
+                "name": name, "symbol": symbol, "loop": i, "group": int(match[1]) if match[1] != "ed" else "shared",
                 "instructions": len(loop),
                 "stack": [x for x in loop if spills.STACK.search(x) and not x.startswith("lea")],
                 "calls": [x for x in loop if x.startswith("call")],
@@ -36,7 +36,7 @@ def main():
         raise RuntimeError("No grouped loops found; inspect symbols before trusting this audit.")
     out = ROOT / "target/access-geometry/grouped-audit.json"
     out.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
-    for g in [2, 4, 8, 16]:
+    for g in [2, 4, 8, 16, "shared"]:
         group = [r for r in rows if r["group"] == g]
         totals = collections.Counter(
             loops=len(group), stack_loops=sum(bool(r["stack"]) for r in group),

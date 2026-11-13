@@ -32,14 +32,32 @@ The constant group-16 bound did not fully unroll. Its inner loop processes two l
 expanded-16's as equal amounts of work. Likewise, runtime-group's figures exclude its enclosing group-control loop. None of
 these counts is a throughput measurement. The innermost memory loops have no stack accesses in this probe.
 
-The first product candidate uses explicit offsets and selection outside the memory loop, preserving the existing group-1
-paths. This is a testable starting point, not a demonstrated speed win over the compact alternative. Group 16 remains
-experimental because its expansion adds substantially more code. Revisit the choice after product assembly and hardware
-comparison; do not infer speed from the instruction counts alone.
+The first product candidate (`d71d1d1`) used explicit offsets and selection outside the memory loop. Its post-LTO audit
+rejected this as the final implementation: code grew substantially and many expanded loops spilled.
+
+| Expanded group | Memory loops | Loops with stack accesses | Longest loop, instructions |
+|---|---:|---:|---:|
+| 2 | 456 | 162 | 214 |
+| 4 | 456 | 210 | 429 |
+| 8 | 454 | 267 | 853 |
+| 16 | 450 | 289 | 1,682 |
+
+No grouped loop had calls or a wrong-width memory access. The worst loop had 178 stack-access instructions per iteration;
+these were not merely a larger counter or cold-path spill. The executable's `.text` grew from 6,744,350 to 10,243,502 bytes
+(51.9%). These product results supersede what the small ident probe alone suggested.
+
+The revised candidate shares a two-line inner body across groups 2/4/8/16. A visit repeats that body G/2 times before the
+period jump. Selection remains outside the memory loop, four accumulators remain independent, and the requested visit order
+and prefetch targets are unchanged. This adds bounded loop control in exchange for smaller code and less register pressure.
+Group 16 remains experimental. Hardware comparisons, rather than instruction counts, must establish the throughput cost.
 
 The baseline for the product comparison is commit `57369c4`. Its rebuilt EXE, post-LTO assembly, fingerprints and spill details
 are kept locally under `target/access-geometry/baseline*`. This uses the repository's selected MSVC 14.52.37025 and Windows SDK
 10.0.28000.2957. No live TMR run was performed to obtain it.
+
+The first product candidate's artifacts and audit are retained as `target/access-geometry/expanded-*`; the final candidate
+uses `candidate.*`. `audit.py FILE.s` examines grouped loops with no length cutoff. `compare_loops.py BEFORE.s AFTER.s`
+compares existing SimpleTest, Sequence and bandwidth memory-loop instructions/constants independently of chunk setup.
 
 ## Hardware comparison kit
 

@@ -1,51 +1,64 @@
-//! Grouped strided visits (TODO 126). The line offsets are macro tokens: no group-size dispatch inside the memory loop.
+//! Grouped strided visits (TODO 126). Groups share a bounded two-line body; no group-size dispatch inside the memory loop.
 
 /// Descending offset passes, ascending lines within each visit. G divides both the period and chunk length; callers validate it before
 /// allocating. Prefetch one line per visited line, at most 128 visited lines ahead and no further than the shortest offset pass.
 macro_rules! grouped_walk {
-    ($prefetch:expr, $base:expr, $start:expr, $end:expr, $period:expr, $lid0:expr,
+    ($prefetch:expr, $base:expr, $start:expr, $end:expr, $period:expr, $lid0:expr, $group:expr,
      [$($j:literal),+], |$p:ident, $lid:ident, $index:ident| $body:block) => {{
         use $crate::tests::{LINE_WORDS, STRIDED_AHEAD, opaque_ptr};
-        const WALK_GROUP: usize = [$($j),+].len();
+        const WALK_TILE: usize = [$($j),+].len();
         const _: () = {
             let offsets = [$($j),+];
             let mut i = 0;
-            while i < WALK_GROUP {
+            while i < WALK_TILE {
                 assert!(offsets[i] == i, "group offsets must be consecutive, starting at zero");
                 i += 1;
             }
         };
         let (base, start, end, period, lid0): (*mut u64, usize, usize, usize, u64) = ($base, $start, $end, $period, $lid0);
-        debug_assert!(period >= WALK_GROUP * LINE_WORDS && period.is_multiple_of(WALK_GROUP * LINE_WORDS));
-        debug_assert!(start.is_multiple_of(LINE_WORDS) && (end - start).is_multiple_of(WALK_GROUP * LINE_WORDS));
-        let ahead = (STRIDED_AHEAD / WALK_GROUP).min((end - start) / period) * period;
+        let group_lines = $group;
+        let group_words = group_lines * LINE_WORDS;
+        debug_assert!(group_lines > 0 && group_lines.is_multiple_of(WALK_TILE));
+        debug_assert!(period >= group_words && period.is_multiple_of(group_words));
+        debug_assert!(start.is_multiple_of(LINE_WORDS) && (end - start).is_multiple_of(group_words));
+        let ahead = (STRIDED_AHEAD / group_lines).min((end - start) / period) * period;
         let stop = base.wrapping_add(end);
         let at = (base.wrapping_add(start) as u64).wrapping_sub(lid0 << 6);
         let offsets = period.min(end - start);
         let mut first = base.wrapping_add(start + offsets);
-        for _ in 0..offsets / (WALK_GROUP * LINE_WORDS) {
-            first = first.wrapping_sub(WALK_GROUP * LINE_WORDS);
+        for _ in 0..offsets / group_words {
+            first = first.wrapping_sub(group_words);
             let mut group = first;
             while group.wrapping_add(ahead) < stop {
-                $({
-                    let $p = group.add($j * LINE_WORDS);
-                    let $lid = ($p as u64).wrapping_sub(at) >> 6;
-                    let $index = $j;
-                    $prefetch($p.wrapping_add(ahead));
-                    $body
-                })+
+                let mut tile = group;
+                let tile_stop = group.add(group_words);
+                while tile < tile_stop {
+                    $({
+                        let $p = tile.add($j * LINE_WORDS);
+                        let $lid = ($p as u64).wrapping_sub(at) >> 6;
+                        let $index = $j;
+                        $prefetch($p.wrapping_add(ahead));
+                        $body
+                    })+
+                    tile = opaque_ptr(tile.add(WALK_TILE * LINE_WORDS));
+                }
                 group = opaque_ptr(group.wrapping_add(period));
             }
             let left = (stop as usize).saturating_sub(first as usize) / std::mem::size_of::<u64>();
-            let back = ahead.wrapping_sub(left.div_ceil(period) * period + WALK_GROUP * LINE_WORDS);
+            let back = ahead.wrapping_sub(left.div_ceil(period) * period + group_words);
             while group < stop {
-                $({
-                    let $p = group.add($j * LINE_WORDS);
-                    let $lid = ($p as u64).wrapping_sub(at) >> 6;
-                    let $index = $j;
-                    $prefetch($p.wrapping_add(back));
-                    $body
-                })+
+                let mut tile = group;
+                let tile_stop = group.add(group_words);
+                while tile < tile_stop {
+                    $({
+                        let $p = tile.add($j * LINE_WORDS);
+                        let $lid = ($p as u64).wrapping_sub(at) >> 6;
+                        let $index = $j;
+                        $prefetch($p.wrapping_add(back));
+                        $body
+                    })+
+                    tile = opaque_ptr(tile.add(WALK_TILE * LINE_WORDS));
+                }
                 group = opaque_ptr(group.wrapping_add(period));
             }
         }
@@ -73,7 +86,7 @@ mod tests {
                         ([$($j:literal),+]) => {
                             // SAFETY: every full group is inside the aligned live buffer; the recorder never reads a prefetch address.
                             unsafe {
-                                grouped_walk!(prefetch, base, pad * LINE_WORDS, (pad + n) * LINE_WORDS, period * LINE_WORDS, lid0,
+                                grouped_walk!(prefetch, base, pad * LINE_WORDS, (pad + n) * LINE_WORDS, period * LINE_WORDS, lid0, g,
                                               [$($j),+], |p, lid, _j| {
                                     visited.push((offset(p) as usize, lid));
                                 });
@@ -82,10 +95,7 @@ mod tests {
                     }
                     match g {
                         1 => run!([0]),
-                        2 => run!([0, 1]),
-                        4 => run!([0, 1, 2, 3]),
-                        8 => run!([0, 1, 2, 3, 4, 5, 6, 7]),
-                        16 => run!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+                        2 | 4 | 8 | 16 => run!([0, 1]),
                         _ => unreachable!(),
                     }
                     // Independent specification: sort all valid line numbers by offset-group descending, then period, then group lane.

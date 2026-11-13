@@ -6515,15 +6515,15 @@ macro_rules! native_differs_strided {
     }};
 }
 
-/// One constant group at one SIMD width. Each line is generated and consumed before the next; four accumulators stay independent.
+/// A shared two-line body at one SIMD width, repeated within each group. Four accumulators stay independent.
 macro_rules! native_grouped_fns {
     ($write:ident, $differs:ident, [$($kind:tt)*], $simd:ty, $w:tt, $tf:literal, [$($j:literal),+]) => {
         #[inline(never)]
         #[target_feature(enable = $tf)]
         unsafe fn $write<L: Fn(u64) -> native_line_ty!([$($kind)*])>(c: NativeChunk, line: L) {
             let NativeChunk { base, start, end, period, lid0, .. } = c;
-            grouped_walk!(prefetch_line, base, start, end, period, lid0, [$($j),+], |p, lid, _j| {
-                for (v, x) in line(lid).into_iter().enumerate() {
+            grouped_walk!(prefetch_line, base, start, end, period, lid0, c.group, [$($j),+], |p, lid, _j| {
+                for (v, x) in line(opaque_u64(lid)).into_iter().enumerate() {
                     *(p.add(v * $w) as *mut $simd) = x;
                 }
             });
@@ -6533,17 +6533,17 @@ macro_rules! native_grouped_fns {
         #[target_feature(enable = $tf)]
         unsafe fn $differs<L: Fn(u64) -> native_line_ty!([$($kind)*])>(c: NativeChunk, line: L) -> u64 {
             const VPL: usize = LINE_WORDS / $w;
-            const GROUP: usize = [$($j),+].len();
+            const TILE: usize = [$($j),+].len();
             let NativeChunk { base, start, end, period, lid0, .. } = c;
             let mut acc = [<$simd>::splat(0); 4];
-            grouped_walk!(prefetch_line, base, start, end, period, lid0, [$($j),+], |p, lid, j| {
-                let words = line(lid);
+            grouped_walk!(prefetch_line, base, start, end, period, lid0, c.group, [$($j),+], |p, lid, j| {
+                let words = line(opaque_u64(lid));
                 for v in 0..VPL {
                     acc[(j * VPL + v) % 4] |= *(p.add(v * $w) as *const $simd) ^ words[v];
                 }
-                // At 512 bits, group 2 supplies two vectors; alternate the two pairs of chains between visits.
-                if j + 1 == GROUP {
-                    acc.rotate_left((GROUP * VPL) % 4);
+                // At 512 bits a tile supplies two vectors; alternate the two pairs of chains between tiles.
+                if j + 1 == TILE {
+                    acc.rotate_left((TILE * VPL) % 4);
                 }
             });
             ((acc[0] | acc[1]) | (acc[2] | acc[3])).reduce_or()
@@ -6585,10 +6585,7 @@ macro_rules! native_simple_impl {
             pub(super) unsafe fn write(c: NativeChunk) {
                 native_with_line!([$simd, $w], c.phase, |line| {
                     match c.group {
-                        2 => write_group2(c, line),
-                        4 => write_group4(c, line),
-                        8 => write_group8(c, line),
-                        16 => write_group16(c, line),
+                        2 | 4 | 8 | 16 => write_grouped(c, line),
                         _ if c.period == 0 => write_seq(c, line),
                         _ => write_strided(c, line),
                     }
@@ -6604,10 +6601,7 @@ macro_rules! native_simple_impl {
                 let hide = c.phase.family == crate::pattern::Family::Header;
                 native_with_line!([$simd, $w], c.phase, |line| {
                     match c.group {
-                        2 => differs_group2(c, line),
-                        4 => differs_group4(c, line),
-                        8 => differs_group8(c, line),
-                        16 => differs_group16(c, line),
+                        2 | 4 | 8 | 16 => differs_grouped(c, line),
                         _ if c.period != 0 => differs_strided(c, line),
                         _ if hide => differs_seq::<_, true>(c, line),
                         _ => differs_seq::<_, false>(c, line),
@@ -6640,12 +6634,7 @@ macro_rules! native_simple_impl {
                 native_differs_strided!([$simd, $w], c, line)
             }
 
-            native_grouped_fns!(write_group2, differs_group2, [$simd, $w], $simd, $w, $tf, [0, 1]);
-            native_grouped_fns!(write_group4, differs_group4, [$simd, $w], $simd, $w, $tf, [0, 1, 2, 3]);
-            native_grouped_fns!(write_group8, differs_group8, [$simd, $w], $simd, $w, $tf, [0, 1, 2, 3, 4, 5, 6, 7]);
-            native_grouped_fns!(write_group16, differs_group16, [$simd, $w], $simd, $w, $tf, [
-                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
-            ]);
+            native_grouped_fns!(write_grouped, differs_grouped, [$simd, $w], $simd, $w, $tf, [0, 1]);
         }
 
         /// A native SimpleTest (pattern spec v2) at this width; see the section comment.
@@ -7188,18 +7177,18 @@ macro_rules! sequence_grouped {
         #[target_feature(enable = $tf)]
         #[inline(never)]
         unsafe fn $name<A: Access>(walk: SequenceWalk, access: A) -> u64 {
-            const GROUP: usize = [$($j),+].len();
+            const TILE: usize = [$($j),+].len();
             const VPL: usize = LINE_WORDS / $w;
             let SequenceWalk { ptr, start, end, lid0, period, pkey, mask, .. } = walk;
             let mask = <$simd>::splat(mask);
             sequence_acc!(init $op, acc, ones, $simd);
-            grouped_walk!(prefetch_line, ptr, start, end, period, lid0, [$($j),+], |p, lid, j| {
+            grouped_walk!(prefetch_line, ptr, start, end, period, lid0, walk.group, [$($j),+], |p, lid, j| {
                 let words = sequence_line!($w, $kind, opaque_u64(lid), pkey).map(|x| x ^ mask);
                 for v in 0..VPL {
                     sequence_visit!($op, access, p.add(v * $w) as *mut $simd, words[v], acc[(j * VPL + v) % 4], ones);
                 }
-                if j + 1 == GROUP {
-                    sequence_acc!(rotate $op, acc, (GROUP * VPL) % 4);
+                if j + 1 == TILE {
+                    sequence_acc!(rotate $op, acc, (TILE * VPL) % 4);
                 }
             });
             sequence_acc!(result $op, acc)
@@ -7242,12 +7231,7 @@ macro_rules! sequence_orders {
                     sequence_strided!($op, access, $simd, $w, $step, $kind, walk)
                 }
                 match $walk.group {
-                    2 => sequence_grouped!(group2, $op, $access, $simd, $w, $tf, $kind, $walk, [0, 1]),
-                    4 => sequence_grouped!(group4, $op, $access, $simd, $w, $tf, $kind, $walk, [0, 1, 2, 3]),
-                    8 => sequence_grouped!(group8, $op, $access, $simd, $w, $tf, $kind, $walk, [0, 1, 2, 3, 4, 5, 6, 7]),
-                    16 => sequence_grouped!(group16, $op, $access, $simd, $w, $tf, $kind, $walk, [
-                        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
-                    ]),
+                    2 | 4 | 8 | 16 => sequence_grouped!(grouped, $op, $access, $simd, $w, $tf, $kind, $walk, [0, 1]),
                     _ => stride($walk, $access),
                 }
             }
@@ -10291,6 +10275,27 @@ mod random_replay_tests {
                             }
                             let want = (chunk.start..chunk.end).step_by(width / 64).fold(0, |bits, word| bits | (1 << (word % 64)));
                             assert_eq!(sequence_walk(width, op, chunk, Order::Stride, 42, phase), want, "{what}, op {op}");
+                        }
+                        if phase.family == crate::pattern::Family::Ident && phase.mask == 0 {
+                            for op in [1, 2] {
+                                let mut current = phase;
+                                sequence_walk(width, 0, chunk, Order::Stride, 42, current);
+                                for word in chunk.start..chunk.end {
+                                    let flip = 1 << (word % 64);
+                                    unsafe { *ptr.add(word) ^= flip };
+                                    assert_eq!(
+                                        sequence_walk(width, op, chunk, Order::Stride, 42, current),
+                                        flip,
+                                        "{what}, op {op}, isolated word {word}",
+                                    );
+                                    if op == 1 {
+                                        unsafe { *ptr.add(word) ^= flip };
+                                    } else {
+                                        // RW writes the expected inverse, repairing the injected error while changing polarity.
+                                        current.mask = !current.mask;
+                                    }
+                                }
+                            }
                         }
                         assert!(memory[..pad].iter().chain(&memory[pad + lines..]).all(|&v| v == guard), "{what}, guards");
                     }
