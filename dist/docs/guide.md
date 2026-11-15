@@ -248,6 +248,12 @@ your own plans. `tmr --create-demo-configs` writes the examples there too. Run o
 `tmr config=demo_tm5_compatible.json`, and use `--startup-debug` to inspect an edited config
 before running it.
 
+For access-order comparisons, the installer also includes
+[`access_geometry.json`](../configs/access_geometry.json). It runs SimpleTest and Mem-Sequence
+with several spacings and groups of adjacent lines, including experimental groups of 16.
+The [access geometry guide](tests/access-geometry.md) explains what changes, how to run it,
+and how to add these per-test settings to your own config.
+
 ## Where TMR keeps its files
 
 Beside `tmr.exe`, in its folder:

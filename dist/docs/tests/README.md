@@ -83,6 +83,18 @@ its chunks still hold the seal before it works them, and reseals them after, and
 with a check of all memory. Its errors have a column of their own. See
 [the seal](seal-and-bench.md).
 
+## Access spacing and grouping
+
+SimpleTest (`Mem-SimpleV2`) and Mem-Sequence's stride passes accept per-test JSON settings
+`period_lines` and `group_lines`: how far apart visits start, and how many neighbouring 64-byte
+lines each visit covers. Each sweep still covers the whole chunk. These extend the existing
+tests; neither the default plans nor `plan=all` automatically tries every geometry.
+
+The [access geometry guide](access-geometry.md) explains the choices, their intended stress,
+the relationship to TM5's Channels/Parameter, and a runnable comparison config. Groups of
+1, 2, 4, 8 and 16 lines are available; 16 is experimental. The settings describe access order,
+not which hardware channel, bank or row receives a request.
+
 ## Reading the names
 
 - **The prefix.** `Mem-` tests check data and find errors. `Lat-` and `Spd-` tests measure and

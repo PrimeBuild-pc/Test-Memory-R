@@ -917,7 +917,7 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
         for def in test_definitions.iter_mut() {
             if let Some(ref mut ctx) = def.config.parameter_context {
                 // Recompute stride if this test has stride_cachelines (SimpleTest)
-                if ctx.stride_cachelines.is_some() && ctx.raw_parameter > 0 {
+                if ctx.access.is_none() && ctx.stride_cachelines.is_some() && ctx.raw_parameter > 0 {
                     let stride_cl = (channels as usize * ctx.raw_parameter as usize).saturating_sub(1);
                     ctx.stride_cachelines = Some(stride_cl);
                     ctx.stride_elements = Some(stride_cl * (def.config.cache_line_bytes / 8));
@@ -939,6 +939,9 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
     // allocated.
     let mut param_errors = Vec::new();
     for def in &test_definitions {
+        if let Err(e) = crate::config::validate_access(&def.config) {
+            param_errors.push(format!("{}: {e}", def.display_name));
+        }
         // After the CLI's overrides too: a verify of the fill with a cycle-keyed TMR mode fails on every word, as the config check refuses
         // (`validate_repetition`)
         if def.actual_name.starts_with("Mem-SimpleV2")
@@ -6508,8 +6511,16 @@ mod tests {
     fn native_verify_counts_each_bad_word_and_halts_with_the_evidence() {
         let mut region = Region::new(&[256 * KIB, 256 * KIB, 128 * KIB]);
         let words = 640 * KIB / 8;
-        for (def, test_fn) in native_tests() {
+        for (def, test_fn, group) in native_tests().into_iter().flat_map(|(d, f)| [1, 2, 4, 8, 16].map(|g| (d.clone(), f, g))) {
             let mut def = def.clone();
+            if group > 1 {
+                def.config.parameter_context = Some(crate::config::TestParameterContext {
+                    stride_cachelines: Some(511),
+                    stride_elements: Some(511 * 8),
+                    access: Some(crate::config::AccessGeometry::new(512, group).unwrap()),
+                    ..Default::default()
+                });
+            }
             def.config.test_reps = 0;
             def.config.skip_init = true;
             // One verify a chunk: the counts below are per verify
@@ -6838,20 +6849,27 @@ mod tests {
         let (base_def, test_fn) = suite().into_iter().find(|(d, _)| d.display_name == "Mem-Sequence").unwrap();
         let stride = crate::config::TestParameterContext { stride_cachelines: Some(15), stride_elements: Some(120), ..Default::default() };
         let mut ran = 0;
-        for (text, order) in [
-            ("W R", "forward"),
-            ("W R", "reverse"),
-            ("W R", "random"),
-            ("W R", "stride"),
-            ("W@random R RW R@reverse", "forward"),
-            ("2R W RW@random 2R@random", "forward"),
-            ("W 2R RW 2R@random", "forward"),
-            ("W RW@stride R@random RW R", "reverse"),
+        for (text, order, group) in [
+            ("W R", "forward", 1),
+            ("W R", "reverse", 1),
+            ("W R", "random", 1),
+            ("W R", "stride", 1),
+            ("W@random R RW R@reverse", "forward", 1),
+            ("2R W RW@random 2R@random", "forward", 1),
+            ("W 2R RW 2R@random", "forward", 1),
+            ("W RW@stride R@random RW R", "reverse", 1),
+            ("W 2R RW 2R", "stride", 2),
+            ("W RW@stride R@random RW R", "reverse", 4),
+            ("W 2R RW 2R", "stride", 8),
+            ("W 2R RW 2R", "stride", 16),
         ] {
             for sealed in [false, true] {
                 let mut def = base_def.clone();
                 def.config.chunk_mode = ChunkMode::Absolute { size_bytes: 68 * KIB };
                 def.config.parameter_context = Some(stride.clone());
+                if group > 1 {
+                    def.config.parameter_context.as_mut().unwrap().access = Some(crate::config::AccessGeometry::new(16, group).unwrap());
+                }
                 def.config.epoch = crate::pattern::StepEpoch { seed: 9, suite_cycle: 3, step: 2 };
                 let order = crate::sequence::Order::parse(order).unwrap();
                 def.config = def.config.with_sequence(crate::sequence::Sequence::parse(text, order).unwrap());
@@ -6875,7 +6893,7 @@ mod tests {
                 ran += 1;
             }
         }
-        assert_eq!(ran, 16);
+        assert_eq!(ran, 24);
         assert!(region.guards_intact());
     }
 

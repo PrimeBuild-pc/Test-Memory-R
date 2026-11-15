@@ -82,6 +82,9 @@ and how to leave identifiers out before you post one.
   the widest the CPU has by default (`width=` picks one). An experimental tile test runs on AMX
   (Intel Xeon); ACE is next to look at.
 - **TM5 configs still work:** TMR loads TM5 `.cfg` files and runs the equivalent tests.
+- **Configurable access spacing and grouping:** SimpleTest and Mem-Sequence can visit single
+  lines or groups of neighbouring lines before each jump. The [access geometry guide](dist/docs/tests/access-geometry.md)
+  explains the settings and includes a comparison config; existing plans keep their current walks.
 - **TM5's test 0 becomes the seal:** all memory is sealed at the start of a cycle and checked at its
   end, and each block a checking test works on is checked before and resealed after it, so an error
   in memory no test is touching is still caught.

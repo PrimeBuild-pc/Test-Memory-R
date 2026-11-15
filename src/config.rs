@@ -84,9 +84,8 @@ pub struct SystemConfig {
     pub cpu_pinning: CpuPinningConfig,
     #[serde(default)]
     pub memory_allocation: MemoryAllocationConfig,
-    /// Memory channel count for stride calculation (default 2 for consumer DDR5 dual-channel). Higher values produce larger strides to
-    /// match DDR interleave boundaries.
-    /// Consumer: 2, Server: 4-12+.
+    /// TM5-style stride multiplier (default 2): `channels * parameter` lines between visits. This does not determine the controller's
+    /// channel mapping. Explicit `period_lines` is independent of it (TODO 126).
     #[serde(default = "default_channels")]
     pub channels: u32,
     /// The seal (TODO 74, `seal.rs`): `"tmr"` (the default), `"tm5"`, or `"off"` to run without it. The mirror tests' data is the seal
@@ -315,7 +314,7 @@ fn apply_repetition(test: &TestConfig, config: &mut TestMemoryConfig) {
     }
 }
 
-/// Mem-Sequence's `sequence` and `order`, on it alone. A step in TM5's stride needs the stride, from `parameter`; a write no read checks is
+/// Mem-Sequence's `sequence` and `order`, on it alone. A strided step needs `parameter` or explicit geometry; a write no read checks is
 /// allowed (write stress), with a warning.
 fn parse_sequence(test: &TestConfig, config: &TestMemoryConfig) -> Result<Option<crate::sequence::Sequence>, String> {
     if test.function != "Mem-Sequence" {
@@ -342,10 +341,13 @@ pub fn check_sequence(sequence: &crate::sequence::Sequence, config: &TestMemoryC
     let stride = config.parameter_context.as_ref().and_then(|c| c.stride_elements);
     if sequence.strides() && stride.is_none() {
         return Err(format!(
-            "'{}' walks TM5's stride, which needs the test's \"parameter\" (the stride is channels x \
+            "'{}' walks a stride, which needs \"period_lines\" or the test's \"parameter\" (the legacy stride is channels x \
             parameter - 1 lines), so a config entry",
             sequence.name()
         ));
+    }
+    if !sequence.strides() && config.parameter_context.as_ref().is_some_and(|c| c.access.is_some()) {
+        return Err("\"period_lines\" requires a strided pass in Mem-Sequence".to_string());
     }
     if sequence.unread_writes() {
         log::warn!(
@@ -713,6 +715,64 @@ pub struct TestConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tm5_pattern: Option<Tm5PatternSource>,
     pub parameter: Option<u32>, // Raw TM5 parameter — interpreted via TestParameterContext
+    /// Explicit distance between visit starts in 64-byte lines, independent of `channels` (TODO 126).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub period_lines: Option<usize>,
+    /// Adjacent lines per strided visit. Requires `period_lines`; defaults to one (TODO 126).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_lines: Option<usize>,
+}
+
+/// Explicit software access geometry, in 64-byte lines. It does not identify hardware channels or a DRAM transfer width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessGeometry {
+    pub period_lines: usize,
+    pub group_lines: usize,
+}
+
+impl AccessGeometry {
+    // Leave room for a period beyond the allocation and the prefetch's wrap; reject overflow before allocating test memory.
+    pub const MAX_PERIOD: usize = isize::MAX as usize / 128;
+
+    pub fn new(period_lines: usize, group_lines: usize) -> Result<Self, String> {
+        if period_lines == 0 || period_lines > Self::MAX_PERIOD {
+            return Err(format!("\"period_lines\" must be 1 to {}", Self::MAX_PERIOD));
+        }
+        if !matches!(group_lines, 1 | 2 | 4 | 8 | 16) {
+            return Err("\"group_lines\" supports 1, 2, 4, 8 or 16 (experimental)".to_string());
+        }
+        if period_lines < group_lines || !period_lines.is_multiple_of(group_lines) {
+            return Err("\"period_lines\" must be at least \"group_lines\" and divisible by it".to_string());
+        }
+        Ok(Self { period_lines, group_lines })
+    }
+}
+
+/// Grouped walks only have native kernels. Recheck after command-line pattern overrides too.
+pub(crate) fn validate_access(config: &TestMemoryConfig) -> Result<(), String> {
+    if let Some(access) = config.parameter_context.as_ref().and_then(|c| c.access) {
+        AccessGeometry::new(access.period_lines, access.group_lines)?;
+        if access.group_lines > 1 && config.native_program().is_none() {
+            return Err("\"group_lines\" greater than 1 requires native patterns; numbered legacy modes have no grouped kernel".to_string());
+        }
+        if config.sequence.is_some() {
+            check_sequence(&config.sequence(), config)?;
+        }
+    }
+    Ok(())
+}
+
+fn explicit_access(test: &TestConfig) -> Result<Option<AccessGeometry>, String> {
+    let Some(period) = test.period_lines else {
+        return if test.group_lines.is_some() { Err("\"group_lines\" requires \"period_lines\"".to_string()) } else { Ok(None) };
+    };
+    if !(test.function.starts_with("Mem-SimpleV2") || matches!(test.function.as_str(), "SimpleTest" | "Mem-Simple" | "Mem-Sequence")) {
+        return Err("only SimpleTest and Mem-Sequence read \"period_lines\" and \"group_lines\"".to_string());
+    }
+    if test.parameter.is_some() {
+        return Err("use \"period_lines\" or \"parameter\", not both".to_string());
+    }
+    AccessGeometry::new(period, test.group_lines.unwrap_or(1)).map(Some)
 }
 
 /// How a Mem-MirrorV2 test walks each chunk (TODO 85). Written `whole`, `subblocks:N` or `jump:N` in JSON (`"mirror"`) and on the command
@@ -798,10 +858,12 @@ impl<'de> Deserialize<'de> for MirrorMode {
 /// The v1 code incorrectly funneled all of these into a single field.
 #[derive(Debug, Clone, Default)]
 pub struct TestParameterContext {
+    /// Explicit geometry. The legacy stride fields below carry its group-1 period too; `channels=` must not change it.
+    pub access: Option<AccessGeometry>,
     /// Raw TM5 parameter value, preserved for debugging.
     pub raw_parameter: u32,
     /// SimpleTest: stride in cache lines (64-byte units).
-    /// TM5: `Channels * Parameter - 1`. TMR JSON: direct value.
+    /// TM5: `Channels * Parameter - 1`. Explicit geometry: `period_lines - 1`.
     /// 0 or None means sequential (no striding).
     pub stride_cachelines: Option<usize>,
     /// SimpleTest: stride in u64 elements (derived from stride_cachelines at runtime). `stride_cachelines * (cache_line_bytes / 8)`.
@@ -1286,6 +1348,14 @@ impl ModernConfig {
         if let Some(param) = test.parameter {
             config = config.with_parameter_context(interpret_tm5_parameter_with_channels(&test.function, param, channels));
         }
+        if let Some(access) = explicit_access(test).map_err(|e| Self::test_error(i, test, e))? {
+            config = config.with_parameter_context(TestParameterContext {
+                access: Some(access),
+                stride_cachelines: Some(access.period_lines - 1),
+                stride_elements: Some((access.period_lines - 1) * 8),
+                ..Default::default()
+            });
+        }
 
         // Fold TMR-native test parameters into parameter_context
         if test.stride_patterns.is_some()
@@ -1346,6 +1416,7 @@ impl ModernConfig {
         }
         apply_repetition(test, &mut config);
         validate_repetition(test, &config).map_err(|e| Self::test_error(i, test, e))?;
+        validate_access(&config).map_err(|e| Self::test_error(i, test, e))?;
 
         Ok(config)
     }
@@ -2290,6 +2361,114 @@ mod tests {
         assert!(load(TestConfig { program: Some(vec!["header".into()]), ..entry(None, None) }).is_ok());
         let not_it = TestConfig { enabled: true, function: "Mem-StuckBitAuto".into(), sequence: Some("W R".into()), ..Default::default() };
         assert!(load(not_it).unwrap_err().contains("only Mem-Sequence reads"));
+    }
+
+    #[test]
+    fn explicit_periods_are_per_test_and_survive_config_export() {
+        let mut modern = legacy(100, vec![test(1, "SimpleTest", 100, 16)]).to_modern_config().unwrap();
+        for function in ["Mem-SimpleV2-128", "Mem-SimpleV2-256", "Mem-SimpleV2-512", "Mem-SimpleV2-Auto", "Mem-Sequence"] {
+            for period in [1, 3, 512, 513, AccessGeometry::MAX_PERIOD] {
+                modern.test_sequence[0] = TestConfig {
+                    enabled: true,
+                    function: function.into(),
+                    period_lines: Some(period),
+                    order: (function == "Mem-Sequence").then(|| "stride".into()),
+                    ..Default::default()
+                };
+                for channels in [1, 2, 4, 8] {
+                    modern.system.channels = channels;
+                    let exported = serde_json::to_string(&modern).unwrap();
+                    let reloaded: ModernConfig = serde_json::from_str(&exported).unwrap();
+                    let config = reloaded.get_test_configs().unwrap()[0].1.clone();
+                    let context = config.parameter_context.unwrap();
+                    assert_eq!(context.access, Some(AccessGeometry { period_lines: period, group_lines: 1 }));
+                    assert_eq!(context.stride_elements, Some((period - 1) * 8));
+                    assert_eq!(context.raw_parameter, 0, "explicit periods cannot acquire a channels multiplier");
+                }
+            }
+        }
+        let base = TestConfig { enabled: true, function: "Mem-SimpleV2-Auto".into(), ..Default::default() };
+        for (entry, message) in [
+            (TestConfig { period_lines: Some(0), ..base.clone() }, "\"period_lines\" must be"),
+            (TestConfig { period_lines: Some(usize::MAX), ..base.clone() }, "\"period_lines\" must be"),
+            (TestConfig { group_lines: Some(1), ..base.clone() }, "requires \"period_lines\""),
+            (TestConfig { period_lines: Some(2), parameter: Some(0), ..base.clone() }, "not both"),
+            (TestConfig { period_lines: Some(2), group_lines: Some(3), ..base.clone() }, "\"group_lines\""),
+            (TestConfig { period_lines: Some(2), function: "Mem-Refresh".into(), ..base.clone() }, "only SimpleTest"),
+            (TestConfig { period_lines: Some(2), function: "Mem-Sequence".into(), ..base.clone() }, "requires a strided pass"),
+        ] {
+            modern.test_sequence[0] = entry;
+            assert!(modern.get_test_configs().unwrap_err().contains(message), "{message}");
+        }
+    }
+
+    #[test]
+    fn grouped_geometry_rejects_unread_settings_and_legacy_overrides() {
+        let mut modern = legacy(100, vec![test(1, "SimpleTest", 100, 16)]).to_modern_config().unwrap();
+        for function in ["Mem-SimpleV2-Auto", "Mem-Sequence"] {
+            for group in [2, 4, 8, 16] {
+                modern.test_sequence[0] = TestConfig {
+                    enabled: true,
+                    function: function.into(),
+                    period_lines: Some(512),
+                    group_lines: Some(group),
+                    order: (function == "Mem-Sequence").then(|| "stride".into()),
+                    ..Default::default()
+                };
+                let mut config = modern.get_test_configs().unwrap()[0].1.clone();
+                assert_eq!(config.parameter_context.as_ref().unwrap().access.unwrap().group_lines, group);
+                config.pattern_mode = Some(0);
+                config.program = None;
+                assert!(validate_access(&config).unwrap_err().contains("requires native patterns"), "a CLI legacy override");
+                config.pattern_mode = None;
+                config.sequence = Some(Box::new(crate::sequence::Sequence::default()));
+                assert!(validate_access(&config).unwrap_err().contains("requires a strided pass"), "a CLI sequence override");
+                modern.test_sequence[0].pattern_mode = Some(crate::pattern::Family::Random.number());
+                assert!(modern.get_test_configs().is_ok(), "numeric native family aliases remain native");
+                modern.test_sequence[0].pattern_mode = None;
+                modern.test_sequence[0].period_lines = Some(513);
+                assert!(modern.get_test_configs().unwrap_err().contains("divisible"));
+            }
+        }
+        assert!(AccessGeometry::new(2, 4).unwrap_err().contains("at least"));
+        assert!(AccessGeometry::new(16, 0).unwrap_err().contains("\"group_lines\""));
+    }
+
+    #[test]
+    fn access_geometry_examples_load_with_equal_work_per_geometry() {
+        let inputs = [
+            include_str!("../research/access_geometry/configs/combined.json"),
+            include_str!("../research/access_geometry/configs/combined-reverse.json"),
+            include_str!("../research/access_geometry/configs/baseline-compatible.json"),
+        ];
+        for (i, text) in inputs.into_iter().enumerate() {
+            let config: ModernConfig = serde_json::from_str(text).unwrap();
+            config.validate_system().unwrap();
+            let plan = config.plan().unwrap();
+            assert_eq!(plan.steps.len(), if i < 2 { 12 } else { 3 });
+            if i < 2 {
+                for function in ["Mem-SimpleV2-Auto", "Mem-Sequence"] {
+                    let defs: Vec<_> = plan.tests.iter().filter(|t| t.function == function).collect();
+                    assert_eq!(defs.len(), 6);
+                    let mut geometries: Vec<_> = defs
+                        .iter()
+                        .map(|t| {
+                            let a = t.config.parameter_context.as_ref().unwrap().access.unwrap();
+                            (a.period_lines, a.group_lines)
+                        })
+                        .collect();
+                    geometries.sort_unstable();
+                    assert_eq!(geometries, [(512, 1), (512, 2), (512, 4), (512, 8), (512, 16), (513, 1)]);
+                    let first = &defs[0].config;
+                    for def in &defs {
+                        assert_eq!(def.config.write_read_cycles, first.write_read_cycles);
+                        assert_eq!(def.config.verify_reps, first.verify_reps);
+                        assert_eq!(def.config.native_program(), first.native_program());
+                        assert_eq!(def.config.calculate_chunk_size(function, 1 << 30), first.calculate_chunk_size(function, 1 << 30));
+                    }
+                }
+            }
+        }
     }
 
     /// The page exchange's settings load on its tests alone: `exchange_share` and `exchange_stores` on all three, `exchange_invert` (a

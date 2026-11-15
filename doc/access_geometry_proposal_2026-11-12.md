@@ -1,7 +1,10 @@
 # Proposal: explicit access geometry and useful presets
 
-**Status:** proposal for the owner and Opus to critique before implementation. Written 2026-11-12.
-This document adds no configuration fields or kernels. The approved importer fixes and pattern-conversion reporting are complete.
+**Status:** the owner approved merging the implemented feature on 2026-11-15, with further hardware comparisons deferred to TODO 126.
+The experiment began on `experiment/access-geometry` on 2026-11-13. This document records the design;
+current behavior and validation are in [TODO 126's detail](todo/126-access-geometry.md) and
+[the parameter reference](test_parameters.md#explicit-access-geometry-period_lines-group_lines-todo-126).
+The approved importer fixes and pattern-conversion reporting are complete.
 Block-code-0 rounding is outside this proposal. The change in importer commit `8675f6c` is reverted at the owner's request because
 it could nearly double traversal work. The source review is in [the follow-up research note](memory_mapping_research_2026-11-12.md#review-of-importer-commit-8675f6c).
 

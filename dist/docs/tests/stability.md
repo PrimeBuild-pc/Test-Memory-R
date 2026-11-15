@@ -100,8 +100,13 @@ key of its own, so passes don't repeat each other's values. The chunks are 4 MiB
 30 s or 100 passes, whichever comes first.
 
 A TM5 config's SimpleTest writes two pairs a chunk, its Pattern Mode picking the program;
-`patterns=legacy` runs TM5's own patterns instead. `pattern-mode=` runs one family alone, and
-`seed=` replays a run's values on the same threads and memory.
+`patterns=legacy` selects TMR's older numbered adaptations, not exact TM5 reproduction.
+`pattern-mode=` runs one family alone, and `seed=` replays a run's values on the same threads
+and memory.
+
+In a JSON config, `period_lines` and `group_lines` change the spacing between visits and the
+number of adjacent lines visited before each jump. Every sweep still covers the whole chunk.
+See [access geometry](access-geometry.md) for examples and a comparison config.
 
 ### Mem-SimpleNT-128/256/512/Auto
 
@@ -140,6 +145,10 @@ a step runs 30 s.
 `sequence=` and `order=` change it (`sequence=W,4R,RW@random,R`, `order=reverse`): up to 16
 steps, each with an optional count before it and `@order` after it. A numbered `pattern-mode=`
 leaves Mem-Sequence alone: it runs the native patterns only.
+
+For `stride` passes, a JSON config can set `period_lines` and `group_lines`, as SimpleTest can.
+The settings apply to its stride passes only; forward, reverse and random passes keep their
+own order. See [access geometry](access-geometry.md).
 
 ### Mem-Random
 

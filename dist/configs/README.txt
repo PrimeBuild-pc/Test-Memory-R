@@ -12,3 +12,8 @@ Start begins the run.
 demo_comprehensive_test.json and demo_tm5_compatible.json are TMR's examples, which
 tmr --create-demo-configs writes again. An upgrade never overwrites a file here, and an uninstall
 leaves this folder.
+
+access_geometry.json compares spacing and adjacent-line grouping in SimpleTest and Mem-Sequence.
+It includes experimental groups of 16 lines. See docs\tests\access-geometry.md for the settings
+and a sample command. This additional example ships with the installer; --create-demo-configs
+regenerates only the two demo files above.
