@@ -22,6 +22,7 @@ while TMR runs**, as any memory test can: save your work and close other program
 - [Supported hardware](#supported-hardware)
 - [Requirements](#requirements)
 - [Building from source](#building-from-source)
+- [Privacy](#privacy)
 - [License](#license) · [Credits](#credits)
 
 ## Screenshots
