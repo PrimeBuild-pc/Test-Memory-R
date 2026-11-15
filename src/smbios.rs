@@ -52,10 +52,9 @@ pub struct MemoryModule {
     pub capacity_human: String,
 }
 
-/// Whether the run leaves serial numbers out of what it shows and keeps (`--no-serials`, TODO 105, the owner 2026-11-04; the
-/// `machine_id`/`memory_id` fingerprints too, 2026-11-15): the DIMMs' serials, the system's UUID, and those two fingerprints,
-/// from the console, the log and the results file. `AppConfig` still reads the real values to know the machine when checking
-/// calibration validity; only what a run displays or writes out is affected.
+/// Whether the run leaves serial numbers out of what it shows and keeps (`--no-serials`, TODO 105, the owner 2026-11-04): the DIMMs'
+/// and the system's UUID, from the console, the log and the results file. The machine's fingerprints
+/// (`AppConfig::generate_machine_id`, `memory_fingerprint`) still read them, as a hash: calibration needs it to know the machine.
 static SERIALS_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// `--no-serials`, set as a session starts, before SMBIOS is read
@@ -77,13 +76,13 @@ pub fn shown_system(system: &SystemIdentity) -> SystemIdentity {
     system_shown(system, serials_hidden())
 }
 
-/// A system UUID or a `machine_id`/`memory_id` fingerprint, as the run shows, logs and keeps it: left out under `--no-serials`
-pub fn shown_identifier(id: &str) -> &str {
-    identifier_shown(id, serials_hidden())
+/// A system UUID as the run shows and logs it: left out under `--no-serials`, as the SMBIOS line says it
+pub fn shown_uuid(uuid: &str) -> &str {
+    uuid_shown(uuid, serials_hidden())
 }
 
-fn identifier_shown(id: &str, hidden: bool) -> &str {
-    if hidden { "(left out: --no-serials)" } else { id }
+fn uuid_shown(uuid: &str, hidden: bool) -> &str {
+    if hidden { "(left out: --no-serials)" } else { uuid }
 }
 
 /// A structure's string table as the parse's debug line shows it: under `--no-serials` only how many, since it holds the serials (Type
@@ -639,10 +638,9 @@ fn parse_type17_memory(formatted: &[u8], strings: &[String]) -> Option<MemoryMod
 mod tests {
     use super::*;
 
-    /// TODO 105: `--no-serials` leaves out the DIMMs' serials, the system's UUID, and the `machine_id`/`memory_id` fingerprints,
-    /// and nothing else; without it, all three stay
+    /// TODO 105: `--no-serials` leaves out the DIMMs' serials and the system's UUID, and nothing else; without it, both stay
     #[test]
-    fn no_serials_leaves_out_the_serials_the_uuid_and_the_fingerprints_only() {
+    fn no_serials_leaves_out_the_serials_and_the_uuid_only() {
         let module = MemoryModule {
             locator: "DIMM_A2".to_string(),
             manufacturer: "G Skill".to_string(),
@@ -660,11 +658,9 @@ mod tests {
         let without = system_shown(&system, true);
         assert_eq!((without.uuid.as_str(), without.product_name.as_str()), ("", "PRIME"));
         assert_eq!(system_shown(&system, false).uuid, "03000200-0400");
-        // And the calibration's UUID/machine_id/memory_id mismatch lines (`MachineFingerprint::matches`)
-        assert_eq!(identifier_shown("03000200-0400", true), "(left out: --no-serials)");
-        assert_eq!(identifier_shown("03000200-0400", false), "03000200-0400");
-        assert_eq!(identifier_shown("a1b2c3d4", true), "(left out: --no-serials)");
-        assert_eq!(identifier_shown("a1b2c3d4", false), "a1b2c3d4");
+        // And the calibration's UUID mismatch line (`MachineFingerprint::matches`)
+        assert_eq!(uuid_shown("03000200-0400", true), "(left out: --no-serials)");
+        assert_eq!(uuid_shown("03000200-0400", false), "03000200-0400");
     }
 
     /// TODO 105: the parse's debug line (`RUST_LOG=debug`) shows a structure's string table, Type 17's serial among it, only without

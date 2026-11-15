@@ -208,8 +208,9 @@ impl RunIdentity {
         let virtualized = cache.is_virtual_machine;
 
         Self {
-            machine_id: crate::smbios::shown_identifier(&crate::app_config::AppConfig::generate_machine_id(sys, smbios)).to_string(),
-            memory_id: crate::smbios::shown_identifier(&smbios.memory_fingerprint()).to_string(),
+            machine_id: crate::app_config::AppConfig::generate_machine_id(sys, smbios),
+            memory_id: smbios.memory_fingerprint(),
+            // Under `--no-serials`, none (TODO 105): the hashes above still know the machine
             system_uuid: Some(crate::smbios::shown_system(&smbios.system).uuid).filter(|uuid| !uuid.is_empty()),
             // Same constructor `AppConfig::update_identity` uses, so a result file's readable identity always corresponds to the
             // `machine_id` that gates calibration reuse.

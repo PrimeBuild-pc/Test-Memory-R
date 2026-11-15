@@ -95,11 +95,7 @@ impl MachineFingerprint {
             Some(stored_id) => {
                 let current_id = AppConfig::generate_machine_id(system_info, smbios);
                 if stored_id != &current_id {
-                    log::warn!(
-                        "{what}: machine ID mismatch (CPU/cache/BIOS changed): stored={}, current={}",
-                        crate::smbios::shown_identifier(stored_id),
-                        crate::smbios::shown_identifier(&current_id)
-                    );
+                    log::warn!("{what}: machine ID mismatch (CPU/cache/BIOS changed): stored={}, current={}", stored_id, current_id);
                     valid = false;
                 }
             }
@@ -116,8 +112,8 @@ impl MachineFingerprint {
         {
             log::warn!(
                 "{what}: system UUID mismatch (VM migration or motherboard swap): stored={}, current={}",
-                crate::smbios::shown_identifier(stored_uuid),
-                crate::smbios::shown_identifier(current_uuid)
+                crate::smbios::shown_uuid(stored_uuid),
+                crate::smbios::shown_uuid(current_uuid)
             );
             valid = false;
         }
@@ -128,8 +124,8 @@ impl MachineFingerprint {
             if stored_mem_id != &current_mem_id {
                 log::warn!(
                     "{what}: memory configuration changed (DIMM swap, XMP change, or capacity change): stored={}, current={}",
-                    crate::smbios::shown_identifier(stored_mem_id),
-                    crate::smbios::shown_identifier(&current_mem_id)
+                    stored_mem_id,
+                    current_mem_id
                 );
                 valid = false;
             }
