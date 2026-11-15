@@ -2750,7 +2750,7 @@ mod tests {
         let memory = outline(&s.memory);
         assert_eq!(memory[..3], ["Large pages: on, tested", "table Windows' memory", "table Memory Status & Allocation Plan"]);
         assert!(
-            memory.iter().any(|line| line.starts_with("table Memory Allocation (")) && memory.contains(&"table Threads".to_string()),
+            memory.iter().any(|line| line.starts_with("table Memory Allocation (")) && memory.iter().any(|line| line == "table Threads"),
             "{memory:?}"
         );
         assert_eq!(outline(&s.plan)[..2], [
