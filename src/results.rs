@@ -1352,8 +1352,8 @@ mod tests {
         assert_eq!(back.run_config.tests_left_out, result.run_config.tests_left_out);
 
         let keys = |value: serde_json::Value| value.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
-        assert!(!keys(serde_json::to_value(&result.cycles[0]).unwrap()).contains(&"partial".to_string()));
-        assert!(!keys(serde_json::to_value(&result.cycles[1].tests[0]).unwrap()).contains(&"threads".to_string()));
+        assert!(!keys(serde_json::to_value(&result.cycles[0]).unwrap()).iter().any(|i: &String| i == "partial"));
+        assert!(!keys(serde_json::to_value(&result.cycles[1].tests[0]).unwrap()).iter().any(|i: &String| i == "threads"));
         assert_eq!(keys(serde_json::to_value(&result.cycles[1].tests[1].threads[1]).unwrap()), [
             "bytes", "cycles", "errors", "ms", "operations", "thread"
         ]);
@@ -1399,14 +1399,14 @@ mod tests {
 
         let keys = |value: serde_json::Value| value.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
         let step_keys = keys(serde_json::to_value(step).unwrap());
-        assert!(step_keys.contains(&"loaded".to_string()) && !step_keys.iter().any(|k| k.starts_with("latency_")), "{step_keys:?}");
+        assert!(step_keys.iter().any(|i: &String| i == "loaded") && !step_keys.iter().any(|k| k.starts_with("latency_")), "{step_keys:?}");
         assert_eq!(keys(serde_json::to_value(&step.threads[1]).unwrap()), [
             "bytes", "cycles", "errors", "ms", "operations", "role", "thread"
         ]);
         for (c, cycle) in back.cycles.iter().enumerate() {
             for (t, other) in cycle.tests.iter().enumerate().filter(|&(t, _)| (c, t) != (1, 0)) {
                 let other = keys(serde_json::to_value(other).unwrap());
-                assert!(!other.contains(&"loaded".to_string()), "cycle {c} step {t}: {other:?}");
+                assert!(!other.iter().any(|i: &String| i == "loaded"), "cycle {c} step {t}: {other:?}");
             }
         }
     }
