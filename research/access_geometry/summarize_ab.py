@@ -21,7 +21,10 @@ def read_run(path):
     if not match:
         raise ValueError(f"No results in {path}")
     result_path = pathlib.Path(match[1].strip())
-    if not result_path.is_absolute():
+    fetched = path.parent / pathlib.PureWindowsPath(match[1].strip()).name
+    if fetched.is_file():
+        result_path = fetched
+    elif not result_path.is_absolute():
         result_path = APP / result_path
     result = json.loads(result_path.read_text(encoding="utf-8"))
     config = result["run_config"]

@@ -73,7 +73,7 @@ and non-cancelling differences, guard words, overlapping writes, periods above c
 passes. Harness tests extend seal restoration and error-count/halt checks to grouped walks. SIMD execution is limited to
 the host's supported widths; compilation and post-LTO inspection cover all emitted widths.
 
-## Validation complete; hardware gate remains
+## Development validation
 
 Code commit `72ab3b8`: full local CI passed, including 581 tests (six opt-in skips), all Clippy variants, release build and
 dependency audit. The 364 offline coverage/model cases also passed. The release is archived at
@@ -95,10 +95,10 @@ describe all code-generation changes.
 The existing G1 paths are retained, but no claim of identical G1 performance is made. Results, scripts, exact counts and
 commands are in `research/access_geometry/README.md`; complete local audits/manifest are under `target/access-geometry/`.
 
-The owner still needs to measure G1 regressions, grouped prefetch/control cost, and error detection on hardware. This is
-why G16 remains experimental and why the branch has not merged. P stays divisible by G; odd groups remain deferred.
+The subsequent physical campaign measures G1 comparisons, complete grouped paths and an error screen; its report is
+linked below. G16 remains experimental and the branch has not merged. P stays divisible by G; odd groups remain deferred.
 
-## Next
+## Local and physical follow-up
 
 The owner's requested local before/after check is complete (2026-11-13): 16 measured runs and two pilots on the dev VM,
 fixed 8 GiB / four workers / 256 bits / 2 MiB pages, all passed with zero errors. The first set was noisy, including
@@ -113,5 +113,20 @@ Review follow-up: both combined geometry configs now passed end-to-end locally o
 with G2/G4/G8/G16 in both test types, 4 GiB/four workers/256 bits/2 MiB pages and zero errors. Saved geometry, cycles and
 processed work were checked. These are functional checks, not isolated spill-cost measurements or detection comparisons.
 
-The owner runs the baseline-compatible A/B and combined/reversed geometry configs on physical machines. Use those results to choose the shipped
-group set and assess throughput/detection before merging `experiment/access-geometry`. Importer work is settled.
+The owner authorized the physical campaign on 2026-11-15. The retained binaries ran on Ryzen 5700X/DDR4 and 8600G/DDR5,
+with 8 GiB, four workers and fixed 2 MiB pages. ABBA/BAAB exchanges the inner and outer build slots. Combined geometry runs,
+same-forward-order P=G controls and a longer 512-bit screen complement the existing-G1 comparison. Actual hardware errors
+and incomplete runs are retained, and excluded from clean speed comparisons. Full results and their limits:
+[`hardware_comparison_2026-11-15.md`](../../research/access_geometry/hardware_comparison_2026-11-15.md).
+
+The campaign completed 37 runs. All 20 on the 5700X passed; the 8600G had eight test and five seal errors across five
+halted runs, including one baseline run with the same bit-34 symptom seen on the candidate. Its later 17m35s screen
+passed all 120 steps at 512 bits. No large G1 regression was established. In the same-forward-order controls, the largest
+mean grouped-path penalty was 1.09% at 512 bits; this is a measured small cost, not a zero-overhead claim. All final controls
+passed, results were fetched, and both machines are idle with no further runs queued.
+
+## Next
+
+Review the physical results and decide the shipped group set before merging `experiment/access-geometry`. Keep the compact
+shared body and G1 default; G16 remains experimental. Complete-path timings include real traversal overhead, but do not
+isolate individual spills or establish the best geometry for detection. Importer work is settled.

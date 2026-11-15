@@ -78,7 +78,8 @@ Code commit `72ab3b8`, same compiler/SDK as the baseline:
   baseline's 2: all 227 added flags belong to grouped traversal control. The corrected audit reports 551 grouped
   control ranges: 227 round-trip, 182 reload-only, 142 clean. This is real stack traffic, not a spill-free kernel.
   These are static ranges across specialisations, not spills per memory access. Their frequency and an example are in
-  [the review follow-up](review_followup_2026-11-13.md); their throughput cost remains to be measured.
+  [the review follow-up](review_followup_2026-11-13.md); subsequent complete-path timings are in
+  [the physical comparison](hardware_comparison_2026-11-15.md).
 - `.text`: 7,124,126 bytes, 5.6% above baseline; full expansion had added 51.9%. The grouped implementation adds 228
   specialized functions across patterns/operations/widths, shared across G=2/4/8/16, rather than 912 functions for four
   separate group kernels.
@@ -92,8 +93,8 @@ Code commit `72ab3b8`, same compiler/SDK as the baseline:
   (whose artifact keys are `tmr.exe`/`tmr.pdb`). `validation.json` records both executable hashes and the common code hash.
   The standard archive is `../builds/72ab3b8b87e2-165d7eeea894ded3/`.
 
-The original validation above did not run TMR live. Later G1 measurements and grouped functional checks are recorded
-below; the branch remains an experiment pending physical-machine speed/detection comparisons.
+The original validation above did not run TMR live. Later G1 measurements, grouped functional checks and the physical
+comparison are recorded below; the branch remains an experiment pending review of those results.
 
 ## Hardware comparison kit
 
@@ -166,3 +167,15 @@ four workers, 4 GiB actually allocated, 256-bit SIMD, 2 MiB pages, all 12 steps 
 The saved plans confirm every requested P/G pair, and the results have the expected work and completed cycles.
 This closes the missing end-to-end grouped sanity check at 256 bits, not the physical detection or performance gate.
 See [the full follow-up](review_followup_2026-11-13.md) for commands, artifact locations and the spill reconciliation.
+
+## Physical comparison, 2026-11-15
+
+The retained baseline and candidate were run on Ryzen 5700X/DDR4 and 8600G/DDR5, with fixed 8 GiB allocations,
+four workers and 2 MiB pages. Regression blocks alternate ABBA/BAAB. Grouped tests cover both visit orders at
+256 bits, with additional 512-bit screening on the 8600G. P=G controls compare the complete grouped paths while
+holding forward line order constant; they include control/prefetch costs but do not isolate individual spills.
+
+See [the hardware report](hardware_comparison_2026-11-15.md) for results, errors and limits. Raw results and
+deployment manifests are retained outside Git in `../baselines/2026-11-15-access-geometry/`. The three
+`summarize_hardware.py`, `summarize_same_order.py` and `summarize_screen.py` tools reproduce the comparisons and
+check completed work. Hardware errors and incomplete runs are retained, and excluded from clean speed comparisons.
