@@ -147,19 +147,30 @@ Keep these follow-ups open; they are not merge prerequisites and no hardware run
 1. **Compare groups away from P=512.** On each desktop, use P=496 with G=1/2/4/8/16, plus 508/1 as a community-config
    reference and 512/1, 512/16 and 513/1 as controls. 496 is divisible by every supported group. 508 is divisible only by
    G=1/2/4, and 504 only by G=1/2/4/8; do not silently round an invalid pair. Use the same allocation, native program,
-   rounds, verified work, page size and workers; include both test orders and retain per-step exposure. A roughly ten-minute
-   budget per host is a starting estimate, not a hard stop: TMR finishes its current suite cycle after its duration limit.
+   rounds, verified work, page size and workers; include both test orders and retain per-step exposure. Two runs per host,
+   each containing forward and reverse orders, give four observations per geometry and test type. Previous step timings
+   suggest about 15 minutes on the 5700X and 11 minutes on the 8600G for this expanded matrix.
 2. **Complete the existing-G1 A/B at 512 bits.** The matched physical regression blocks were at 256 bits. The 512-bit
    baseline diagnostic and candidate screens were not a matched A/B. Build both comparands with the same compiler, SDK
    and settings; alternate ABBA/BAAB with a reference, retain errors, and exclude incomplete runs from clean speed comparisons.
+   Eight runs on the 8600G are estimated at nine minutes. Together with item 1, reserve about 30 minutes with both desktops
+   running in parallel; these short comparisons measure throughput, not fault-detection effectiveness.
 3. **Separate visit shape from prefetch effects.** Record effective lookahead for each P/G. The target is up to 128 visited
    lines, so visits ahead scale with G and are limited by the shortest offset pass. A throughput change alone does not
    establish different DRAM row activity, channel use, electrical stress, or better detection.
-4. **Optional detection comparison under an owner-selected marginal setting.** If the owner wants it, compare the geometries
-   on one allocation and repeat with controlled settings across two or three boots. A row-timing experiment would test a
-   different hypothesis from the observed intermittent bit errors. BIOS changes remain the owner's action; this TODO does
-   not authorize changing timings or starting another hardware run. Compare time to first error, exposure and repeated
-   addresses without treating repeated checks as independent faults.
+4. **Longer detection comparison after warm-up, without reboots.** The owner requested one boot, longer runs and 5–10 minutes
+   of memory load before the measured series (2026-11-15). Proposed starting budget: a ten-minute warm-up, then three
+   45-minute measured runs back-to-back at fixed settings. Each run repeatedly mixes the comparison geometries on its own
+   allocation; alternate forward/reverse ordering and vary the starting geometry between runs. Compare geometries within
+   each run first: restarting TMR can change the physical memory allocated.
+   Keep allocation size, workers, page size, patterns and verification settings fixed. Retain warm-up errors as failures,
+   separately from the warmed comparison. Use continuing error reporting so one failure does not remove the remaining
+   geometries' exposure. Record elapsed time, verified work and repeated addresses; repeated checks are not independent
+   fault events. Compare exposure-normalized rates as well as time to first error.
+   Ten minutes is a conditioning interval, not proof of thermal equilibrium. Record temperatures if existing telemetry
+   provides them, and repeat the warm-up after a substantial idle gap. The proposed detection series is 145 minutes per
+   desktop before setup and suite-cycle overrun; both can run in parallel. It is an initial screen, not a promise of enough
+   independent errors to rank geometries. No reboot or BIOS change is required, and no hardware run is scheduled here.
 
 Use those results to improve recommended configurations and assess the value of grouping. Complete-path timings include
 real traversal overhead; they do not isolate individual spills or establish the best geometry for detection.
