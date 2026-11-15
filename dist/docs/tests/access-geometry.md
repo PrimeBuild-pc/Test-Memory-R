@@ -12,7 +12,7 @@ Put these fields in a test entry in a TMR JSON config:
 | Field | Meaning | Values |
 |---|---|---|
 | `period_lines` | Distance between visit starts, in 64-byte lines | Positive integer, at least the group size and divisible by it |
-| `group_lines` | Consecutive lines accessed in one visit | 1 (default), 2, 4, 8; 16 is experimental |
+| `group_lines` | Consecutive lines accessed in one visit | 1 (default), 2, 4, 8 or 16 |
 
 For example, `"period_lines": 512, "group_lines": 2` accesses 128 bytes per visit, with
 32 KiB between visit starts. One offset pass visits lines `(0,1)`, then `(512,513)`, then
@@ -40,7 +40,7 @@ channel, bank or row, or changes the BIOS's interleaving configuration.
 | 513 / 1 | 64 B per visit, 32,832 B between starts | Changes low address bits between visits |
 | 512 / 2 | 128 B per visit, 32 KiB between starts | Adds the adjacent line before each jump |
 | 512 / 4 or 8 | 256 or 512 B per visit, 32 KiB between starts | Does more work at nearby addresses before jumping |
-| 512 / 16 | 1 KiB per visit, 32 KiB between starts | Experimental larger group |
+| 512 / 16 | 1 KiB per visit, 32 KiB between starts | A longer local run before each jump |
 
 These are starting points for comparison, not ranked presets. Repeated low address bits may
 concentrate requests on particular cache sets or memory resources; changing those bits may
@@ -73,8 +73,8 @@ each thread's full allocation; smaller allocations cap the chunks. Its duration 
 the allocation and machine, rather than a fixed time limit. A bare-exe installation can
 download the config from the link above and place it in TMR's `configs\` folder.
 
-The plan describes bytes per visit and bytes between visit starts, marks G16 experimental,
-and reports when a chunk is too small for any period hop. Results retain the requested
+The plan describes bytes per visit and bytes between visit starts, and reports when a chunk
+is too small for any period hop. Results retain the requested
 geometry. Compare the same test type with itself: SimpleTest and Mem-Sequence perform different
 amounts of work.
 

@@ -49,7 +49,7 @@ these were not merely a larger counter or cold-path spill. The executable's `.te
 The revised candidate shares a bounded inner body across groups 2/4/8/16: one line at 128 bits (already four SIMD vectors),
 two lines at 256/512. A visit repeats that body before the period jump. Selection remains outside the memory loop, four
 accumulators remain independent, and the requested visit order and prefetch targets are unchanged. This adds bounded loop
-control in exchange for smaller code and less register pressure. Group 16 remains experimental. Hardware comparisons,
+control in exchange for smaller code and less register pressure. Hardware comparisons,
 rather than instruction counts, must establish the throughput cost, including outer-loop control and invariant reloads.
 
 The intermediate all-two-line version (`5cb54c9`, retained as `two-line-*`) reduced `.text` to 7,139,918 bytes (+5.9% over
@@ -96,7 +96,7 @@ Code commit `72ab3b8`, same compiler/SDK as the baseline:
 The original validation above did not run TMR live. Later G1 measurements, grouped functional checks and the physical
 comparison are recorded below. On 2026-11-15 the owner approved merging the implementation as an optional setting,
 with further hardware comparisons deferred to [TODO 126](../../doc/todo/126-access-geometry.md#merged-implementation-deferred-hardware-follow-up).
-G16 remains experimental; default plans and TM5 imports remain G1.
+All five group sizes are supported; default plans and TM5 imports remain G1.
 
 ## Hardware comparison kit
 
@@ -110,7 +110,7 @@ The files in `configs/` are ordinary TMR JSON configs:
   introduced after the local VM's short control steps showed substantial variation.
 - `combined.json`: P/G 512/1, 513/1, 512/2, 512/4, 512/8 and 512/16, in SimpleTest and Mem-Sequence.
   Every geometry within one test type has the same extent, chunk, pattern program and number of reads/writes.
-  All four program entries run as verified polarity pairs. Group 16 is experimental.
+  All four program entries run as verified polarity pairs.
 - `combined-reverse.json`: the same entries in reverse order, for an order/drift check. Step keys change with position, so
   this changes the data too; it is not a same-image replay. Fixed `seed=` reproduces one config on the same thread/span layout.
 

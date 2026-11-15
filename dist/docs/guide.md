@@ -250,7 +250,7 @@ before running it.
 
 For access-order comparisons, the installer also includes
 [`access_geometry.json`](../configs/access_geometry.json). It runs SimpleTest and Mem-Sequence
-with several spacings and groups of adjacent lines, including experimental groups of 16.
+with several spacings and groups of 1, 2, 4, 8 and 16 adjacent lines.
 The [access geometry guide](tests/access-geometry.md) explains what changes, how to run it,
 and how to add these per-test settings to your own config.
 

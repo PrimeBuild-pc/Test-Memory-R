@@ -27,8 +27,10 @@ not proof of hitting a specific channel.
   On 2026-11-13 the owner approved evaluating G=1/2/4/8, with 16 as an additional candidate, and starting implementation on
   a separate branch. Odd groups remain deferred.
 - On 2026-11-15, after the physical comparison and Opus's review, the owner approved merging the branch as implemented,
-  with the additional hardware comparisons deferred to this TODO. G=1/2/4/8/16 remains available, G16 experimental.
+  with the additional hardware comparisons deferred to this TODO. G=1/2/4/8/16 remains available.
   Existing plans and TM5 imports remain G1. The merge does not claim improved error detection or select a preferred group.
+- The owner subsequently requested removing the G16-only experimental label. All supported groups share the same
+  qualification: no group has established a detection advantage. No kernel, supported value or default changes.
 
 ## Full proposal and research
 
@@ -52,7 +54,7 @@ compiler/SDK, and retained under `target/access-geometry/baseline*`.
   Dispatch is outside the memory loops. Groups share a bounded body (one line at 128 bits, two at 256/512) and one traversal macro.
   No new pattern generator, physical
   mapping, default test-program change, or TM5-import geometry change.
-- G=1/2/4/8/16 accepted on the experiment branch; G16 labeled experimental. P must be positive, at least G, and divisible
+- G=1/2/4/8/16 accepted. P must be positive, at least G, and divisible
   by G. G>1 with legacy patterns fails validation, including after CLI overrides. A Sequence with explicit geometry must
   actually contain a stride pass.
 - Four independent error accumulators. At 512 bits, each two-line tile rotates the two pairs. A failed reduction still
@@ -99,7 +101,7 @@ The existing G1 paths are retained, but no claim of identical G1 performance is 
 commands are in `research/access_geometry/README.md`; complete local audits/manifest are under `target/access-geometry/`.
 
 The subsequent physical campaign measures G1 comparisons, complete grouped paths and an error screen; its report is
-linked below. The owner approved the merge with G16 still experimental. P stays divisible by G; odd groups remain deferred.
+linked below. The owner approved the merge with all five group sizes. P stays divisible by G; odd groups remain deferred.
 
 ## Local and physical follow-up
 

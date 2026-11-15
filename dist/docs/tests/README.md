@@ -92,7 +92,7 @@ tests; neither the default plans nor `plan=all` automatically tries every geomet
 
 The [access geometry guide](access-geometry.md) explains the choices, their intended stress,
 the relationship to TM5's Channels/Parameter, and a runnable comparison config. Groups of
-1, 2, 4, 8 and 16 lines are available; 16 is experimental. The settings describe access order,
+1, 2, 4, 8 and 16 lines are available. The settings describe access order,
 not which hardware channel, bank or row receives a request.
 
 ## Reading the names

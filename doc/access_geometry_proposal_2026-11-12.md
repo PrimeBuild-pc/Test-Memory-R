@@ -17,8 +17,8 @@ experiments; choosing a useful test should not require knowing the memory contro
 The proposed per-test fields are:
 
 - `period_lines`: distance between the starts of successive visits within an offset pass, in 64-byte lines.
-- `group_lines`: adjacent complete lines visited before taking that step; default 1. Evaluate 2, 4 and 8 for the initial
-  implementation, with 16 as a further experimental candidate. Two is not a hardware limit.
+- `group_lines`: adjacent complete lines visited before taking that step; default 1. The initial evaluation covered
+  2, 4 and 8, with 16 as an additional candidate. All five sizes are now supported. Two is not a hardware limit.
 
 These describe software accesses. They do not select a channel, configure interleaving, change a DRAM burst length, or select
 the SIMD width. The data pattern and its transfer profile remain independent of this geometry.

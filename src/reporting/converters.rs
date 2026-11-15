@@ -208,9 +208,8 @@ pub fn create_test_configuration_report_v2(
         let config = &test_def.config;
         let access = config.parameter_context.as_ref().and_then(|ctx| ctx.access);
         if let Some(access) = access {
-            let experimental = if access.group_lines == 16 { " (group 16 is experimental)" } else { "" };
             notes.push(format!(
-                "ℹ  Test {} Access: {} B per visit ({} lines), {} B between visit starts ({} lines){experimental}. \
+                "ℹ  Test {} Access: {} B per visit ({} lines), {} B between visit starts ({} lines). \
                  Every line is checked; this describes the software walk, not a hardware channel.",
                 i + 1, access.group_lines * 64, access.group_lines, access.period_lines * 64, access.period_lines,
             ));
@@ -773,7 +772,8 @@ mod tests {
         assert!(text.contains("no period hop fits") && text.contains("Full coverage is retained"));
         def.config.parameter_context.as_mut().unwrap().access = Some(crate::config::AccessGeometry::new(32, 16).unwrap());
         let text = notes(def);
-        assert!(text.contains("group 16 is experimental") && !text.contains("no period hop fits"));
+        assert!(text.contains("1024 B per visit (16 lines), 2048 B between visit starts (32 lines)."));
+        assert!(!text.contains("no period hop fits"));
     }
 
     /// TODO 117: a loaded latency test's settings show as its step's parameter, each one given, its window in the largest unit that holds

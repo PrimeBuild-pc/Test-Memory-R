@@ -14,7 +14,7 @@ Per-test JSON fields for native `Mem-SimpleV2-128/-256/-512/-Auto` and `Mem-Sequ
 | Field | Meaning | Accepted values |
 |---|---|---|
 | `period_lines` | Distance between visit starts, in 64-byte lines | Positive integer; at least the group size and divisible by it |
-| `group_lines` | Consecutive complete lines accessed per visit | 1 (default), 2, 4, 8; 16 is experimental |
+| `group_lines` | Consecutive complete lines accessed per visit | 1 (default), 2, 4, 8 or 16 |
 
 For example, `"period_lines": 512, "group_lines": 4` visits 256 B at a time, stepping 32 KiB between visit starts.
 Other offset passes cover the remaining lines. Each sweep checks the entire chunk exactly once; it does not sample memory.
@@ -29,7 +29,7 @@ hardware channel or configure interleaving. Compare several shapes over the same
 | 513 / 1 | 64 B per visit, 32,832 B between starts | Changes the low address bits between visits |
 | 512 / 2 | 128 B per visit, 32 KiB between starts | Adds the adjacent line before each jump |
 | 512 / 4 or 8 | 256 or 512 B per visit, 32 KiB between starts | Larger local runs between jumps |
-| 512 / 16 | 1 KiB per visit, 32 KiB between starts | Experimental larger local run; measure its cost |
+| 512 / 16 | 1 KiB per visit, 32 KiB between starts | A longer local run before each jump |
 
 These may concentrate or distribute requests differently under different mappings. None guarantees either effect on a
 particular channel. They also change prefetch and cache behavior; stronger error detection must be established on hardware.
@@ -39,8 +39,8 @@ have at least one `stride` pass; its forward/reverse/random passes keep their ow
 including after CLI overrides: a legacy numbered-pattern override is rejected. No global geometry override is added.
 
 If the period is at least the chunk length, every offset pass contains one visit. Coverage remains complete, but no period hop
-occurs; the plan reports this for the smallest resolved chunks. It also prints bytes per visit, bytes between starts and the
-experimental group-16 marker. Saved results retain the requested geometry. Default plans and TM5 imports remain group 1.
+occurs; the plan reports this for the smallest resolved chunks. It also prints bytes per visit and bytes between starts.
+Saved results retain the requested geometry. Default plans and TM5 imports remain group 1.
 
 See [the comparison kit](../research/access_geometry/README.md) and
 [the design and coverage proof](access_geometry_proposal_2026-11-12.md).

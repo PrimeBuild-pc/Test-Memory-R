@@ -14,6 +14,6 @@ tmr --create-demo-configs writes again. An upgrade never overwrites a file here,
 leaves this folder.
 
 access_geometry.json compares spacing and adjacent-line grouping in SimpleTest and Mem-Sequence.
-It includes experimental groups of 16 lines. See docs\tests\access-geometry.md for the settings
+It includes groups of 1, 2, 4, 8 and 16 lines. See docs\tests\access-geometry.md for the settings
 and a sample command. This additional example ships with the installer; --create-demo-configs
 regenerates only the two demo files above.

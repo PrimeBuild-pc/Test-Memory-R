@@ -739,7 +739,7 @@ impl AccessGeometry {
             return Err(format!("\"period_lines\" must be 1 to {}", Self::MAX_PERIOD));
         }
         if !matches!(group_lines, 1 | 2 | 4 | 8 | 16) {
-            return Err("\"group_lines\" supports 1, 2, 4, 8 or 16 (experimental)".to_string());
+            return Err("\"group_lines\" supports 1, 2, 4, 8 or 16".to_string());
         }
         if period_lines < group_lines || !period_lines.is_multiple_of(group_lines) {
             return Err("\"period_lines\" must be at least \"group_lines\" and divisible by it".to_string());

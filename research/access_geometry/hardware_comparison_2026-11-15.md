@@ -168,7 +168,7 @@ SimpleTest has development tests and assembly checks, but no physical timing in 
 All live allocations here are DRAM-sized; four-worker bandwidth can hide costs that matter with
 one worker or cache-sized chunks.
 
-Keep the compact shared-body implementation for review, with G1 as the unchanged default and G16
-still experimental. The tested geometries produce substantially different workloads, which is the
+Keep the compact shared-body implementation for review, with G1 as the unchanged default.
+The tested geometries produce substantially different workloads, which is the
 reason to offer them. These results do not select a best group for error detection, prove channel
 targeting, or justify changing imported TM5 geometry automatically.

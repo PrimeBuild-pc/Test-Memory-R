@@ -117,7 +117,7 @@ paths. The original noisy set does not justify a clean performance claim, and on
 sub-percent equivalence. The fixed arm-to-slot order is another limitation: subsequent comparisons should alternate
 ABBA and BAAB, preserving each arm's first/last labels, rather than merely repeating ABBA.
 Other SIMD widths, AMD CPUs, grouped-loop overhead and error-finding effectiveness remain
-for the physical-machine campaign. G16 stays experimental.
+for the physical-machine campaign.
 
 In total, 16 measured runs and two setup pilots passed with zero test, seal or guest-reported WHEA errors. The 16
 measured runs counted 20 TiB of reads/writes; that is repeated logical traffic, not 20 TiB of unique memory or proof
