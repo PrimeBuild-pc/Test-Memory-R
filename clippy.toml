@@ -1,0 +1,5 @@
+# The frame size the stack lints warn at (large_unopt_stack_frames and large_stack_frames). Clippy's default, 512,000 bytes, is half
+# a 1 MiB stack. Every thread TMR runs code on has 2 MiB: std's Windows default for the threads Rust spawns, and /STACK in
+# crates/tmr-app/build.rs for tmr.exe's main thread. Half of that, so one frame still warns well before it nears the stack.
+# registered_tests (src/runner.rs) is the frame nearest it, at about 592 KB unoptimized (2026-11-15).
+stack-size-threshold = 1048576

@@ -11,6 +11,10 @@
 //!   beside tmr.exe is never used. The flag is the load-time imports' only. The delay-load helper's LoadLibraryEx and the Windows App
 //!   Runtime's loads search as before, and don't need it: the delay-loaded DLL is an API set, which the loader maps to the DLL that
 //!   implements it rather than look for a file, and the runtime loads from its package's folder (doc/todo/114-dll-search.md).
+//! - The main thread's stack, in every build: 2 MiB reserved (`/STACK`), where the linker's default is 1 MiB. The console runs its
+//!   session on the main thread; every thread Rust spawns (the window's session thread, the engine's workers, libtest's test threads)
+//!   already has 2 MiB, std's Windows default. So every thread TMR runs code on has one budget, the one `clippy.toml`'s
+//!   `stack-size-threshold` is set against (the owner, 2026-11-15).
 //! - With the window (the `gui` feature, the default), what the CLI-only build (`--no-default-features`) doesn't link; without the
 //!   feature, none of it, so that exe has no delay-import directory and no manifest:
 //!   - The import older Windows lacks. Reactor imports `TryCreatePackageDependency` from `api-ms-win-appmodel-runtime-l1-1-5.dll`, which
@@ -39,6 +43,9 @@ fn main() {
 
     // LOAD_LIBRARY_SEARCH_SYSTEM32: the exe's imports from System32, never from its own folder
     println!("cargo::rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+
+    // The main thread's stack reserve, as Rust's spawned threads have: the console runs its session there
+    println!("cargo::rustc-link-arg-bins=/STACK:2097152");
 
     if std::env::var_os("CARGO_FEATURE_GUI").is_some() {
         println!("cargo::rustc-link-arg-bins=/DELAYLOAD:api-ms-win-appmodel-runtime-l1-1-5.dll");
