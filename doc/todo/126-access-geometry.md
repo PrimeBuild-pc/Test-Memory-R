@@ -130,7 +130,7 @@ passed all 120 steps at 512 bits. No large G1 regression was established. In the
 mean grouped-path penalty was 1.09% at 512 bits; this is a measured small cost, not a zero-overhead claim. All final controls
 passed, results were fetched, and both machines are idle with no further runs queued.
 
-## Merged implementation; deferred hardware follow-up
+## Merged implementation; hardware follow-up
 
 The feature is an optional geometry setting for existing SimpleTest and Mem-Sequence kernels, not a replacement for another
 test. The owner chose to merge it as implemented. No new geometry is enabled in default plans or TM5 imports.
@@ -142,7 +142,7 @@ change is a G1 period comparison, not evidence for grouping. The fixed-period gr
 controls held line order constant but did not compare groups at one common non-power-of-two period. Cache/prefetch effects
 could explain much of the measured variation. No particular cause or detection benefit has been established.
 
-Keep these follow-ups open; they are not merge prerequisites and no hardware run is scheduled:
+These follow-ups were deferred from the merge. The owner authorized the campaign on 2026-11-16; execution is recorded below:
 
 1. **Compare groups away from P=512.** On each desktop, use P=496 with G=1/2/4/8/16, plus 508/1 as a community-config
    reference and 512/1, 512/16 and 513/1 as controls. 496 is divisible by every supported group. 508 is divisible only by
@@ -170,7 +170,26 @@ Keep these follow-ups open; they are not merge prerequisites and no hardware run
    Ten minutes is a conditioning interval, not proof of thermal equilibrium. Record temperatures if existing telemetry
    provides them, and repeat the warm-up after a substantial idle gap. The proposed detection series is 145 minutes per
    desktop before setup and suite-cycle overrun; both can run in parallel. It is an initial screen, not a promise of enough
-   independent errors to rank geometries. No reboot or BIOS change is required, and no hardware run is scheduled here.
+   independent errors to rank geometries. No reboot or BIOS change is required.
 
 Use those results to improve recommended configurations and assess the value of grouping. Complete-path timings include
 real traversal overhead; they do not isolate individual spills or establish the best geometry for detection.
+
+### Campaign started, 2026-11-16
+
+Both desktop queues started around 12:40 AEDT with the retained, matched baseline `57369c4` and candidate `72ab3b8`;
+no rebuild or BIOS changes. Each host passed idle/free-memory checks, deployment hash verification and all config previews.
+The 5700X runs at 256 bits and the 8600G at 512 bits, both with 8 GiB, four workers, 256 MiB chunks and fixed 2 MiB pages.
+
+The queues have six processes on the 5700X and fourteen on the 8600G: warm-up, two geometry runs, then three long screens,
+with eight baseline/candidate runs added on the 8600G before its screens. Each geometry/screen cycle contains all 18
+test/geometry pairs in mirrored order (36 steps), with starting positions rotated for the three screens. Warm-up lasts
+600 seconds and each screen 2,700 seconds, plus suite-cycle overrun. Errors are logged without truncating exposure.
+
+The private archive `../baselines/2026-11-16-access-geometry/` retains the generator, configs, exact queues, runner snapshot,
+SHA-256 manifest, preflight records and automatic result collection. Its README records the effective prefetch distances:
+at P496, G1/2/4/8/16 look 128/64/32/16/8 visits ahead, respectively. The chunk is large enough that none is clipped.
+Thus this campaign compares complete workloads, including their prefetch differences.
+
+After the queues finish, validate coverage/settings and analyse throughput and error evidence before closing TODO 126.
+Fix any concrete implementation defect first. An inconclusive fault-detection ranking alone does not require another campaign.
