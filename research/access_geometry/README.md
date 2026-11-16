@@ -95,8 +95,10 @@ Code commit `72ab3b8`, same compiler/SDK as the baseline:
 
 The original validation above did not run TMR live. Later G1 measurements, grouped functional checks and the physical
 comparison are recorded below. On 2026-11-15 the owner approved merging the implementation as an optional setting,
-with further hardware comparisons deferred to [TODO 126](../../doc/todo/126-access-geometry.md#merged-implementation-deferred-hardware-follow-up).
-All five group sizes are supported; default plans and TM5 imports remain G1.
+with further hardware comparisons deferred to [TODO 126](../../doc/todo/126-access-geometry.md).
+The [final follow-up](hardware_followup_2026-11-16.md) completed on 2026-11-16 and TODO 126 is closed.
+All five group sizes are supported; default plans and TM5 imports remain G1. The follow-up confirmed throughput differences
+at P496 and found no repeatable 512-bit strided regression, but did not establish a best geometry for fault detection.
 
 ## Hardware comparison kit
 

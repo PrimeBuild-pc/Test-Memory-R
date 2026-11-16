@@ -1,5 +1,19 @@
 # TODO 126: Explicit access geometry (`period_lines`, `group_lines`) as per-test tunables
 
+## Completed, 2026-11-16
+
+Merged in `f43edee`, with equal treatment of all supported groups in `870cf82`. The final 20-run hardware campaign
+completed all 2,469 steps, with full coverage/settings checks and no specific implementation defect identified.
+The matched 512-bit G1 comparison found no repeatable strided regression. Grouping changes throughput at P496 too,
+but the faster group differs between the two CPUs; existing defaults remain unchanged.
+
+The 5700X's long screens reported 29 errors: 13 distinct bad-value episodes checked twice, plus three subsequent RW
+alarms. Ordinary G1 and grouped paths both detected mismatches. The 8600G's fourteen runs passed. No seal or WHEA errors
+were reported. The localized, correlated errors do not establish a best geometry or a hardware diagnosis.
+
+The final [hardware report](../../research/access_geometry/hardware_followup_2026-11-16.md) records the numbers,
+reproduction script and limits. TODO 126 is closed; no additional campaign is required for this implementation.
+
 ## Why (Astra, 2026-11-12, from the Check_absolutnew.cfg validation)
 
 Reviewing TM5's `Channels`/`Parameter` stride formula raised the question of whether TMR should try to target specific DRAM
@@ -191,5 +205,5 @@ SHA-256 manifest, preflight records and automatic result collection. Its README 
 at P496, G1/2/4/8/16 look 128/64/32/16/8 visits ahead, respectively. The chunk is large enough that none is clipped.
 Thus this campaign compares complete workloads, including their prefetch differences.
 
-After the queues finish, validate coverage/settings and analyse throughput and error evidence before closing TODO 126.
-Fix any concrete implementation defect first. An inconclusive fault-detection ranking alone does not require another campaign.
+The queues finished at 15:30 and 15:37 AEDT; all results were collected and the validation/analysis above completed.
+An inconclusive fault-detection ranking does not require another campaign.

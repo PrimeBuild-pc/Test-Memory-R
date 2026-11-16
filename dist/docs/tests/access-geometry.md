@@ -144,9 +144,10 @@ Existing plans and TM5 imports retain their current walks. Even `plan=all` runs 
 registered test with its settings, rather than generating every period/group combination.
 Use a JSON config to compare geometries.
 
-Further comparisons at period 496, a matched 512-bit before/after check, and detection
-comparisons are tracked in
-[TODO 126](https://github.com/jlpetz/Test-Memory-R/blob/main/doc/todo/126-access-geometry.md#merged-implementation-deferred-hardware-follow-up).
-No group is recommended as a universal hardware target.
+The [completed hardware follow-up](https://github.com/jlpetz/Test-Memory-R/blob/main/research/access_geometry/hardware_followup_2026-11-16.md)
+also compared all groups at period 496. The fastest group differed between the two CPUs;
+both ordinary and grouped walks detected errors, without establishing a best detector.
+Use a mix of geometries when comparing stability. No group is recommended as a universal
+hardware target, and the existing defaults remain unchanged.
 
 Back to [the stability tests](stability.md) or [all tests](README.md).
