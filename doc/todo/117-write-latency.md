@@ -174,3 +174,16 @@ sit out; roles chosen once. Its plan: `117-loaded-latency-design.md`. Built on 2
 264b1e1, fd055aa, then the review's fixes). Both are in plan perf since 0.1.1 (2026-11-05, after
 three runs each on petz007, daddy-petz and m8i repeated), and run by name; next, the default and
 headline decisions with the owner.
+
+## Corrections (2026-11-17, from TODO 119's verified re-read of the raw probe outputs)
+
+- "The controller acknowledges a write when it is queued" (What it shows, above) is supported only on Zen 4, where W-nt+sf reads
+  below the read (62.0 against 66.1 ns). Every timing swept is a gap between two DRAM commands, which one idle request at a time
+  over random lines seldom waits on, so the read stayed flat too, and the null result can't place a write's acknowledgement. FCLK,
+  tCWL, tCL and tRCD, which could separate W-nt+sf from R, were never changed alone.
+- The tRDWR result is the probe's, from one daddy-petz boot (the afternoon of 2026-11-05), clear at 50% and inside the later
+  sweep's spread at 75%. TMR's Lat-Turnaround-DRAM was never run with tRDWR changed, nor petz007's tRDWR. "Against 0.3 ns between
+  boots" set the probe's change against TMR's spread.
+- "Which write figure stays" was left to the owner and carried to TODO 119 on 2026-11-16 (`119-summary-grid.md`).
+- The thread-0 measurer isn't the top-ranked core under `cpu-stride=` (it is the lowest-numbered core left), or when a
+  `skip-cores=A-B` range covers the top core.
