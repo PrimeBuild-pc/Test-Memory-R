@@ -303,13 +303,16 @@ On branch `feat/summary-grid-119`, one commit a step:
 3. Done (02587a9): L3 groups from the OS's cache records, so an L3 spanning processor groups is one group. (f7933cc) Per-step
    measurers and sit-outs (`measure.rs`), `latency-threads=`, `latency-hits=`, `latency-cores=`, plan=perf's `-Clean` steps,
    the grid's clean column and its note; a full-memory step keeps its own extent under a count.
-4. The write port, Lat-DRAM-NTStore-SFence (`latency_tests::nt_store_sfence_multi`): two 32 B NT stores and SFENCE a line, to
+4. Done (6ba4a4d): the write port, Lat-DRAM-NTStore-SFence (`latency_tests::nt_store_sfence_multi`): two 32 B NT stores and SFENCE a line, to
    random lines (xorshift, repeats allowed, no index table), MFENCE before the closing RDTSCP; one thread over the clean DRAM
    block. In plan=perf in place of Lat-DRAM-Write and Lat-DRAMFull-Write; the grid's Memory write note. Its asm read.
-5. plan=perf a few times on this dev box (the r8i VM) with the release exe, `memory=50% cputype=cores cpus=100% skip-cores=0`:
-   the grid, the clean column, the write figure, run to run.
-6. The summary's example in docs\tests (from step 5's runs), guide.md, the batch's full `tools/ci_local.py`, the spill check
-   before and after (`TestMemoryConfig` grew); merge to main.
+5. Done 2026-11-19: plan=perf three times on this dev box (the r8i VM, 4 threads) with the release exe, `memory=50% cputype=cores
+   cpus=100% skip-cores=0`, 5 min 26 s each. Write 182.3 ns all three (the probe: 181.7 on the m8i metal box's same CPU); clean
+   L3 30.4-30.5 ns, every thread 25.4; clean DRAM 137.8-137.9, every thread 103.3-106.0 (its 4 calibrated L3s, 308 MiB in all,
+   fit the CPUID 480 MiB L3; the calibration's DRAM: 140.7). The run line and plan table showed a planned step's test extent on
+   every thread; fixed (f2cfd4e).
+6. Done: docs (5298be9, 51af41f); the spill table against main's, kernel for kernel the same but the new kernel's one gpr reload;
+   the batch's full `tools/ci_local.py` (builds\51af41fe3727-1af69b810aa3282b). Merging to main is the owner's call.
 7. Later, on the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
    (`latency-cores=`), and the metal box (the L3 groups across processor groups).
 
