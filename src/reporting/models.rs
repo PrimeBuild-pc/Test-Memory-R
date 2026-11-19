@@ -545,6 +545,9 @@ pub struct TableData {
     pub headers: Vec<TableHeader>,
     pub rows: Vec<Vec<String>>,
     pub footer: Option<String>,
+    /// A headline table (TODO 119's grid): the window draws it larger, its first column strong and its rows striped. The console draws it
+    /// as any other.
+    pub emphasis: bool,
 }
 
 /// Table header with alignment
@@ -576,7 +579,12 @@ impl Default for TableData {
 
 impl TableData {
     pub fn new() -> Self {
-        Self { title: None, headers: Vec::new(), rows: Vec::new(), footer: None }
+        Self { title: None, headers: Vec::new(), rows: Vec::new(), footer: None, emphasis: false }
+    }
+
+    pub fn with_emphasis(mut self) -> Self {
+        self.emphasis = true;
+        self
     }
 
     pub fn with_title(mut self, title: impl Into<String>) -> Self {

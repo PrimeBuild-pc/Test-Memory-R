@@ -1465,9 +1465,10 @@ fn block_views(blocks: &[Block], first: u64, p: &Palette) -> Vec<(u64, View)> {
 }
 
 /// One of the engine's tables (`TableData`), as the console draws it in text: its title, its headings, its rows, each column aligned as its
-/// heading says, then its footer
+/// heading says, then its footer. A headline table (`emphasis`, TODO 119's grid) is larger, its first column strong, its rows striped.
 fn report_table(table: &TableData, p: &Palette) -> View {
     let columns = table.headers.len().max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
+    let size = if table.emphasis { 14.0 } else { 12.0 };
     let align = |column: usize| match table.headers.get(column).map(|heading| heading.alignment) {
         Some(ColumnAlignment::Right) => HorizontalAlignment::Right,
         Some(ColumnAlignment::Center) => HorizontalAlignment::Center,
@@ -1475,19 +1476,35 @@ fn report_table(table: &TableData, p: &Palette) -> View {
     };
     let cell = |text: &str, row: usize, column: usize, heading: bool| -> (u64, View) {
         let colour = if heading { p.text_secondary } else { p.text_primary };
-        let weight = if heading { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL };
+        let strong = heading || (table.emphasis && column == 0);
         let block = TextBlock::new()
             .text(text.to_string())
-            .font_size(12.0)
-            .font_weight(weight)
+            .font_size(size)
+            .font_weight(if strong { FontWeight::SEMI_BOLD } else { FontWeight::NORMAL })
             .foreground(brush(colour))
             .horizontal_alignment(align(column))
             .grid_row(row as i32)
             .grid_column(column as i32);
         (((row as u64) << 16) | column as u64, block.into())
     };
-    let mut cells: Vec<(u64, View)> =
-        table.headers.iter().enumerate().map(|(column, heading)| cell(&heading.text, 0, column, true)).collect();
+    // A headline table's every other row on the stripe, behind its cells (drawn first), across every column
+    let mut cells: Vec<(u64, View)> = if table.emphasis {
+        (0..table.rows.len())
+            .filter(|row| row % 2 == 1)
+            .map(|row| {
+                let stripe = Border::new()
+                    .background(brush(p.stripe))
+                    .corner_radius(3.0)
+                    .grid_row(row as i32 + 1)
+                    .grid_column(0)
+                    .grid_column_span(columns.max(1) as i32);
+                ((1 << 48) | row as u64, stripe.into())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    cells.extend(table.headers.iter().enumerate().map(|(column, heading)| cell(&heading.text, 0, column, true)));
     for (row, values) in table.rows.iter().enumerate() {
         cells.extend(values.iter().enumerate().map(|(column, text)| cell(text, row + 1, column, false)));
     }
@@ -1747,6 +1764,20 @@ mod tests {
         pump.mount_view(dialog(false, TextBlock::new().text("closed").into())).unwrap();
         let tipped = Grid::new().children((TextBlock::new().text("a long name").tooltip("a long name"),));
         assert!(pump.update_view(dialog(true, tipped)).is_err());
+    }
+
+    /// TODO 119: the grid, a headline table (its rows striped behind the cells, across every column), plans and mounts through reactor's
+    /// planner, and so does the summary panel it opens on
+    #[test]
+    fn the_grid_mounts() {
+        let summary = tmr::test_support::perf_summary_report();
+        let report = crate::report::Report::of_summary(&summary, Vec::new());
+        let p = crate::palette::Palette::LIGHT;
+        let grid = report.blocks.iter().find_map(|b| if let crate::report::Block::Table(t) = b { t.emphasis.then_some(t) } else { None });
+        let mut pump = Pump::new(RecordingRuntime::default());
+        pump.mount_view(super::report_table(grid.expect("the grid"), &p)).unwrap();
+        let mut pump = Pump::new(RecordingRuntime::default());
+        pump.mount_view(StackPanel::new().spacing(6.0).keyed_children(super::block_views(&report.blocks, 0, &p))).unwrap();
     }
 
     /// About's logo is the icon's largest PNG frame (a width of 0 is 256), a larger BMP frame passed over; nothing from a directory that

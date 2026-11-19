@@ -4,7 +4,7 @@
 
 use std::error::Error;
 
-use tmr::frontend::{CpuPerformanceSummary, FinalTestSummaryReport, Renderer, Reporter, StepReport, TableData};
+use tmr::frontend::{CpuPerformanceSummary, FinalTestSummaryReport, PerfTables, Renderer, Reporter, StepReport, TableData};
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -108,7 +108,8 @@ impl Report {
             if cycles == 1 { "" } else { "s" },
             report.total_runtime
         );
-        let mut blocks = blocks(|r| r.report_final_summary(report));
+        // The grid and the under-load table under the overview: the panel opens at a run's end, and they are what a perf run is for
+        let mut blocks = blocks(|r| r.report_final_summary_with(report, PerfTables::First));
         // Its rules go between tables: none above the first
         if matches!(blocks.first(), Some(Block::Separator)) {
             blocks.remove(0);
@@ -252,6 +253,20 @@ mod tests {
             "{}",
             report.verdict
         );
+    }
+
+    /// TODO 119: a perf run's summary has its grid and under-load table under the overview, emphasized, before the per-test tables (the
+    /// console has them after: its golden)
+    #[test]
+    fn a_perf_runs_summary_opens_on_its_grid() {
+        let report = Report::of_summary(&tmr::test_support::perf_summary_report(), Vec::new());
+        let outline = outline(&report);
+        assert_eq!(outline[..4], ["table Final Test Summary - Overview", "—", "table Cache & Memory: 512-bit, 6 threads", "—"]);
+        assert!(outline[4].starts_with("table Memory under load: "), "{outline:?}");
+        assert_eq!(outline[6], "table Final Test Summary - Per-Test Performance");
+        let emphasized: Vec<bool> =
+            report.blocks.iter().filter_map(|b| if let Block::Table(t) = b { Some(t.emphasis) } else { None }).take(4).collect();
+        assert_eq!(emphasized, [false, true, true, false], "the grid and the under-load table only");
     }
 
     /// TODO 117: a loaded latency step's report has its headline on its Test: line and its rows in place of a latency table, after its

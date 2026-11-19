@@ -39,8 +39,6 @@ pub use crate::memory::allocator::PageSizeLevel;
 pub use crate::memory::lsa::Sid;
 pub use crate::memory::privileges::{BROAD_CAUTION, BROAD_MARK, BROAD_RISK, Candidate, LargePageQuestion, Reach, broad_legend};
 pub use crate::progress::{ErrorCounts, LiveFigures, ProgressSnapshot, ProgressTracker, RunOutcome, TestSnapshot, TestSummary, WaitLeft};
-// The reports as tables, for a frontend to render: the default formatting's, through its renderer
-pub use crate::reporting::Reporter;
 pub use crate::reporting::models::{
     AllocationReport, AllocationThread, CacheInfo, ColumnAlignment, ConsolidatedMemoryReport, CpuInfo, CpuPerformance, CpuTopologyEntry,
     CpuTopologyReport, FinalTestSummaryReport, LatencyLevelSummary, LatencyPercentiles, LatencyTestSummaryReport, LatencyThreadResult,
@@ -48,6 +46,8 @@ pub use crate::reporting::models::{
     TableData, TestConfigurationReport, ThreadPerformance, ThreadTiming, ThreadTimingReport, TopologySummary, TscCalibrationInfo,
 };
 pub use crate::reporting::renderers::Renderer;
+// The reports as tables, for a frontend to render: the default formatting's, through its renderer
+pub use crate::reporting::{PerfTables, Reporter};
 pub use crate::runner::{RunStatus, ThreadPriority};
 pub use crate::smbios::{BiosInfo, MemoryModule, SystemIdentity, memory_type_name, serials_hidden};
 pub use crate::tests::Stage;

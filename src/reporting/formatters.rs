@@ -1321,8 +1321,10 @@ impl ReportFormatter for DefaultFormatter {
         // A column only when some row has a figure for it: a run of the memory tests alone shows their row and columns alone
         let ops: Vec<usize> = (0..OPS.len()).filter(|&op| grid.rows.iter().any(|r| r.speed[op].is_some())).collect();
         let latency = grid.rows.iter().any(|r| r.latency.is_some());
-        let mut table =
-            TableData::new().with_title(format!("Cache & Memory: {}", about.join(", "))).add_header("Tier", ColumnAlignment::Left);
+        let mut table = TableData::new()
+            .with_title(format!("Cache & Memory: {}", about.join(", ")))
+            .with_emphasis()
+            .add_header("Tier", ColumnAlignment::Left);
         for &op in &ops {
             table = table.add_header(format!("{} GiB/s", OPS[op]), ColumnAlignment::Right);
         }
@@ -1403,6 +1405,7 @@ impl ReportFormatter for DefaultFormatter {
         }
         let mut table = TableData::new()
             .with_title(title)
+            .with_emphasis()
             .add_header("Load", ColumnAlignment::Left)
             .add_header("Under NT writes", ColumnAlignment::Right)
             .add_header("Under reads", ColumnAlignment::Right)

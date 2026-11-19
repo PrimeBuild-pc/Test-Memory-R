@@ -17,6 +17,14 @@ use self::models::*;
 use self::renderers::Renderer;
 use crate::Result;
 
+/// Where the final summary puts its grid and under-load table (TODO 119): `Last`, after the per-test tables, as the console reads down to
+/// them; `First`, under the overview, the window's, whose summary panel opens at a run's end
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerfTables {
+    First,
+    Last,
+}
+
 /// Main reporter that combines formatting and rendering
 pub struct Reporter<R: Renderer> {
     formatter: Box<dyn ReportFormatter>,
@@ -121,13 +129,21 @@ impl<R: Renderer> Reporter<R> {
         Ok(())
     }
 
-    /// Report final test summary
+    /// Report final test summary, its grid and under-load table last
     pub fn report_final_summary(&mut self, report: &FinalTestSummaryReport) -> Result<()> {
+        self.report_final_summary_with(report, PerfTables::Last)
+    }
+
+    /// The final summary, its grid and under-load table where `perf` puts them
+    pub fn report_final_summary_with(&mut self, report: &FinalTestSummaryReport, perf: PerfTables) -> Result<()> {
         self.renderer.render_separator()?;
 
         // Render overview table
         let overview_table = self.formatter.prepare_final_summary_overview_table(report);
         self.renderer.render_table(&overview_table)?;
+        if perf == PerfTables::First {
+            self.report_perf(report)?;
+        }
 
         // Only show per-test performance if there are tests
         if !report.per_test_summaries.is_empty() {
@@ -140,7 +156,29 @@ impl<R: Renderer> Reporter<R> {
             self.renderer.render_table(&table)?;
         }
 
-        // The run's bandwidth and latency a cache tier, and memory under load, when steps that fill them ran (TODO 119)
+        if perf == PerfTables::Last {
+            self.report_perf(report)?;
+        }
+
+        // Where in the sequence it failed, only when something did (TODO 74)
+        let final_check_errors = report.seal.as_ref().map_or(0, |s| s.final_check_errors);
+        if !report.errors_by_step.is_empty() || final_check_errors > 0 {
+            self.renderer.render_separator()?;
+            let table = self.formatter.prepare_errors_by_step_table(report);
+            self.renderer.render_table(&table)?;
+        }
+        // Which bits failed, only when any did (TODO 97)
+        if !report.failing_bits.is_empty() || !report.seal_failing_bits.is_empty() {
+            self.renderer.render_separator()?;
+            let table = self.formatter.prepare_failing_bits_table(report);
+            self.renderer.render_table(&table)?;
+        }
+
+        Ok(())
+    }
+
+    /// The run's bandwidth and latency a cache tier, and memory under load, when steps that fill them ran (TODO 119)
+    fn report_perf(&mut self, report: &FinalTestSummaryReport) -> Result<()> {
         if let Some(perf) = &report.perf {
             if let Some(grid) = &perf.grid {
                 self.renderer.render_separator()?;
@@ -158,21 +196,6 @@ impl<R: Renderer> Reporter<R> {
                 None => {}
             }
         }
-
-        // Where in the sequence it failed, only when something did (TODO 74)
-        let final_check_errors = report.seal.as_ref().map_or(0, |s| s.final_check_errors);
-        if !report.errors_by_step.is_empty() || final_check_errors > 0 {
-            self.renderer.render_separator()?;
-            let table = self.formatter.prepare_errors_by_step_table(report);
-            self.renderer.render_table(&table)?;
-        }
-        // Which bits failed, only when any did (TODO 97)
-        if !report.failing_bits.is_empty() || !report.seal_failing_bits.is_empty() {
-            self.renderer.render_separator()?;
-            let table = self.formatter.prepare_failing_bits_table(report);
-            self.renderer.render_table(&table)?;
-        }
-
         Ok(())
     }
 
