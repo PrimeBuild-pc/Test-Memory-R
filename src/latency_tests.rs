@@ -497,6 +497,80 @@ pub unsafe fn copy_latency_multi(
     result
 }
 
+/// Lines a write latency sample times: the read chase's 1000, a sample 60-180 us of fenced writes
+const NT_STORE_LINES: usize = 1000;
+
+/// Memory's write latency (TODO 119; TODO 117's probe, `../write-latency-test`, W-nt+sf): a whole line written with two 32 B NT
+/// stores, then SFENCE, a line at a time to random lines of the extent, so a line's stores can't become visible before the last
+/// line's are. A sample is the mean over `NT_STORE_LINES` lines between two RDTSCPs, the closing one after MFENCE: RDTSCP waits for
+/// the loads before it, not the stores. It times fenced full-line stores, the address arithmetic and the platform's queueing
+/// included; not a write reaching DRAM (SFENCE makes stores globally visible, nothing more). The lines are xorshift's (`below`), at
+/// random over the extent, repeats allowed: the next line's arithmetic needs no load and runs inside the fence's wait, where the
+/// probe read each line from an index as big as a 16th of its buffer. No line is ever read, so no read for ownership.
+#[doc = include_str!("test_fn_safety.md")]
+pub unsafe fn nt_store_sfence_multi(
+    blocks: &[AllocationBlock], thread_id: usize, error_mode: ErrorMode, timing: &TestTiming, config: &TestMemoryConfig,
+    progress: Option<&TestProgress>,
+) -> LatencyTestStats {
+    use std::arch::x86_64::{__m256i, _mm_lfence, _mm_mfence, _mm_sfence, _mm256_set1_epi64x, _mm256_stream_si256};
+
+    let test_name = "NtStoreSfence";
+    let cpu_ghz = config.tsc_frequency_ghz;
+    if cpu_ghz == 0.0 {
+        panic!("TSC frequency not detected! Cannot run latency tests on non-x86_64 platforms.");
+    }
+
+    let (mut runner, extent) = TestRunner::new(blocks, thread_id, error_mode, timing, config, progress, test_name, TestAction::Write);
+    let lines = extent.test_size / 64;
+    if lines == 0 {
+        return LatencyTestStats { basic_stats: runner.finish_completed(0), ..LatencyTestStats::from_histogram(Histogram::new()) };
+    }
+    let base = extent.ptr;
+    // Not byte-uniform (`doc/simd_codegen_rules.md`); the probe's word
+    let value = _mm256_set1_epi64x(0x5A5A_A5A5_5A5A_A5A5u64 as i64);
+    let mut rng = 0x2545_F491_4F6C_DD1Du64.wrapping_add((thread_id as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    log::debug!("[Thread {thread_id}] {test_name} - {lines} lines over {} bytes", extent.test_size);
+
+    let mut latencies = Histogram::new();
+    loop {
+        runner.begin_cycle();
+
+        // The last sample's lines visible before the clock, and nothing after it started before it
+        _mm_mfence();
+        let mut aux = 0u32;
+        let start = __rdtscp(&mut aux);
+        _mm_lfence();
+        for _ in 0..NT_STORE_LINES {
+            let line = base.add(below(&mut rng, lines) * 64) as *mut __m256i;
+            _mm256_stream_si256(line, value);
+            _mm256_stream_si256(line.add(1), value);
+            _mm_sfence();
+        }
+        _mm_mfence();
+        let end = __rdtscp(&mut aux);
+        _mm_lfence();
+
+        latencies.add((end - start) as f64 / NT_STORE_LINES as f64 / cpu_ghz);
+        runner.add_bytes(NT_STORE_LINES * 64);
+
+        // About every 10 ms (TODO 105 (2)), as the read chase checks
+        if runner.check_due() && runner.check() {
+            break;
+        }
+    }
+
+    let mut result = LatencyTestStats::from_histogram(latencies);
+    result.basic_stats = runner.finish_completed((runner.bytes_processed() / 64) as u64);
+    log::debug!(
+        "[Thread {thread_id}] {test_name} - {} samples | P5={:.1} P50={:.1} P95={:.1} ns/line",
+        result.sample_count,
+        result.p5_ns,
+        result.p50_ns,
+        result.p95_ns
+    );
+    result
+}
+
 // Note: run_cache_hierarchy_diagnostic() was removed - --cache-latency now uses the same ThreadPool infrastructure as --latency-test with
 // cpus=1 for single-thread mode
 

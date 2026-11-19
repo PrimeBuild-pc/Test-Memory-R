@@ -38,18 +38,19 @@ const WIDTHS: &[&str] = &[
     "Mem-MirrorV2-Auto",
 ];
 
-/// Unloaded latency (one dependent access at a time, the figure other tools report): a read's at each tier, and DRAM's write too; then a
+/// Unloaded latency (one dependent access at a time, the figure other tools report): a read's at each tier, and memory's write; then a
 /// read's latency while the other cores keep the memory busy and its write turnaround (TODO 117, about a minute together), bandwidth, and
 /// the write that skips the cache. The L3 and DRAM reads run twice (TODO 119): every thread, then `-Clean`, the threads that keep the chase
-/// in the tier and the rest sitting out (`measure`). No cache Write or Copy latency (the owner, 2026-11-05): they time the read chain
-/// beside stores that hit the cache, so they read as the read does (the m8i metal box: L1 543.1 GiB/s for both, L2 159.4 against 157.0);
-/// in DRAM the stores' line fetches add (126 against 103 ns on daddy-petz at 2133), and Copy says nothing Write doesn't. They run by name.
+/// in the tier and the rest sitting out (`measure`). Memory's write is a fenced NT store a line (TODO 119, Lat-DRAM-NTStore-SFence), not
+/// Lat-DRAM-Write's or Lat-DRAMFull-Write's read chase with a store beside it, which reads as the read does plus the stores' line fetches
+/// (126 against 103 ns on daddy-petz at 2133). No cache Write or Copy latency (the owner, 2026-11-05), for the same reason: they time the
+/// read chain beside stores that hit the cache (the m8i metal box: L1 543.1 GiB/s for both, L2 159.4 against 157.0). They run by name.
 const PERF: &[&str] = &[
-    "Lat-L1-Read", "Lat-L2-Read", "Lat-L3-Read", "Lat-L3-Read-Clean", "Lat-DRAM-Read", "Lat-DRAM-Read-Clean", "Lat-DRAM-Write",
-    "Lat-DRAMFull-Read", "Lat-DRAMFull-Write", "Lat-Loaded-DRAM", "Lat-Turnaround-DRAM", "Spd-L1-Read-Auto", "Spd-L1-Write-Auto",
-    "Spd-L1-Copy-Auto", "Spd-L2-Read-Auto", "Spd-L2-Write-Auto", "Spd-L2-Copy-Auto", "Spd-L3-Read-Auto", "Spd-L3-Write-Auto",
-    "Spd-L3-Copy-Auto", "Spd-DRAMSmall-Read-Auto", "Spd-DRAMSmall-Write-Auto", "Spd-DRAMSmall-Copy-Auto", "Spd-DRAMFull-Read-Auto",
-    "Spd-DRAMFull-Write-Auto", "Spd-DRAMFull-Copy-Auto", "Lat-NTW-DRAM-Write-Auto",
+    "Lat-L1-Read", "Lat-L2-Read", "Lat-L3-Read", "Lat-L3-Read-Clean", "Lat-DRAM-Read", "Lat-DRAM-Read-Clean", "Lat-DRAM-NTStore-SFence",
+    "Lat-DRAMFull-Read", "Lat-Loaded-DRAM", "Lat-Turnaround-DRAM", "Spd-L1-Read-Auto", "Spd-L1-Write-Auto", "Spd-L1-Copy-Auto",
+    "Spd-L2-Read-Auto", "Spd-L2-Write-Auto", "Spd-L2-Copy-Auto", "Spd-L3-Read-Auto", "Spd-L3-Write-Auto", "Spd-L3-Copy-Auto",
+    "Spd-DRAMSmall-Read-Auto", "Spd-DRAMSmall-Write-Auto", "Spd-DRAMSmall-Copy-Auto", "Spd-DRAMFull-Read-Auto", "Spd-DRAMFull-Write-Auto",
+    "Spd-DRAMFull-Copy-Auto", "Lat-NTW-DRAM-Write-Auto",
 ];
 
 pub const PLANS: &[Plan] = &[
@@ -128,16 +129,16 @@ mod tests {
     }
 
     /// Perf takes the loaded latency tests (TODO 117), after the unloaded latency tests and before the bandwidth ones; of the unloaded
-    /// ones a read's at each tier and DRAM's write, no cache Write or Copy and no Copy (the owner, 2026-11-05), and the L3 and DRAM reads'
-    /// clean forms after their every-thread ones (TODO 119)
+    /// ones a read's at each tier, no cache Write or Copy and no Copy (the owner, 2026-11-05), the L3 and DRAM reads' clean forms after
+    /// their every-thread ones, and memory's write as a fenced NT store in place of the read-chase Writes (TODO 119)
     #[test]
     fn perf_takes_the_loaded_latency_between_the_unloaded_and_the_bandwidth() {
         let loaded = PERF.iter().position(|&n| n == "Lat-Loaded-DRAM").expect("perf takes Lat-Loaded-DRAM");
-        assert!(PERF[..loaded].iter().all(|n| n.starts_with("Lat-")) && PERF[..loaded].contains(&"Lat-DRAMFull-Write"), "{PERF:?}");
+        assert!(PERF[..loaded].iter().all(|n| n.starts_with("Lat-")), "{PERF:?}");
         assert_eq!(PERF[loaded + 1], "Lat-Turnaround-DRAM");
         assert_eq!(PERF[..loaded], [
-            "Lat-L1-Read", "Lat-L2-Read", "Lat-L3-Read", "Lat-L3-Read-Clean", "Lat-DRAM-Read", "Lat-DRAM-Read-Clean", "Lat-DRAM-Write",
-            "Lat-DRAMFull-Read", "Lat-DRAMFull-Write"
+            "Lat-L1-Read", "Lat-L2-Read", "Lat-L3-Read", "Lat-L3-Read-Clean", "Lat-DRAM-Read", "Lat-DRAM-Read-Clean",
+            "Lat-DRAM-NTStore-SFence", "Lat-DRAMFull-Read"
         ]);
         assert!(PERF[loaded + 2].starts_with("Spd-"), "{PERF:?}");
     }

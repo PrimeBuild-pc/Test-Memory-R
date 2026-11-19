@@ -7,8 +7,8 @@ Metric                                   Value
 Result                                  PASS ✅  
 Runtime (HH:MM:SS)                    00:01:00  
 Cycles Completed                             1  
-Total Data Processed                 19.00 GiB  
-Overall Throughput    324.3 MiB/s (0.32 GiB/s)  
+Total Data Processed                 20.00 GiB  
+Overall Throughput    341.3 MiB/s (0.33 GiB/s)  
 Total Errors                                 0  
   - Test                                     0  
   - Seal                                   off  
@@ -26,19 +26,20 @@ Total Errors                                 0
     4       Lat-L3-Read-Clean               10.0s    1.00 GiB      102 MiB/s        1000         0.0         0.0         0.0         8.7         0.0         0.0         0.0         0.0         0.0       0.00x           0      ✅       
     5       Lat-DRAM-Read                   10.0s    1.00 GiB      102 MiB/s        1000         0.0         0.0         0.0        63.5         0.0         0.0         0.0         0.0         0.0       0.00x           0      ✅       
     6       Lat-DRAM-Read-Clean             10.0s    1.00 GiB      102 MiB/s        1000         0.0         0.0         0.0        67.0         0.0         0.0         0.0         0.0         0.0       0.00x           0      ✅       
-    7       Lat-Turnaround-DRAM             10.0s    1.00 GiB      102 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    8       Spd-L1-Read-512_A               10.0s    1.00 GiB  1577506 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    9       Spd-L1-Write-512_A              10.0s    1.00 GiB   872545 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    10      Spd-L1-Copy-512_A               10.0s    1.00 GiB  1711623 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    11      Spd-L2-Read-512_A               10.0s    1.00 GiB   871126 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    12      Spd-L2-Write-512_A              10.0s    1.00 GiB   844195 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    13      Spd-L2-Copy-512_A               10.0s    1.00 GiB   851371 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    14      Spd-L3-Read-512_A               10.0s    1.00 GiB   650150 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    15      Spd-L3-Write-512_A              10.0s    1.00 GiB   629007 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    16      Spd-L3-Copy-512_A               10.0s    1.00 GiB   635318 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    17      Spd-DRAMSmall-Read-512_A        10.0s    1.00 GiB    60926 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    18      Spd-DRAMSmall-Write-512_A       10.0s    1.00 GiB    60894 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
-    19      Spd-DRAMSmall-Copy-512_A        10.0s    1.00 GiB    75307 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    7       Lat-DRAM-NTStore-SFence         10.0s    1.00 GiB      102 MiB/s        1000         0.0         0.0         0.0        62.0         0.0         0.0         0.0         0.0         0.0       0.00x           0      ✅       
+    8       Lat-Turnaround-DRAM             10.0s    1.00 GiB      102 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    9       Spd-L1-Read-512_A               10.0s    1.00 GiB  1577506 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    10      Spd-L1-Write-512_A              10.0s    1.00 GiB   872545 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    11      Spd-L1-Copy-512_A               10.0s    1.00 GiB  1711623 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    12      Spd-L2-Read-512_A               10.0s    1.00 GiB   871126 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    13      Spd-L2-Write-512_A              10.0s    1.00 GiB   844195 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    14      Spd-L2-Copy-512_A               10.0s    1.00 GiB   851371 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    15      Spd-L3-Read-512_A               10.0s    1.00 GiB   650150 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    16      Spd-L3-Write-512_A              10.0s    1.00 GiB   629007 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    17      Spd-L3-Copy-512_A               10.0s    1.00 GiB   635318 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    18      Spd-DRAMSmall-Read-512_A        10.0s    1.00 GiB    60926 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    19      Spd-DRAMSmall-Write-512_A       10.0s    1.00 GiB    60894 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
+    20      Spd-DRAMSmall-Copy-512_A        10.0s    1.00 GiB    75307 MiB/s           -           -           -           -           -           -           -           -           -           -           -           0      ✅       
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 1 cycle: Time/Data/Speed/latency (ns) averaged per run, Errors summed.
 
@@ -68,6 +69,7 @@ Bandwidth: every thread at once; copy counts the bytes read and the bytes writte
 Latency: the read chase's P50, every thread chasing at once.
 * The L3 row's latency: each of the 6 threads chases 1.27 MiB, 1.28x its 1014 KiB L2, so the L2 serves an estimated 78% of the chase.
 Latency, clean: on the L3, 1 thread chases 7.50 MiB, an estimated 87% of it in the L3, short of the 88% target even with one; in Memory, 1 thread chases 1.00 GiB; the other threads sit out.
+Memory's write latency: 62.0 ns a 64 B line, NT-stored then SFENCE, a line at a time, one thread over 1.00 GiB: until the stores are visible, not until they reach DRAM.
 
 ================================================================================
 [1m📊 Memory under load: one core's read latency while 7 other cores load memory[0m

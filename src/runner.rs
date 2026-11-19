@@ -16,7 +16,7 @@ use crate::bandwidth_tests::{
 use crate::cache::CacheInfo;
 use crate::constants::MB;
 use crate::frontend::{CpuPerformanceSummary, Frontend, NotRun, Run, StepConfigLine, StepReport};
-use crate::latency_tests::{LatencyTestStats, copy_latency_multi, read_latency_multi, write_latency_multi};
+use crate::latency_tests::{LatencyTestStats, copy_latency_multi, nt_store_sfence_multi, read_latency_multi, write_latency_multi};
 use crate::latency_tests_v2::{
     lat_ntw_write_128_multi, lat_ntw_write_256_multi, lat_ntw_write_512_multi, lat_ntw_write_auto_multi, lat_ntw_write_scalar_multi,
     lat_v2_copy_128_multi, lat_v2_copy_256_multi, lat_v2_copy_512_multi, lat_v2_copy_auto_multi, lat_v2_read_128_multi,
@@ -3068,6 +3068,17 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None),
+        ),
+        // Memory's write latency (TODO 119): a whole line NT-stored then SFENCE, a line at a time, on one thread over the clean read's
+        // block, the rest sitting out (`measure`); ns a 64 B line
+        (
+            "Lat-DRAM-NTStore-SFence",
+            TestFunction::Latency(nt_store_sfence_multi),
+            TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::DRAM_DEFAULT }, ChunkMode::Whole)
+                .with_timing(TestTiming::duration_only(10))
+                .with_tsc(tsc_freq)
+                .with_memory_type(None)
+                .with_latency(crate::measure::Settings::CLEAN),
         ),
         // DRAMFull - Low TLB hit rate (stress with page miss overhead) - Read, Write, Copy
         (

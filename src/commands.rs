@@ -228,9 +228,10 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     entry(out, "load-pairs=5", "The loaded latency tests' ABBA pairs at each load, 1-50 (default")?;
     more(out, "  3 for Lat-Loaded-DRAM, 5 for Lat-Turnaround-DRAM)")?;
     entry(out, "load-window-ms=1000", "Their timed window, each after a 0.2 s settle: 10-60000 ms")?;
-    entry(out, "latency-threads=all", "Which threads measure the Lat-*-Read tests: all (the default;")?;
-    more(out, "  the -Clean ones clean), clean (as many to an L3 as keep its chase")?;
-    more(out, "  in the L3, one for DRAM; the rest sit out), or a count")?;
+    entry(out, "latency-threads=all", "Which threads measure the Lat-*-Read tests and the write latency:")?;
+    more(out, "  all (the default; the -Clean ones and the write clean), clean (as")?;
+    more(out, "  many to an L3 as keep its chase in the L3, one for DRAM; the rest")?;
+    more(out, "  sit out), or a count")?;
     entry(out, "latency-hits=88%", "clean's target: the chase's estimated share in the L3")?;
     entry(out, "latency-cores=ranked", "Which cores measure first: ranked (the run's order), performance")?;
     more(out, "  or efficiency (as TMR types them; core-priority=hybrid on an 8500G)")?;

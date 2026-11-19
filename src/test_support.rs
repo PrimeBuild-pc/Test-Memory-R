@@ -562,7 +562,8 @@ pub(crate) fn perf_run_of(steps: &[PerfStep], loaded: &[Option<crate::loaded::Lo
 
 /// A plan=perf run's steps for the grid, at petz007's figures (2026-11-13: DDR5-6000, 512 bits, six threads), and Lat-Turnaround-DRAM's
 /// loaded summary (`loaded_summary(true)`, daddy-petz's, its 75% level not matched). The clean steps' figures stand in until petz007 runs
-/// them: the L3's is its one-thread sweep's prediction at the plan's 7.5 MiB (87%, short of 88%), Memory's the loaded test's idle row.
+/// them: the L3's is its one-thread sweep's prediction at the plan's 7.5 MiB (87%, short of 88%), Memory's the loaded test's idle row;
+/// the write latency is TODO 117's probe's W-nt+sf there (61.8-62.3 ns over seven boots).
 pub(crate) fn perf_run() -> TestRunResult {
     let mut l3 = PerfStep::latency("Lat-L3-Read", 4.6);
     l3.extent_bytes = 1_327_104;
@@ -573,6 +574,7 @@ pub(crate) fn perf_run() -> TestRunResult {
         PerfStep::clean("Lat-L3-Read-Clean", 8.7, 1, 7_864_320, Some(1.0 - 1_038_336.0 / 7_864_320.0)),
         PerfStep::latency("Lat-DRAM-Read", 63.5),
         PerfStep::clean("Lat-DRAM-Read-Clean", 67.0, 1, 1 << 30, None),
+        PerfStep::clean("Lat-DRAM-NTStore-SFence", 62.0, 1, 1 << 30, None),
         PerfStep::turnaround(),
         PerfStep::speed("Spd-L1-Read-Auto", "Spd-L1-Read-512_A", 1_577_506.0),
         PerfStep::speed("Spd-L1-Write-Auto", "Spd-L1-Write-512_A", 872_545.0),

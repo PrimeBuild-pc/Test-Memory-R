@@ -95,8 +95,8 @@ impl fmt::Display for LatencyCores {
     }
 }
 
-/// A latency read test's settings: the tests that take them (Lat-L1/L2/L3/DRAM/DRAMFull-Read and the `-Clean` variants) have them, every
-/// other test none
+/// A latency test's settings: the tests that take them (Lat-L1/L2/L3/DRAM/DRAMFull-Read, the `-Clean` variants and memory's write
+/// latency, Lat-DRAM-NTStore-SFence) have them, every other test none
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     pub threads: LatencyThreads,

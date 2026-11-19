@@ -163,6 +163,7 @@ Reserve Rounding Diff     +0.00 B           -  Threads × per-thread rounding
   - Lat-DRAM-Read-Clean
   - Lat-DRAM-Write
   - Lat-DRAM-Copy
+  - Lat-DRAM-NTStore-SFence
   - Lat-DRAMFull-Read
   - Lat-DRAMFull-Write
   - Lat-DRAMFull-Copy

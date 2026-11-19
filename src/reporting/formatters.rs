@@ -1397,7 +1397,7 @@ impl ReportFormatter for DefaultFormatter {
             cut_short |= row
                 .speed
                 .iter()
-                .chain([&row.latency, &row.latency_clean])
+                .chain([&row.latency, &row.latency_clean, &row.write_latency])
                 .any(|f| matches!(f, Some(Figure::Measured { cut_short: true, .. })));
             table = table.add_row(cells);
         }
@@ -1439,6 +1439,23 @@ impl ReportFormatter for DefaultFormatter {
         }
         if clean {
             notes.push(clean_latency_note(self, grid));
+        }
+        if let Some(write) = grid.rows.iter().find_map(|r| r.write_latency) {
+            let figure = match write {
+                Figure::NotReached => "n/a".to_string(),
+                Figure::Measured { value, cut_short } => format!("{}{value:.1} ns", if cut_short { "~" } else { "" }),
+            };
+            let on = grid.memory_write.as_ref().map_or(String::new(), |plan| {
+                let threads = if plan.measurers == 1 { "one thread".to_string() } else { format!("{} threads", plan.measurers) };
+                match plan.block_bytes {
+                    Some(block) => format!(", {threads} over {}", self.format_bytes(block)),
+                    None => format!(", {threads}"),
+                }
+            });
+            notes.push(format!(
+                "Memory's write latency: {figure} a 64 B line, NT-stored then SFENCE, a line at a time{on}: until the stores are visible, not \
+                 until they reach DRAM."
+            ));
         }
         if cut_short {
             notes.push("~ A stop ended the step early: its figure is from part of its work.".to_string());
