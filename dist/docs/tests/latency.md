@@ -5,8 +5,9 @@ memory itself, in nanoseconds. They are measurements, not error tests: they chec
 find no memory errors of their own. Use them to see what a memory setting (a timing, the
 frequency) or a BIOS option does to latency, and to compare one machine with another.
 
-This page covers 180 tests in four families, the unloaded latency tests: every thread of the run
-chases at once, a light load, not idle. The two loaded tests, Lat-Loaded-DRAM and
+This page covers 183 tests, the unloaded latency tests: every thread of the run chases at once, a
+light load, not idle, but in the three that measure on fewer threads (below). The two loaded tests,
+Lat-Loaded-DRAM and
 Lat-Turnaround-DRAM, which time a read while the other cores keep the memory busy, are on
 [their own page](loaded-latency.md).
 
@@ -14,7 +15,9 @@ Lat-Turnaround-DRAM, which time a read while the other cores keep the memory bus
 
 | Family | Tests | What each step does | Plans |
 |---|---|---|---|
-| `Lat-<tier>-Read`, `-Write`, `-Copy` | 15 | a read that must finish before the next one's address is known; Write adds a store to a random line, Copy a store in order | perf (every Read; Write at DRAM and DRAMFull), all |
+| `Lat-<tier>-Read`, `-Write`, `-Copy` | 15 | a read that must finish before the next one's address is known; Write adds a store to a random line, Copy a store in order | perf (every Read), all |
+| `Lat-L3-Read-Clean`, `Lat-DRAM-Read-Clean` | 2 | the Read chase on fewer threads, the others sitting out, so the chase stays in its tier | perf, all |
+| `Lat-DRAM-NTStore-SFence` | 1 | a whole line written with stores that skip the cache, then a fence, a line at a time, on one thread | perf, all |
 | `Lat-V2-<tier>-<op>-<width>` | 60 | the same read, each on its own cache line, plus one SIMD read, write or read-and-write of a random line | all |
 | `Lat-V2P-<tier>-<op>-<width>` | 100 | the same with six random lines a step; WriteFull and CopyFull cover each line whole | all |
 | `Lat-NTW-DRAM-Write-<width>` | 5 | 4,096 stores that skip the cache, then a fence | perf (Auto), all |
@@ -84,6 +87,56 @@ no width.
 Write's and Copy's chains are half the size of Read's, so compare each test with itself, between
 runs.
 
+## Clean latency: fewer threads, the rest sitting out
+
+With every thread running, a thread's L3 extent is its share of the L3, which on many CPUs is
+little more than its L2: 1.3 times it on a Ryzen 5 8600G at 6 threads. A sample averages 1,000
+reads, so it averages the L2's hits with the L3's, and the L3 figure reads low, much of it the
+L2's. The clean form runs the same chase on fewer threads, so each has more of the L3. The
+summary's L3 and Memory rows show both.
+
+- **`latency-threads=`** sets which threads measure: `all` (the default), `clean`, or a count. A
+  count takes that many threads, one a core, in the run's order. `clean` on an L3 test takes as
+  many threads to each L3 as keep the chase's estimated share in the L3 at `latency-hits=` (88% by
+  default) or above; when even one thread falls short, one thread measures and the summary says
+  the target wasn't met. On a DRAM test `clean` is one thread over at least 1 GiB and 32 L3s, so
+  none of its chain stays in the L3 it has to itself (at Lat-DRAM-Read's four L3s, one thread
+  reads 18-22% low). L1 and L2 are a core's own: every thread measures them. A DRAMFull test keeps
+  its whole memory.
+- **The estimate**: a thread whose block is B finds about L2/B of its chase in its L2 and the rest
+  in the L3, so the share in the L3 is 1 - L2/B. A model, not a count of hits, so the summary
+  calls it an estimate.
+- **`latency-cores=`**: `performance` or `efficiency` takes the measurers from one kind of core
+  only, as TMR types them (on a Ryzen 5 8500G, `core-priority=hybrid` tells its Zen 4 cores from
+  its Zen 4c ones); `ranked`, the default, takes the run's order.
+- **Sitting out**: a thread that sits a step out runs nothing in it, no test and no seal check,
+  and leaves its memory as it was. Its row in the step's thread table has no bytes, and the
+  results file names each thread's role in the step, `measures` or `sits out`.
+
+Lat-L3-Read-Clean and Lat-DRAM-Read-Clean are Lat-L3-Read and Lat-DRAM-Read with
+`latency-threads=clean` built in. A `latency-threads=` on the command line overrides it, on every
+test that takes it. What the settings chose is in the log as the run starts, and in the results
+file in each step's `run_config.tests[].measure`: the threads and cores asked for, the measurers
+and the most to one L3, the block, and for an L3 the L2, the estimated share, the target and
+whether it was met.
+
+## Lat-DRAM-NTStore-SFence: memory's write latency
+
+Not a chain. Each step writes a whole 64-byte line with two 32-byte non-temporal (NT) stores,
+which skip the caches, then SFENCE, which holds the next line's stores until these are visible to
+the other cores: a line at a time, to random lines of the clean DRAM block, on one thread, the
+others sitting out. A sample is the mean over 1,000 lines between two reads of the time-stamp
+counter, the closing one after MFENCE. Its figure, in ns a line, is what a fenced line store
+costs as the core sees it: the stores, the fence and the platform's queueing, not the time until
+the line reaches the DRAM. No line is ever read.
+
+The same method on one thread over 2 GiB, before it was a test (2026-11): 61.8-62.3 ns on a
+Ryzen 5 8600G (DDR5-6000, below its read's 65.7-66.5), 90.2-91.8 on a Ryzen 7 5700X (DDR4-3600,
+its read 64.8-65.8) and 181.7 on a Xeon 6975P-C (its read 131.9). No one timing moved it beyond
+the spread from boot to boot there, the read's included, so what tuning shows in it is still open.
+It replaces Lat-DRAM-Write and Lat-DRAMFull-Write in `plan=perf`: they time the read chase with a
+store beside it, a read's latency more than a write's.
+
 ## Lat-V2 and Lat-V2P
 
 These ask what other accesses beside the chase cost. Each chain cell has a cache line of its own,
@@ -134,12 +187,12 @@ out of the run, which says so (`Left out N test(s) this CPU can't run`).
 
 ## Which plans run them, and for how long
 
-- **`plan=perf`** (one cycle, 25 tests, about 5.5 min): Lat-L1-Read, Lat-L2-Read, Lat-L3-Read,
-  Lat-DRAM-Read, Lat-DRAM-Write, Lat-DRAMFull-Read and Lat-DRAMFull-Write, then the two loaded
-  tests, the 15 [bandwidth tests](bandwidth.md), and Lat-NTW-DRAM-Write-Auto last. It leaves out
-  L1's, L2's and L3's Write and Copy, and DRAM's and DRAMFull's Copy: in the caches the chain's
-  reads set the time and the stores hit the cache, so they read as the Read does; in DRAM the
-  stores' line fetches add, and Copy adds nothing Write doesn't. They run by name.
+- **`plan=perf`** (one cycle, 26 tests, about 6 min): Lat-L1-Read, Lat-L2-Read, Lat-L3-Read,
+  Lat-L3-Read-Clean, Lat-DRAM-Read, Lat-DRAM-Read-Clean, Lat-DRAM-NTStore-SFence and
+  Lat-DRAMFull-Read, then the two loaded tests, the 15 [bandwidth tests](bandwidth.md), and
+  Lat-NTW-DRAM-Write-Auto last. It leaves out every Write and Copy chase: they time the chain's
+  reads with stores beside them, so in the caches they read as the Read does, and in DRAM the
+  stores' line fetches add; memory's write latency is Lat-DRAM-NTStore-SFence's. They run by name.
 - **`plan=all`**: every one of them. `stability`, `quick` and `widths` run none.
 - **`tmr --cache-latency`**: the Read, Write and Copy tests of L1, L2, L3 and DRAM (12), once, on
   one thread, the core Windows ranks best.
@@ -148,7 +201,7 @@ out of the run, which says so (`Left out N test(s) this CPU can't run`).
 
 Each step takes 10 s of samples plus its chain's build, which is quick except for DRAMFull's: it
 builds over all of the thread's memory (on a 192-thread server with 2 GB a thread,
-Lat-DRAMFull-Read's build took 9 s). The 180 tests under `plan=all` come to about half an hour a
+Lat-DRAMFull-Read's build took 9 s). The 183 tests under `plan=all` come to about half an hour a
 cycle; fewer without AVX-512, where the 41 tests at 512 bits are left out.
 
 ## Reading the output
@@ -187,7 +240,8 @@ its tier part of the time, or a second hardware path (on the Xeon, Lat-V2P-L3-Co
 exact sort.
 
 **The final summary**'s Per-Test Performance table adds Samples, P5 to P99.9 and Spread for each
-latency test, averaged over the cycles.
+latency test, averaged over the cycles. After a run with the `plan=perf` tests, the summary opens
+on a table of every tier's bandwidth and latency: [reading the summary](README.md#reading-the-summary).
 
 **The results file** keeps, per cycle, each step's `latency_samples`, `latency_p5_ns` to
 `latency_p99_9_ns` and `latency_spread` (in `cycles[].tests[]`), and each thread's `min_ns`,
@@ -207,6 +261,8 @@ so it runs unsealed.
 - **`cpus=`, `cputype=`, `skip-cores=`**: how many threads chase at once, and whether two share a
   core, which halves the L1 and L2 extents. Compare runs only at the same ones.
 - **`width=`**: the width of the Auto tests.
+- **`latency-threads=`, `latency-hits=`, `latency-cores=`**: which threads measure
+  ([above](#clean-latency-fewer-threads-the-rest-sitting-out)). Compare runs only at the same ones.
 - **`calibrate=`**: `off` sizes the extents from CPUID; `recheck` probes the stored calibration
   first and measures it again if the cache has changed.
 - **`memory=`**: how much memory each thread has, which is the DRAMFull extent.
@@ -230,8 +286,8 @@ so it runs unsealed.
   extents (the plan table shows the extents). In three runs of `plan=perf` on each of four
   machines (2026-11-03), the typical test's figures varied 0.05-0.26% from run to run, and 1.1% at
   worst.
-- **Unloaded, not idle.** Every thread chases at once. For the single-thread figure other tools
-  give, run `--cache-latency`, or `cpus=1`.
+- **Unloaded, not idle.** Every thread chases at once, but in the clean forms. For the
+  single-thread figure other tools give, run `--cache-latency`, or `cpus=1`.
 - **Auto across machines.** Lat-NTW-DRAM-Write-Auto runs at 512 bits on a CPU with AVX-512 and at
   256 without, which take different paths: on 2026-11-03 it ran at 512 on a Ryzen 5 8600G (5.8 ns)
   and at 256 on a Ryzen 7 5700X (21.3 ns). Compare it only between runs at the same width; its name

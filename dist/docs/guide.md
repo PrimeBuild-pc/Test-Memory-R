@@ -167,7 +167,9 @@ family has a guide explaining its purpose, how it runs and how to read its repor
 | [Bandwidth](tests/bandwidth.md) | read, write and copy throughput at each memory tier |
 
 Use `plan=stability` or `plan=quick` to look for errors. `plan=perf` measures performance; its
-latency and bandwidth tests do not verify data. See [choosing tests yourself](tests/README.md#choosing-tests-yourself)
+latency and bandwidth tests do not verify data. Its summary opens on a table of each cache tier's
+and the memory's bandwidth and latency, and one of the memory's latency under load:
+[reading the summary](tests/README.md#reading-the-summary). See [choosing tests yourself](tests/README.md#choosing-tests-yourself)
 to run individual tests or compare SIMD widths.
 
 ## Latency under load

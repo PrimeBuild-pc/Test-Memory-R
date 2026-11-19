@@ -133,7 +133,7 @@ Open, the owner's call:
 - A chain with one node per line (calibration's, `setup_line_chase`) reads closer to the L3 at the same block (petz007 6.8 against
   4.6 ns at about 1.3 MB). It would change every Lat-*-Read figure and break comparison with the baselines: separate from this.
 
-## Write latency: W-nt+sf (awaiting the owner, who asked for the data first, 2026-11-17)
+## Write latency: W-nt+sf (ported 2026-11-19 as Lat-DRAM-NTStore-SFence, step 4)
 
 TODO 117's probe (`../write-latency-test/src/main.rs`) timed one thread doing one write at a time to random lines in 2 GiB on large
 pages. W-nt+sf (:141-155) is a full-line NT write (two 32 B NT stores), then SFENCE, so each write waits until the previous line is
@@ -293,24 +293,29 @@ grid sits under the verdict in the panel that opens at a run's end (model.rs:114
 ignores and the window draws as 14 pt cells, a semi-bold first column and striped rows (window.rs:1469-1511). No new tab: it would
 sit empty on every stability run.
 
-## Build order (about 20-24 agent hours, the write port included)
+## Build order (the owner, 2026-11-19: build it all, validate here first, the hardware later)
 
-1. `PerfSummary` and `perf_summary()`, with unit tests: the gates, the plan-name join, runs 0, stopped steps, levels by value, not
-   matched, partial, the cycle mean, nodes. The only place a wrong number can come from. About 3 h.
-2. The two tables in `report_final_summary` (src/reporting/mod.rs:124), after the Intermediate table; a perf golden, and
-   `show_results.txt` extended so the round trip covers both. `test_support::loaded_summary(true)` already builds a loaded fixture
-   with a not-matched row. About 3 h.
-3. Cache domains from the OS's sharing sets, calibration's C versioned. Then the per-step plan and the sit-out role; the clean
-   setting (k from the estimated share, the block from k), `latency-cores=`, the clean DRAM step, the loaded tests' choosable
-   measurer, plan=perf's `-Clean` variants; the configured form's footnote. Local checks: selection, idle accounting, capped
-   extents, topology fixtures (the Xeon's split L3), old results loading. About 7-9 h.
-4. The write port, if the owner chooses it (after the probe check, or now). About 3-4 h.
-5. Hardware before and after `plan=perf` on daddy-petz and petz007 (the release exe, `skip-cores=0`). About 30 min of runs.
-6. The results file's block. About 1 h.
-7. The window's order and emphasis, with a mount test. About 2 h.
-8. guide.md and docs\tests (reading the summary), closing TODO 119. About 1 h.
+On branch `feat/summary-grid-119`, one commit a step:
 
-Then the batch's full `tools/ci_local.py`, and the release.
+1. Done (0fe737b): `PerfSummary` and `perf_summary()`, and the two tables in the final summary, with a golden.
+2. Done (1311ba4): the results file's block, `overall_stats.perf`. (8f9aa5b) The window opens its summary on the two tables,
+   drawn as headline tables, with a mount test.
+3. Done (02587a9): L3 groups from the OS's cache records, so an L3 spanning processor groups is one group. (f7933cc) Per-step
+   measurers and sit-outs (`measure.rs`), `latency-threads=`, `latency-hits=`, `latency-cores=`, plan=perf's `-Clean` steps,
+   the grid's clean column and its note; a full-memory step keeps its own extent under a count.
+4. The write port, Lat-DRAM-NTStore-SFence (`latency_tests::nt_store_sfence_multi`): two 32 B NT stores and SFENCE a line, to
+   random lines (xorshift, repeats allowed, no index table), MFENCE before the closing RDTSCP; one thread over the clean DRAM
+   block. In plan=perf in place of Lat-DRAM-Write and Lat-DRAMFull-Write; the grid's Memory write note. Its asm read.
+5. plan=perf a few times on this dev box (the r8i VM) with the release exe, `memory=50% cputype=cores cpus=100% skip-cores=0`:
+   the grid, the clean column, the write figure, run to run.
+6. The summary's example in docs\tests (from step 5's runs), guide.md, the batch's full `tools/ci_local.py`, the spill check
+   before and after (`TestMemoryConfig` grew); merge to main.
+7. Later, on the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
+   (`latency-cores=`), and the metal box (the L3 groups across processor groups).
+
+Not built, deferred: the loaded tests' choosable measurer (latency-cores= for Lat-Loaded/Turnaround), and L2 sharing (an Intel
+E-core cluster's four cores on one L2: clean would apply at L2 there; no Intel hybrid reachable). Open for the owner: which
+read-chase-plus-store latency tests retire, as a list approved before anything is deleted.
 
 ## Known limits
 

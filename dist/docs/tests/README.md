@@ -18,8 +18,8 @@ the command line, or in the window's box. `tmr plan=stability` starts the defaul
 | `stability` (the default) | the 13 stability tests, at the widest width | 3 | about 5 min a cycle |
 | `quick` | the same 13 | 1 | about 5 min |
 | `widths` | 20 tests: five families, every width side by side | 3 | about 6 min a cycle |
-| `perf` | 25 tests: latency, latency under load, bandwidth | 1 | about 5.5 min |
-| `all` | every test, 277 | 3 | about an hour a cycle |
+| `perf` | 26 tests: latency, latency under load, bandwidth | 1 | about 6 min |
+| `all` | every test, 280 | 3 | about an hour a cycle |
 
 - **stability** runs, in this order: Mem-StuckBitAuto, Mem-SimpleV2-Auto, Mem-SimpleNT-Auto,
   Mem-PageExchange, Mem-MovingInv, Mem-ModuloX, Mem-Sequence, Mem-Random,
@@ -34,15 +34,17 @@ the command line, or in the window's box. `tmr plan=stability` starts the defaul
   256 and 512 bits and Auto, all in one run, so every width tests the same memory in the same
   cycle. Compare widths there: separate runs drift. A CPU without AVX-512 leaves the five 512-bit
   tests out (about 5 min a cycle then).
-- **perf** runs seven unloaded latency tests, Lat-L1-Read, Lat-L2-Read, Lat-L3-Read,
-  Lat-DRAM-Read, Lat-DRAM-Write, Lat-DRAMFull-Read and Lat-DRAMFull-Write; then Lat-Loaded-DRAM
-  and Lat-Turnaround-DRAM (about a minute together); then the 15 `Spd-…-Auto` bandwidth tests;
-  and Lat-NTW-DRAM-Write-Auto last. It leaves out the cache tiers' Write and Copy latency and the
-  DRAM tiers' Copy: in the caches the read chain sets the time and the stores hit the cache, so
-  they read as the Read does; in DRAM the stores' line fetches add, and Copy adds nothing Write
-  doesn't. Run them by name. No perf test takes the seal, so a perf run is unsealed.
+- **perf** runs eight unloaded latency tests, Lat-L1-Read, Lat-L2-Read, Lat-L3-Read,
+  Lat-L3-Read-Clean, Lat-DRAM-Read, Lat-DRAM-Read-Clean, Lat-DRAM-NTStore-SFence and
+  Lat-DRAMFull-Read; then Lat-Loaded-DRAM and Lat-Turnaround-DRAM (about a minute together); then
+  the 15 `Spd-…-Auto` bandwidth tests; and Lat-NTW-DRAM-Write-Auto last. The `-Clean` tests chase
+  on fewer threads, the rest sitting out, so the chase stays in its tier, and
+  Lat-DRAM-NTStore-SFence times memory's write on one thread ([latency](latency.md)). It leaves
+  out every Write and Copy chase: they time the read chain with stores beside it, so in the caches
+  they read as the Read does, and in DRAM the stores' line fetches add. Run them by name. No perf
+  test takes the seal, so a perf run is unsealed.
 - **all** runs every test in the suite's order: the `Mem-` tests, then Bench, then latency, the
-  bandwidth tests last. About half of its hour is the 180 latency tests. A CPU without AVX-512
+  bandwidth tests last. About half of its hour is the 183 latency tests. A CPU without AVX-512
   leaves out the 50 512-bit tests, and one without AMX leaves out Mem-TileTransform; the run says
   what it left out.
 
@@ -130,6 +132,40 @@ Every step ends with a report, on the console and in the window (a finished step
 The run ends with a final summary and a verdict. Each run's results go in
 `results\TMR_<date>_<time>.json`, and `tmr --compare-results <one> <other>` compares two runs.
 
+## Reading the summary
+
+The final summary has the run's verdict, its errors and a table of every step. After a run with
+`plan=perf`'s tests it opens on two more, in the window too: Cache & Memory, and Memory under
+load. Each shows what the run took of those tests, and neither shows for a `config=` run, whose
+tests can carry the built-in names with other settings.
+
+**Cache & Memory** has a row a tier, L1, L2, L3 and Memory:
+
+- **Read, Write and Copy**, in GiB/s and in MiB/s: the `Spd-` tests at Auto, or at the widest
+  width the run took, every thread at once. Copy counts the bytes read and the bytes written.
+  Memory's are Spd-DRAMSmall's, or Spd-DRAMFull's without them (a note says so); its write and
+  copy are NT stores. The title gives the width, the threads and, over several cycles, that the
+  figures are their mean.
+- **Latency, N threads**: Lat-\<tier>-Read's median (P50), every thread chasing at once, or the
+  threads `latency-threads=` chose. The `*` on L3 marks a note: each thread's block against its
+  L2, and the estimated share of the chase the L2 serves.
+- **Latency, clean**: Lat-L3-Read-Clean's and Lat-DRAM-Read-Clean's median. Its note gives each
+  tier's threads and block and, for L3, the estimated share of the chase in the L3, or that even
+  one thread falls short of the target ([clean latency](latency.md#clean-latency-fewer-threads-the-rest-sitting-out)).
+- **Memory's write latency**, a note: Lat-DRAM-NTStore-SFence's median, ns a 64-byte line.
+- A `~` before a figure means a stop ended its step early, `n/a` that the step was in the run but
+  never ran, and `-` that no step of it was in the run.
+
+**Memory under load** is Lat-Turnaround-DRAM's: a read's latency idle, then at each load level
+under NT writes and under reads, and the turnaround between them
+([latency under load](loaded-latency.md)).
+
+The results file keeps both, unrounded, in `overall_stats.perf`: `grid.tiers[]` with each tier's
+`read_mib_s`, `write_mib_s`, `copy_mib_s`, `latency_p50_ns`, `latency_clean_p50_ns` and
+`write_latency_p50_ns`, and the cells that never ran (`not_reached`) or were cut short
+(`cut_short`); `grid.l3_share`, the L3 note's sizes; `grid.latency_plan`, `l3_clean`,
+`memory_clean` and `memory_write`, which threads measured each latency figure; and `under_load`.
+
 ## Every test
 
 The Plans column names every plan that runs a test, `all` included, as every test is in it.
@@ -194,7 +230,9 @@ Each step takes 10 s of samples, after an untimed build of its chain.
 | Tests | What they do | Plans |
 |---|---|---|
 | Lat-L1-Read, Lat-L2-Read, Lat-L3-Read, Lat-DRAM-Read, Lat-DRAMFull-Read | a pointer chase: one dependent read at a time, each waiting for the one before | perf, all |
-| Lat-L1-Write, Lat-L2-Write, Lat-L3-Write, Lat-DRAM-Write, Lat-DRAMFull-Write | the chase, plus a store to a random line each step | perf (DRAM, DRAMFull), all |
+| Lat-L3-Read-Clean, Lat-DRAM-Read-Clean | the chase on fewer threads, the rest sitting out: as many to an L3 as keep it in the L3, one thread over 1 GiB for DRAM | perf, all |
+| Lat-DRAM-NTStore-SFence | a whole 64-byte line in non-temporal stores, then SFENCE, a line at a time to random lines, on one thread: memory's write latency | perf, all |
+| Lat-L1-Write, Lat-L2-Write, Lat-L3-Write, Lat-DRAM-Write, Lat-DRAMFull-Write | the chase, plus a store to a random line each step | all |
 | Lat-L1-Copy, Lat-L2-Copy, Lat-L3-Copy, Lat-DRAM-Copy, Lat-DRAMFull-Copy | the chase, each value read also stored, in order | all |
 | Lat-V2-\<tier>-Read-128/256/512/Auto | the chase, each chain cell on a line of its own, plus one SIMD load of a random line each step | all |
 | Lat-V2-\<tier>-Write-128/256/512/Auto | the same chase, plus one SIMD store to a random line each step | all |
