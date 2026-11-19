@@ -3,7 +3,8 @@
 A grid of bandwidth and latency per tier, like AIDA64's Cache & Memory Benchmark, and below it what AIDA64 doesn't measure: memory
 latency under load and the write turnaround (TODO 117). Planned 2026-11-16 for v0.1.2 from a design workflow (four readers, a
 designer, a skeptic) over the code and the 2026-11-13 `plan=perf` results of four hosts; revised 2026-11-17 after three verified
-investigations (roles and thread layout, the write-latency data, the L3 rule). Nothing built yet.
+investigations (roles and thread layout, the write-latency data, the L3 rule), and again 2026-11-19 after Astra's review of the
+proposal (`119-proposal-review-2026-11-19.md`, its arithmetic in `research/latency_proposal/review.py`). Nothing built yet.
 
 ## Decided (the owner, 2026-11-16)
 
@@ -59,28 +60,43 @@ The proposal (2026-11-19, for Astra to validate against data already taken befor
 
 **Where it runs: inside the normal run, a step at a time.** The run's threads are chosen once, as now (`cputype=`, `cpus=`,
 `skip-cores=`, `cpu-stride=`, `core-priority=`), pinned, each with its memory on its own node. A latency step decides which of them
-measure; the rest sit out for that step, as Lat-Loaded-DRAM's do. No separate cycle, no reselection mid-run. In
-`read_latency_multi` a sit-out is the early return it already has for an empty block (src/latency_tests.rs:160-161): no barrier
-inside, and the step's P50 merges only the measurers' histograms (runner.rs:4810-4815).
+measure; the rest sit out for that step, as Lat-Loaded-DRAM's do. No separate cycle, no reselection mid-run.
+
+**A sit-out is an explicit role in one per-step plan**, built before any worker's hot loop: the eligible workers, each one's role,
+its CPU, cache domains and node, its extent, the estimated share, whether the target was met, and any allocation cap. Not an empty
+extent: `test_extent` raises a zero extent to one 4 KiB granule when the thread has memory (src/test_scaffolding.rs:201-203), so it
+would test 4 KiB. The step's P50 already merges only non-empty histograms (runner.rs:4810-4815), but the rest must follow the plan:
+per-thread rows mark a sit-out idle (not 0 ns, not unfinished), cycle minima leave it out (runner.rs:1573-1614, 4827-4847), the
+seal-before-step bookkeeping knows it touches nothing (thread_pool.rs:368-399), and extents and sharers come from the chosen
+measurers, not the run-wide globals (src/tests.rs:482-502). Other cores asleep can change clocks and uncore state: part of what
+the clean figure means, not a code guarantee.
 
 **Three settings,** each a run parameter and a per-test config field; a plan sets its own defaults:
 - `latency-threads=all|clean|N`: `all`, every thread (today's, the default); `clean`, as many a shared cache of the test's tier as
   still reach `latency-hits=` hits in that tier, the rest sitting out; `N`, exactly N.
 - `latency-hits=88%`: clean's target. A tier whose cache isn't shared (L1, and L2 on most CPUs) gets every thread under `clean`.
-- `latency-cores=ranked|performance|efficiency`: which threads measure first when fewer than all do. `ranked` is the run's order,
-  top-ranked first (today's thread 0). The other two keep to cores of that type where Windows reports types (Intel hybrids); the
-  8500G reports none, so there the run's own `cpus=` and `skip-cores=A-B` choose its cores, as they do today for the whole run.
+- `latency-cores=ranked|performance|efficiency`: an eligibility filter, then the run's order, top-ranked first (`ranked` is
+  today's thread 0). Types come from TMR's existing classification (src/cpu_topology.rs:411-428): Windows' efficiency classes, else
+  AMD's CPUID core type, else Windows' core priority under `core-priority=hybrid` (the 8500G's Zen 4c cores). A filter that leaves
+  no core is refused with the reason, never measured on another type. N is a total, spread over the domains in rank order; zero, or
+  more than the eligible cores, is refused. A run parameter overrides a `-Clean` test's fixed setting.
 
 **plan=perf** runs L1 and L2 as now, and the L3 and DRAM read tests both ways: today's (every thread) and a `-Clean` variant with
 `latency-threads=clean` fixed, as `-256` and `-Auto` fix a width, since plans list tests by name. The clean DRAM read is one thread
 over the loaded tests' block, `max(1 GiB, 32 L3s)`: one thread at Lat-DRAM-Read's 4 L3s has the L3 to itself and reads 18-22% low
-(calibration: about 52 ns against 66 every thread on the 8500G, 105 against 135 on the Xeon). Lat-Turnaround-DRAM's idle row is
-already that figure. The grid shows a latency column a form that ran, headed with its threads and, for clean, the hit share
-reached.
+(calibration: about 52 ns against 66 every thread on the 8500G, 105 against 135 on the Xeon). It is a step of its own, the 8 B
+chain on one thread with the others asleep, its extent as actually allocated recorded (the rule can't promise 1 GiB to a thread
+with less memory). Not Lat-Turnaround-DRAM's idle row: that chains one cell per 128 B and its loaders spin with PAUSE in C0
+(src/loaded.rs:15-25). The grid shows a latency column a form that ran, headed with its threads and, for clean, the estimated
+share.
 
-**Sizing a clean step:** the largest k (measurers a physical L3) whose block, `max(0.5 * l3_reach(k), L2 + 64 KiB)`, gives
-`1 - L2 / block` of at least the target. If even one falls short, run one and report the share it got. From A's sweeps: k=1 on
-petz007 (82%, about 8.7 ns), about 3 on daddy-petz, about 3 a socket on the Xeon.
+**Sizing a clean step:** the largest k (measurers a physical L3) whose block, `max(0.5 * l3_reach(k), L2 + 64 KiB)`, gives an
+estimated share `1 - L2 / block` of at least the target, L2 being the calibrated L2 the block's floor already uses (A's, on the
+measuring core; CPUID's without a calibration). The share is an estimate from the blend model, which fits the sweeps, not a hit
+counter: it is shown as "est.". If even one thread falls short, it runs one and the cell says "target unmet" with the estimate:
+petz007, k=1, est. 82% (about 8.7 ns from its sweep). About 3 on daddy-petz (2 or 3 by calibration: the physical 512 KiB L2 gives
+2 on its last run, the calibrated 483 KiB 3), about 3 a socket on the Xeon. 88% is a heuristic (model shortfall about 9% on
+petz007, 11% on the Xeon), not a proven optimum. The 0.5 scale stays until the new step is measured.
 
 **What it can't do:** measure on CPUs the run didn't choose. Latency on an SMT sibling under `cputype=cores`, or on cores a
 `skip-cores=` range left out, takes a run set up for them.
@@ -99,13 +115,17 @@ petz007 (82%, about 8.7 ns), about 3 on daddy-petz, about 3 a socket on the Xeon
   `skip-cores=A-B` range covering the top core.
 
 **Building it needs what the loaded tests don't have:**
-- More than one measurer: `assign_roles` makes only thread 0 measure.
+- More than one measurer for the ordinary read tests. The loaded tests keep one: choosing it rebuilds their same-node loader set
+  around it, its SMT siblings out, and resizes the participant barrier. The ordinary tests' default `all` never means "every
+  worker measures" in a loaded test.
 - The block sized from k, not from the run's thread count (src/tests.rs:968, :1017; src/session.rs:575).
-- A core-type filter for the measurers (`latency-cores=`); the ranking already knows each core's type.
+- The core-type filter (`latency-cores=`) over the existing classification.
 - L2 sharers counted too: an Intel E-core cluster shares one L2 between four cores, so `clean` applies at L2 there. No Intel
   hybrid is reachable to check it on.
-- L3 sharers counted per physical L3. `L3Group` is (processor group, LastLevelCacheIndex) (src/cpu_topology.rs:28-33), so the
-  Xeon's one 105 MB L3 a socket shows as two groups; k per group would size blocks for half the true sharers and near-fill it.
+- Cache domains from the OS's own sharing sets, `GetLogicalProcessorInformationEx(RelationCache)`'s `GroupMasks` (which span
+  processor groups), for L1, L2 and L3: not (processor group, LastLevelCacheIndex) (src/cpu_topology.rs:28-33), which shows the
+  Xeon's one 105 MB L3 a socket as two groups, and not "a node or socket is one L3" (chiplets, SNC). Calibration's anchor C
+  sharer count was taken under the old identities: version it, and recheck rather than reread an old one.
 
 Open, the owner's call:
 - On petz007 the 0.5 scale is what binds above 82%. Its one-thread sweeps are clean to 8.4-12.8 MB against a DRAM edge at 14.7-16.9
@@ -138,7 +158,8 @@ daddy-petz (Ryzen 7 5700X, DDR4; 2133 at FCLK 1067, 3600 at FCLK 1800), ns, from
 | TMR Lat-DRAM-Write | 125.8 | 78.3 | 78.6 | 78.5 | | | | | |
 
 petz007 (Ryzen 5 8600G, DDR5-6000, FCLK 2000), 7 boots across tFAW, tRRD_L, tWTR_L and tWTR_S: R 65.7-66.5, W-nt+sf 61.8-62.3
-(below the read), W-nt+mf 76.8-77.4, W-fl 91.3-91.9, RAW-nt 127.1-128.6. The Xeon 8488C: R 131.9, W-nt+sf 181.7.
+(below the read), W-nt+mf 76.8-77.4, W-fl 91.3-91.9, RAW-nt 127.1-128.6. The m8i.metal's Xeon 6975P-C (not the 8488C): R 131.9,
+W-nt+sf 181.7.
 
 What it shows:
 - **No idle method, the read included, moved with any one timing** beyond the boot-to-boot spread, on either desktop. Every timing
@@ -146,7 +167,7 @@ What it shows:
   null result says nothing either way about where a write is acknowledged. (117-write-latency.md:51-52's "the controller
   acknowledges a write when it is queued" is supported only on Zen 4, where the write is faster than the read.)
 - **W-nt+sf differs from R by platform:** a write takes 26 ns longer than a read on Zen 3, 4 ns less on Zen 4, 50 ns longer on the
-  Xeon. And over the whole 2133-to-3600 change it fell 26% where the read fell 36%.
+  Xeon 6975P-C. And over the whole 2133-to-3600 change it fell 26% where the read fell 36%.
 - **Never varied alone:** FCLK, tCWL (on a write's path, not a read's), tCL and tRCD (a read's). Those could separate W-nt+sf from R.
 - **TMR's Lat-DRAM-Write** (`write_latency_multi`, src/latency_tests.rs:253-310) is a read chase with a plain store to a second random
   line each step, off the chain's path: reads with a store stream beside them, about 13 ns over Lat-DRAM-Read. Not a write's latency.
@@ -154,9 +175,16 @@ What it shows:
 Already run: tWR, tRDWR, tFAW, tRRD_L, tWTR_L, tWRRD, tWTR_S, PHYRDL, and 2133 against 3600 (everything at once, FCLK
 included). Never alone: FCLK, tCWL, tCL, tRCD.
 
-Recommended (2026-11-19): port it now and check its tuning value later. Selecting the method needs no more data: the
-methods move alike, and W-nt+sf is the one with no read inside it and no MFENCE (W-fl reads the line in first; the read-backs pay
-MFENCE and a read). Replacing today's Lat-DRAM-Write, which a write-latency figure isn't, is a fix in itself. What more data
+Recommended (2026-11-19, Astra agreeing): port it now and check its tuning value later, as its own test, named for the operation:
+"NT store + SFENCE, ns/64-B line". It times fenced full-line stores, address generation and platform queuing included; it doesn't
+time a write reaching DRAM (SFENCE orders and makes stores globally visible, nothing more). The port keeps the probe's two 32 B NT
+stores and SFENCE a line, and a fence at the batch's end before the closing RDTSCP, which doesn't wait for stores by itself; its
+emitted code is checked, and its figure against the probe's on the same host. A new name, not Lat-DRAM-Write's: old results keep
+their meaning, and retiring or renaming the old plan entries is separate from deleting their kernels.
+
+Selecting the method needs no more data: the methods move alike, and W-nt+sf is the one that never reads the line it writes and
+pays no MFENCE per line (W-fl reads the line in first; the read-backs pay MFENCE and a read). It still reads an address index each
+line, and loop and fence work are in the figure. Replacing today's Lat-DRAM-Write, which a write-latency figure isn't, is a fix in itself. What more data
 would add is whether a tuner can move it where the read doesn't, which only the never-run knobs can show.
 
 Options:
@@ -186,9 +214,10 @@ figure against FCLK, tCWL and tCL.
 
 ## The Memory row's latency
 
-Configured: Lat-DRAM-Read, every thread (petz007 63.5 ns). Clean: one thread over the loaded tests' block, which is
-Lat-Turnaround-DRAM's idle row when that ran (petz007 67.0 ns; the Xeon 129.9 against every thread's 134.6). Each labelled with its
-thread count; never one shown as the other.
+Configured: Lat-DRAM-Read, every thread (petz007 63.5 ns). Clean: its own step, the 8 B chain on one thread over the loaded
+tests' extent rule, the others asleep; not yet measured. Lat-Turnaround-DRAM's idle row (petz007 67.0 ns, the Xeon 129.9) is a
+different experiment (128 B cells, loaders awake) and stays in the under-load table. Each labelled with its thread count; never
+one shown as another.
 
 ## What each cell comes from (checked against the code and the 2026-11-13 results)
 
@@ -264,15 +293,17 @@ grid sits under the verdict in the panel that opens at a run's end (model.rs:114
 ignores and the window draws as 14 pt cells, a semi-bold first column and striped rows (window.rs:1469-1511). No new tab: it would
 sit empty on every stability run.
 
-## Build order (about 18-22 agent hours, the write port included)
+## Build order (about 20-24 agent hours, the write port included)
 
 1. `PerfSummary` and `perf_summary()`, with unit tests: the gates, the plan-name join, runs 0, stopped steps, levels by value, not
    matched, partial, the cycle mean, nodes. The only place a wrong number can come from. About 3 h.
 2. The two tables in `report_final_summary` (src/reporting/mod.rs:124), after the Intermediate table; a perf golden, and
    `show_results.txt` extended so the round trip covers both. `test_support::loaded_summary(true)` already builds a loaded fixture
    with a not-matched row. About 3 h.
-3. The clean latency setting: k measurers a physical L3 from the hit-share target, the block from k, sharers counted per physical
-   L3, the DRAM form on the loaded tests' block, plan=perf running both; the configured form's footnote. About 5-7 h.
+3. Cache domains from the OS's sharing sets, calibration's C versioned. Then the per-step plan and the sit-out role; the clean
+   setting (k from the estimated share, the block from k), `latency-cores=`, the clean DRAM step, the loaded tests' choosable
+   measurer, plan=perf's `-Clean` variants; the configured form's footnote. Local checks: selection, idle accounting, capped
+   extents, topology fixtures (the Xeon's split L3), old results loading. About 7-9 h.
 4. The write port, if the owner chooses it (after the probe check, or now). About 3-4 h.
 5. Hardware before and after `plan=perf` on daddy-petz and petz007 (the release exe, `skip-cores=0`). About 30 min of runs.
 6. The results file's block. About 1 h.
