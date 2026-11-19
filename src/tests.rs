@@ -10875,6 +10875,7 @@ mod l3_share {
             l3_loaded: Some(6 * MIB),
             l3_loaded_ns: 40.0,
             l3_sharers: 8,
+            os_l3_groups: true,
         });
         set_calibration_data(Some(cal));
         let curve = l3.size_bytes(&cache_info, 16);

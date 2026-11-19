@@ -4,7 +4,8 @@ use std::sync::OnceLock;
 
 use raw_cpuid::CpuId;
 use windows::Win32::System::SystemInformation::{
-    GROUP_AFFINITY, GetLogicalProcessorInformationEx, RelationNumaNode, RelationNumaNodeEx, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+    GROUP_AFFINITY, GetLogicalProcessorInformationEx, RelationCache, RelationNumaNode, RelationNumaNodeEx,
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
 
 /// The detected topology, typed as the run's `topology=` and `core-priority=` say, with what typed it: detected at the first call, and
@@ -657,6 +658,7 @@ pub fn detect_cpu_topology() -> Vec<CpuTopologyInfo> {
     // Sort by logical ID for consistent display
     topology.sort_by_key(|cpu| cpu.logical_id);
     add_cpu_sets(&mut topology);
+    add_l3_groups(&mut topology);
 
     // Log summary of efficiency classes found
     let efficiency_classes: std::collections::HashSet<_> = topology.iter().map(|cpu| cpu.efficiency_class).collect();
@@ -678,6 +680,88 @@ fn add_cpu_sets(topology: &mut [CpuTopologyInfo]) {
             (cpu.priority, cpu.l3) = (set.scheduling_class, set.l3);
         }
     }
+}
+
+/// Each CPU's L3 group from the OS's cache records where they cover it (`l3_groups_of`, TODO 119): an L3 that spans two processor groups
+/// is one group, where the CPU sets' group-relative index made it two (the Xeon 8488C's 96 CPUs a socket, in a group of 64 and one of 32).
+/// A CPU they don't cover keeps its CPU set's.
+fn add_l3_groups(topology: &mut [CpuTopologyInfo]) {
+    let groups = l3_groups_of(&l3_caches());
+    for cpu in topology {
+        if let Some(&group) = groups.get(&cpu.logical_id) {
+            cpu.l3 = group;
+        }
+    }
+}
+
+/// Whether some L3 spans more than one processor group, where an L3 group taken from the CPU sets was half of one (TODO 119): a
+/// calibration's anchor C measured that way counted half its sharers
+pub fn l3_spans_groups() -> bool {
+    static SPANS: OnceLock<bool> = OnceLock::new();
+    *SPANS.get_or_init(|| l3_caches().iter().any(|cache| cache.iter().map(|&(group, _)| group).collect::<HashSet<_>>().len() > 1))
+}
+
+/// The OS's L3s (`RelationCache` records of level 3): each the (processor group, CPU mask) pairs it spans, `GroupCount` of them (one from
+/// a Windows that gives no count). Empty where the records aren't there.
+fn l3_caches() -> Vec<Vec<(u16, usize)>> {
+    // SAFETY: as `discover_numa_topology`'s walk: the size first, then a u64-backed buffer that long, walked by each record's `Size` below
+    // the length Windows returned. A cache record holds its `GroupCount` masks inside the record's `Size`.
+    unsafe {
+        let mut size = 0u32;
+        let _ = GetLogicalProcessorInformationEx(RelationCache, None, &mut size);
+        if size == 0 {
+            return Vec::new();
+        }
+        // ALIGNMENT: u64-backed (see `memory/privileges.rs`); the walk below stays in BYTES via an explicit `*const u8` base.
+        let mut buffer = vec![0u64; (size as usize).div_ceil(std::mem::size_of::<u64>())];
+        let records = Some(buffer.as_mut_ptr() as *mut SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX);
+        if let Err(e) = GetLogicalProcessorInformationEx(RelationCache, records, &mut size) {
+            log::warn!("No cache records ({e:?}): L3 groups from the CPU sets");
+            return Vec::new();
+        }
+        let base = buffer.as_ptr() as *const u8;
+        let mut caches = Vec::new();
+        let mut offset = 0usize;
+        while offset < size as usize {
+            let info = &*(base.add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX);
+            if info.Relationship == RelationCache && info.Anonymous.Cache.Level == 3 {
+                let cache = &info.Anonymous.Cache;
+                let masks = &raw const cache.Anonymous.GroupMasks as *const GROUP_AFFINITY;
+                caches.push(
+                    (0..(cache.GroupCount as usize).max(1))
+                        .map(|i| {
+                            let mask = &*masks.add(i);
+                            (mask.Group, mask.Mask)
+                        })
+                        .collect(),
+                );
+            }
+            offset += info.Size as usize;
+        }
+        caches
+    }
+}
+
+/// Each CPU's L3 group, numbered as the CPU sets number them within a processor group but an L3 spanning groups once: (the lowest group
+/// it spans, its order among the L3s starting in that group), the L3s ordered by their first CPU. TMR numbers CPUs group * 64 + index.
+fn l3_groups_of(caches: &[Vec<(u16, usize)>]) -> HashMap<usize, L3Group> {
+    let first_cpu = |cache: &Vec<(u16, usize)>| cache.iter().filter(|&&(_, mask)| mask != 0).map(|&(g, m)| (g, m.trailing_zeros())).min();
+    let mut ordered: Vec<&Vec<(u16, usize)>> = caches.iter().filter(|cache| first_cpu(cache).is_some()).collect();
+    ordered.sort_by_key(|cache| first_cpu(cache));
+    let mut starting: HashMap<u16, u8> = HashMap::new();
+    let mut by_cpu = HashMap::new();
+    for cache in ordered {
+        let Some((first, _)) = first_cpu(cache) else { continue };
+        let order = starting.entry(first).or_insert(0);
+        let group = (first, *order);
+        *order = order.saturating_add(1);
+        for &(processor_group, mask) in cache {
+            for bit in (0..usize::BITS as usize).filter(|bit| mask & (1 << bit) != 0) {
+                by_cpu.insert(processor_group as usize * 64 + bit, group);
+            }
+        }
+    }
+    by_cpu
 }
 
 pub fn get_system_cpu_set_information() -> Result<Vec<EnhancedCpuInfo>, String> {
@@ -896,8 +980,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        CorePriority, CoreType, TopologyDetectionMethod, classify_core_types, detect_cpu_topology, detect_cpu_topology_with, l3_sizes,
-        ranked_only, types_by_l3,
+        CorePriority, CoreType, TopologyDetectionMethod, classify_core_types, detect_cpu_topology, detect_cpu_topology_with, l3_caches,
+        l3_groups_of, l3_sizes, ranked_only, types_by_l3,
     };
 
     fn by_core(values: &[u8]) -> HashMap<usize, u8> {
@@ -1016,5 +1100,30 @@ mod tests {
         let reported = crate::cache::CacheInfo::detect().l3_cache;
         assert!(reported > 0, "the cache detection found no L3");
         assert!(sizes.values().all(|&s| s == Some(reported)), "per core {sizes:?}, cache.rs {reported}");
+    }
+
+    /// TODO 119: an L3 spanning two processor groups is one L3 group (the Xeon 8488C: a socket's 96 CPUs in a group of 64 and one of 32,
+    /// which the CPU sets' group-relative index made two); two L3s in one group stay two (a 2-CCD Ryzen); a group's L3s numbered by their
+    /// first CPU
+    #[test]
+    fn an_l3_spanning_processor_groups_is_one_group() {
+        let all = usize::MAX;
+        let xeon = [vec![(2, all), (3, 0xFFFF_FFFF)], vec![(0, all), (1, 0xFFFF_FFFF)]];
+        let groups = l3_groups_of(&xeon);
+        assert_eq!(groups.len(), 192);
+        assert!((0..96).all(|cpu| groups[&cpu] == (0, 0)), "socket 0: groups 0 and 1 (CPUs 64-95)");
+        assert!((128..224).all(|cpu| groups[&cpu] == (2, 0)), "socket 1: groups 2 and 3 (CPUs 192-223)");
+        let two_ccds = [vec![(0, 0xFFFF_0000)], vec![(0, 0xFFFF)]];
+        let groups = l3_groups_of(&two_ccds);
+        assert!((0..16).all(|cpu| groups[&cpu] == (0, 0)) && (16..32).all(|cpu| groups[&cpu] == (0, 1)), "{groups:?}");
+        assert!(l3_groups_of(&[vec![(0, 0)]]).is_empty(), "a record with no CPUs names none");
+    }
+
+    /// This machine's cache records name every CPU's L3 group, and each core's CPUs share theirs
+    #[test]
+    fn the_cache_records_cover_every_cpu() {
+        let groups = l3_groups_of(&l3_caches());
+        let topology = detect_cpu_topology();
+        assert!(topology.iter().all(|cpu| groups.get(&cpu.logical_id) == Some(&cpu.l3)), "{groups:?}");
     }
 }

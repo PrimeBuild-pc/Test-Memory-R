@@ -197,6 +197,10 @@ pub struct SharedReach {
     pub l3_loaded_ns: f64,
     /// The CPUs sharing an L3 group then: the most one group has
     pub l3_sharers: usize,
+    /// Whether C counted its sharers by the OS's cache records (TODO 119). Before, by the CPU sets' group-relative index, which made an L3
+    /// spanning two processor groups two, so on such a machine an older C's sharers are half and it isn't used.
+    #[serde(default)]
+    pub os_l3_groups: bool,
 }
 
 /// Complete calibration results for all tiers
@@ -237,12 +241,14 @@ impl CalibrationResults {
     /// What a thread reaches of its L3 with `k` threads in its group running (TODO 22): the curve through the single thread's reach R1
     /// (anchor A) and the loaded one RN with N sharing (anchor C), reach(k) = own + split / k, so split = (R1 - RN) x N / (N - 1), at most
     /// R1, and own = R1 - split. Without C, R1 / k: the threads split it all. None without an L3. On the dev box (a VM) 8 threads held 19
-    /// MB each, 154 MB in all, where one held 67 MB: the L3 doesn't split evenly, which the own part takes up (12 MB there).
+    /// MB each, 154 MB in all, where one held 67 MB: the L3 doesn't split evenly, which the own part takes up (12 MB there). A C that
+    /// counted its sharers by the CPU sets, on a machine with an L3 spanning processor groups, counted half of them: R1 / k then.
     pub fn l3_reach(&self, k: usize) -> Option<f64> {
         let r1 = self.tiers.get(&CacheTier::L3)?.optimal_size as f64;
         let k = k.max(1) as f64;
+        let counted = |shared: &SharedReach| shared.os_l3_groups || !crate::cpu_topology::l3_spans_groups();
         Some(match &self.shared {
-            Some(SharedReach { l3_loaded: Some(rn), l3_sharers: n, .. }) if *n > 1 => {
+            Some(shared @ SharedReach { l3_loaded: Some(rn), l3_sharers: n, .. }) if *n > 1 && counted(shared) => {
                 let (rn, n) = (*rn as f64, *n as f64);
                 let split = ((r1 - rn) * n / (n - 1.0)).clamp(0.0, r1);
                 (r1 - split) + split / k
@@ -1297,7 +1303,14 @@ impl CalibrationTest {
         let size_of = |tier: CacheTier| results.tiers.get(&tier).map(|t| t.optimal_size);
         let (Some(a_l1), Some(a_l2), Some(a_l3)) = (size_of(CacheTier::L1), size_of(CacheTier::L2), size_of(CacheTier::L3)) else {
             log::warn!("Anchors B and C not measured: one thread found no L1, L2 or L3 to size them from");
-            return SharedReach { l1_smt: None, l2_smt: None, l3_loaded: None, l3_loaded_ns: 0.0, l3_sharers: cpus.per_l3 };
+            return SharedReach {
+                l1_smt: None,
+                l2_smt: None,
+                l3_loaded: None,
+                l3_loaded_ns: 0.0,
+                l3_sharers: cpus.per_l3,
+                os_l3_groups: true,
+            };
         };
         let (repeats, fine_step, stable_spread) = (3u32, 1.05, 1.5);
 
@@ -1340,7 +1353,7 @@ impl CalibrationTest {
             );
         }
 
-        SharedReach { l1_smt, l2_smt, l3_loaded, l3_loaded_ns, l3_sharers: cpus.per_l3 }
+        SharedReach { l1_smt, l2_smt, l3_loaded, l3_loaded_ns, l3_sharers: cpus.per_l3, os_l3_groups: true }
     }
 
     /// The L3 a thread reaches with `cpus` all chasing at once, `sharers` of them in an L3 group (anchor C's measure, TODO 22), each on
@@ -2922,7 +2935,8 @@ mod tests {
         assert_eq!(cal.l3_reach(8), None, "no L3");
         cal.add_tier_result(tier(CacheTier::L3, 64 << 20));
         assert_eq!(cal.l3_reach(8), Some(8.0 * MIB), "A alone");
-        let loaded = |l3_loaded| SharedReach { l1_smt: None, l2_smt: None, l3_loaded, l3_loaded_ns: 40.0, l3_sharers: 8 };
+        let loaded =
+            |l3_loaded| SharedReach { l1_smt: None, l2_smt: None, l3_loaded, l3_loaded_ns: 40.0, l3_sharers: 8, os_l3_groups: true };
         cal.shared = Some(loaded(Some(9 << 20)));
         let reach = |k| (cal.l3_reach(k).unwrap() / MIB * 100.0).round() / 100.0;
         assert_eq!([1, 4, 8].map(reach), [64.0, 16.86, 9.0]);
@@ -2949,7 +2963,7 @@ mod tests {
         let cache_info = crate::tests::get_cache_info();
         let test = CalibrationTest::with_config(cache_info.clone(), CalibrationConfig::default());
         let one_cpu = CalibrationCpus { single: 0, node: 0, nodes: 1, pair: None, all: vec![0], per_l3: 1 };
-        let nothing = SharedReach { l1_smt: None, l2_smt: None, l3_loaded: None, l3_loaded_ns: 0.0, l3_sharers: 1 };
+        let nothing = SharedReach { l1_smt: None, l2_smt: None, l3_loaded: None, l3_loaded_ns: 0.0, l3_sharers: 1, os_l3_groups: true };
         let mut cal = CalibrationResults::new(CpuSignature::default());
         assert_eq!(test.run_shared(&cal, &one_cpu, std::ptr::null_mut(), 0), nothing, "A found no tier");
         for (t, size) in [(CacheTier::L1, 48 << 10), (CacheTier::L2, 1 << 20), (CacheTier::L3, 32 << 20)] {

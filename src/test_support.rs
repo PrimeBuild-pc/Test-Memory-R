@@ -434,6 +434,7 @@ pub fn cache_calibration() -> crate::calibration::CalibrationResults {
         l3_loaded: Some(2560 * KIB),
         l3_loaded_ns: 13.4,
         l3_sharers: 12,
+        os_l3_groups: true,
     });
     calibration
 }
