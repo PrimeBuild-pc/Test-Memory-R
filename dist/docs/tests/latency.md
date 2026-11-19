@@ -113,6 +113,12 @@ summary's L3 and Memory rows show both.
   and leaves its memory as it was. Its row in the step's thread table has no bytes, and the
   results file names each thread's role in the step, `measures` or `sits out`.
 
+Where the two forms part, the every-thread one reads its tier less cleanly. On an EC2 r8i.2xlarge
+(a Xeon 6975P-C, 4 threads, 2026-11-19) the calibration reaches 19.3 MiB of L3 for a thread, so
+Lat-DRAM-Read's four L3s are 77 MiB a thread, 308 MiB in all, which its 480 MiB L3 can hold: it read
+103-106 ns, the clean form over 7 GiB 137.8-137.9, as the calibration's DRAM did (140.7). Its L3
+read 25.4 ns every thread (an estimated 30% of it in the L2), and 30.4-30.5 clean.
+
 Lat-L3-Read-Clean and Lat-DRAM-Read-Clean are Lat-L3-Read and Lat-DRAM-Read with
 `latency-threads=clean` built in. A `latency-threads=` on the command line overrides it, on every
 test that takes it. What the settings chose is in the log as the run starts, and in the results
@@ -132,7 +138,8 @@ the line reaches the DRAM. No line is ever read.
 
 The same method on one thread over 2 GiB, before it was a test (2026-11): 61.8-62.3 ns on a
 Ryzen 5 8600G (DDR5-6000, below its read's 65.7-66.5), 90.2-91.8 on a Ryzen 7 5700X (DDR4-3600,
-its read 64.8-65.8) and 181.7 on a Xeon 6975P-C (its read 131.9). No one timing moved it beyond
+its read 64.8-65.8) and 181.7 on a Xeon 6975P-C (its read 131.9). The test read 182.3 ns, three
+runs alike, on an EC2 r8i.2xlarge's Xeon 6975P-C (2026-11-19). No one timing moved it beyond
 the spread from boot to boot there, the read's included, so what tuning shows in it is still open.
 It replaces Lat-DRAM-Write and Lat-DRAMFull-Write in `plan=perf`: they time the read chase with a
 store beside it, a read's latency more than a write's.
@@ -187,7 +194,7 @@ out of the run, which says so (`Left out N test(s) this CPU can't run`).
 
 ## Which plans run them, and for how long
 
-- **`plan=perf`** (one cycle, 26 tests, about 6 min): Lat-L1-Read, Lat-L2-Read, Lat-L3-Read,
+- **`plan=perf`** (one cycle, 26 tests, about 5.5 min): Lat-L1-Read, Lat-L2-Read, Lat-L3-Read,
   Lat-L3-Read-Clean, Lat-DRAM-Read, Lat-DRAM-Read-Clean, Lat-DRAM-NTStore-SFence and
   Lat-DRAMFull-Read, then the two loaded tests, the 15 [bandwidth tests](bandwidth.md), and
   Lat-NTW-DRAM-Write-Auto last. It leaves out every Write and Copy chase: they time the chain's

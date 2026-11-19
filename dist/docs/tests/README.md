@@ -18,7 +18,7 @@ the command line, or in the window's box. `tmr plan=stability` starts the defaul
 | `stability` (the default) | the 13 stability tests, at the widest width | 3 | about 5 min a cycle |
 | `quick` | the same 13 | 1 | about 5 min |
 | `widths` | 20 tests: five families, every width side by side | 3 | about 6 min a cycle |
-| `perf` | 26 tests: latency, latency under load, bandwidth | 1 | about 6 min |
+| `perf` | 26 tests: latency, latency under load, bandwidth | 1 | about 5.5 min |
 | `all` | every test, 280 | 3 | about an hour a cycle |
 
 - **stability** runs, in this order: Mem-StuckBitAuto, Mem-SimpleV2-Auto, Mem-SimpleNT-Auto,
@@ -140,6 +140,25 @@ load. Each shows what the run took of those tests, and neither shows for a `conf
 tests can carry the built-in names with other settings.
 
 **Cache & Memory** has a row a tier, L1, L2, L3 and Memory:
+
+```
+Cache & Memory: 512-bit, 4 threads
+Tier        Read GiB/s  Write GiB/s  Copy GiB/s  Read MiB/s  Write MiB/s  Copy MiB/s  Latency, 4 threads  Latency, clean
+L1              1562.0        918.0      1814.0     1599487       939994     1857560              1.3 ns               -
+L2               710.5        228.8       368.5      727561       234327      377305              4.0 ns               -
+L3*               83.5         86.6        84.0       85457        88711       86003             25.4 ns         30.5 ns
+Memory            81.3         91.7        66.4       83278        93865       68001            104.0 ns        137.8 ns
+Bandwidth: every thread at once; copy counts the bytes read and the bytes written. Memory's write and copy are NT stores.
+Latency: the read chase's P50, every thread chasing at once.
+* The L3 row's latency: each of the 4 threads chases 5.94 MiB, 3.32x its 2 MiB L2, so the L2 serves an estimated 30% of the chase.
+Latency, clean: on the L3, 1 thread chases 9.64 MiB, an estimated 81% of it in the L3, short of the 88% target even with one; in
+Memory, 1 thread chases 7.00 GiB; the other threads sit out.
+Memory's write latency: 182.3 ns a 64 B line, NT-stored then SFENCE, a line at a time, one thread over 7.00 GiB: until the stores are
+visible, not until they reach DRAM.
+```
+
+That is an EC2 r8i.2xlarge (a Xeon 6975P-C, 4 cores, `cputype=cores`, 2026-11-19), its notes wrapped here. Three runs gave the
+same clean and write figures to 0.1 ns, and Memory's every-thread latency 103.3-106.0 ns.
 
 - **Read, Write and Copy**, in GiB/s and in MiB/s: the `Spd-` tests at Auto, or at the widest
   width the run took, every thread at once. Copy counts the bytes read and the bytes written.
