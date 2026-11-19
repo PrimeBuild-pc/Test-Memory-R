@@ -55,23 +55,35 @@ One thread's latency against its block, from calibration anchor A's sweep (one t
 
 A clear read, within about 10% of the L3, takes 85-90% L3 hits: a block 7-9x the thread's L2.
 
-The proposal, a per-test setting for the Lat-L3 and Lat-DRAM read tests:
-- **Configured (today, the default):** every thread the run was set up with. The grid marks the cell with the threads, each one's
-  block against its L2, and the estimated L2 share, `L2 / block` ("6 threads share the 16 MiB L3: each chases 1.27 MiB, 1.27x its
-  L2, about 80% of reads in the L2").
-- **Clean:** a target L3 hit share (default 88%, a run parameter to change it). TMR finds the largest k, measuring threads per
-  physical L3, whose block `max(0.5 * l3_reach(k), L2 + 64 KiB)` reaches it; the rest sit out. When even one thread falls short it
-  runs one and reports the share it got. The default gives k=1 on petz007 (82% at 0.5 of its reach, 8.7 ns against the sweep's top
-  of 9.3-9.4), about 3 on daddy-petz, and about 3 a socket on the Xeon. plan=perf runs both forms; the grid shows both columns when
-  both ran, only the one that ran otherwise.
-- **L1 and L2 stay as they are:** private to a core, so the thread count barely changes them. One thread alone was no faster on
-  petz007 or daddy-petz; the Xeon's lone-thread clock wandered in calibration (L1 1.3-2.1 ns at the same sizes) where all 96
-  threads read 1.57 steady.
-- **The clean DRAM read uses the loaded tests' block,** `max(1 GiB, 32 L3s)` (loaded.rs extent_bytes), never Lat-DRAM-Read's 4 L3s
-  a thread: one thread alone at that size has the L3 to itself and reads 18-22% low (calibration: about 52 ns against 66 every
-  thread on the 8500G, 105 against 135 on the Xeon). Lat-Turnaround-DRAM's idle row already is that figure.
-- Not this: L3 latency under the other cores' L3 traffic (one thread chasing a big block while the rest stream the L3) is the
-  under-load tests' design applied to the L3. A follow-up, not v0.1.2.
+The proposal (2026-11-19, for Astra to validate against data already taken before anything is built):
+
+**Where it runs: inside the normal run, a step at a time.** The run's threads are chosen once, as now (`cputype=`, `cpus=`,
+`skip-cores=`, `cpu-stride=`, `core-priority=`), pinned, each with its memory on its own node. A latency step decides which of them
+measure; the rest sit out for that step, as Lat-Loaded-DRAM's do. No separate cycle, no reselection mid-run. In
+`read_latency_multi` a sit-out is the early return it already has for an empty block (src/latency_tests.rs:160-161): no barrier
+inside, and the step's P50 merges only the measurers' histograms (runner.rs:4810-4815).
+
+**Three settings,** each a run parameter and a per-test config field; a plan sets its own defaults:
+- `latency-threads=all|clean|N`: `all`, every thread (today's, the default); `clean`, as many a shared cache of the test's tier as
+  still reach `latency-hits=` hits in that tier, the rest sitting out; `N`, exactly N.
+- `latency-hits=88%`: clean's target. A tier whose cache isn't shared (L1, and L2 on most CPUs) gets every thread under `clean`.
+- `latency-cores=ranked|performance|efficiency`: which threads measure first when fewer than all do. `ranked` is the run's order,
+  top-ranked first (today's thread 0). The other two keep to cores of that type where Windows reports types (Intel hybrids); the
+  8500G reports none, so there the run's own `cpus=` and `skip-cores=A-B` choose its cores, as they do today for the whole run.
+
+**plan=perf** runs L1 and L2 as now, and the L3 and DRAM read tests both ways: today's (every thread) and a `-Clean` variant with
+`latency-threads=clean` fixed, as `-256` and `-Auto` fix a width, since plans list tests by name. The clean DRAM read is one thread
+over the loaded tests' block, `max(1 GiB, 32 L3s)`: one thread at Lat-DRAM-Read's 4 L3s has the L3 to itself and reads 18-22% low
+(calibration: about 52 ns against 66 every thread on the 8500G, 105 against 135 on the Xeon). Lat-Turnaround-DRAM's idle row is
+already that figure. The grid shows a latency column a form that ran, headed with its threads and, for clean, the hit share
+reached.
+
+**Sizing a clean step:** the largest k (measurers a physical L3) whose block, `max(0.5 * l3_reach(k), L2 + 64 KiB)`, gives
+`1 - L2 / block` of at least the target. If even one falls short, run one and report the share it got. From A's sweeps: k=1 on
+petz007 (82%, about 8.7 ns), about 3 on daddy-petz, about 3 a socket on the Xeon.
+
+**What it can't do:** measure on CPUs the run didn't choose. Latency on an SMT sibling under `cputype=cores`, or on cores a
+`skip-cores=` range left out, takes a run set up for them.
 
 **What sitting threads out keeps and loses** (src/cpu_selection.rs:129-317, src/loaded.rs:100-144, :1093-1099):
 - **The layout logic picks the measurer.** Thread 0 is the first CPU of the top-ranked core: performance cores first, then
@@ -86,9 +98,12 @@ The proposal, a per-test setting for the Lat-L3 and Lat-DRAM read tests:
 - **Two cases where the ranking doesn't pick it:** `cpu-stride=` (the measurer becomes the lowest-numbered core) and a
   `skip-cores=A-B` range covering the top core.
 
-**Building it needs three things the loaded tests don't have:**
+**Building it needs what the loaded tests don't have:**
 - More than one measurer: `assign_roles` makes only thread 0 measure.
 - The block sized from k, not from the run's thread count (src/tests.rs:968, :1017; src/session.rs:575).
+- A core-type filter for the measurers (`latency-cores=`); the ranking already knows each core's type.
+- L2 sharers counted too: an Intel E-core cluster shares one L2 between four cores, so `clean` applies at L2 there. No Intel
+  hybrid is reachable to check it on.
 - L3 sharers counted per physical L3. `L3Group` is (processor group, LastLevelCacheIndex) (src/cpu_topology.rs:28-33), so the
   Xeon's one 105 MB L3 a socket shows as two groups; k per group would size blocks for half the true sharers and near-fill it.
 
@@ -136,12 +151,38 @@ What it shows:
 - **TMR's Lat-DRAM-Write** (`write_latency_multi`, src/latency_tests.rs:253-310) is a read chase with a plain store to a second random
   line each step, off the chain's path: reads with a store stream beside them, about 13 ns over Lat-DRAM-Read. Not a write's latency.
 
+Already run: tWR, tRDWR, tFAW, tRRD_L, tWTR_L, tWRRD, tWTR_S, PHYRDL, and 2133 against 3600 (everything at once, FCLK
+included). Never alone: FCLK, tCWL, tCL, tRCD.
+
+Recommended (2026-11-19): port it now and check its tuning value later. Selecting the method needs no more data: the
+methods move alike, and W-nt+sf is the one with no read inside it and no MFENCE (W-fl reads the line in first; the read-backs pay
+MFENCE and a read). Replacing today's Lat-DRAM-Write, which a write-latency figure isn't, is a fix in itself. What more data
+would add is whether a tuner can move it where the read doesn't, which only the never-run knobs can show.
+
 Options:
 - **Check first (no build):** run the existing probe on petz007 with FCLK alone, tCWL alone and tCL alone changed, two boots each:
   mostly reboot time. If W-nt+sf moves where R doesn't, it earns its cell.
 - **Port now** as the DRAM write latency on one thread, named for what it times ("NT write + SFENCE round trip"), replacing
   Lat-DRAM-Write and Lat-DRAMFull-Write in plan=perf. Its name, and which read-chase-plus-store tests retire
   (Lat-{L1,L2,L3,DRAM,DRAMFull}-Write and the Lat-V2/V2P Write families), as a list approved before anything is deleted.
+
+## For Astra: what to validate from data already taken (no runs, no builds)
+
+1. The blend model, `(1-h)*L2 + h*L3` with h = `1 - L2 / block`, against calibration anchor A's one-thread sweeps
+   (`baselines\2026-11-05-curve\`, and the `*-perf-1.txt` consoles in `baselines\2026-11-13\<host>\`), and the claim that a
+   sample is the mean of 1000 chained loads (src/latency_tests.rs:169, :192-194).
+2. The clean rule's k and predicted figure for petz007, daddy-petz and the Xeon 8488C, at 88% and at 50-60%, and whether 88% is
+   the right default.
+3. That the Xeon's one L3 a socket shows as two L3 groups (src/cpu_topology.rs:28-33;
+   `baselines\2026-11-13\ec2amaz-6hbdp1e\116-metal-perf-1.txt`), and what counting per physical L3 takes.
+4. What one measuring core loses: the per-thread P50s and P99s in the 2026-11-13 results (`cycles[].tests[].threads[]`), the 8500G's
+   Zen 4 against Zen 4c, and thread 0's tail.
+5. That a sit-out in `read_latency_multi` can be its empty-block early return without changing the measurers' figures.
+6. The write-latency reading: the probe outputs in `baselines\2026-11-05-write-latency\` and `baselines\2026-11-05-timings\`, and
+   whether porting W-nt+sf now, as an informational figure named for what it times, is sound.
+
+Needs new runs, not validation: the clean figures at k > 1, measuring on efficiency cores (no Intel hybrid reachable), and the write
+figure against FCLK, tCWL and tCL.
 
 ## The Memory row's latency
 
