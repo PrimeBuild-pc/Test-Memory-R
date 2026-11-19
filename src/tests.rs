@@ -888,6 +888,19 @@ impl TestMemoryConfig {
         self
     }
 
+    /// This config as `thread` runs it (TODO 119, `measure::Plan`): with its own block when its plan gives one, as it is otherwise; `None`
+    /// when the thread sits the step out. The workers run it, and the step's line describes it.
+    pub fn as_planned(&self, thread: usize) -> Option<std::borrow::Cow<'_, TestMemoryConfig>> {
+        use crate::measure::Role;
+        match self.measure.as_ref().map(|plan| plan.role(thread)) {
+            Some(Role::SitsOut) => None,
+            Some(Role::Measures { extent: Some(size_bytes) }) => {
+                Some(std::borrow::Cow::Owned(TestMemoryConfig { extent_mode: ExtentMode::Absolute { size_bytes }, ..self.clone() }))
+            }
+            Some(Role::Measures { extent: None }) | None => Some(std::borrow::Cow::Borrowed(self)),
+        }
+    }
+
     /// Builder: Mem-Sequence's passes.
     pub fn with_sequence(mut self, sequence: crate::sequence::Sequence) -> Self {
         self.sequence = Some(Box::new(sequence));

@@ -110,20 +110,6 @@ impl WorkResult {
     }
 }
 
-/// A latency step's config as this thread runs it (TODO 119, `measure::Plan`): with its own block when its plan gives one, as the step's
-/// otherwise; `None` when it sits the step out
-fn as_planned(config: &TestMemoryConfig, thread: usize) -> Option<std::borrow::Cow<'_, TestMemoryConfig>> {
-    use crate::measure::Role;
-    match config.measure.as_ref().map(|plan| plan.role(thread)) {
-        Some(Role::SitsOut) => None,
-        Some(Role::Measures { extent: Some(size_bytes) }) => Some(std::borrow::Cow::Owned(TestMemoryConfig {
-            extent_mode: crate::tests::ExtentMode::Absolute { size_bytes },
-            ..config.clone()
-        })),
-        Some(Role::Measures { extent: None }) | None => Some(std::borrow::Cow::Borrowed(config)),
-    }
-}
-
 // Thread pool worker context
 pub struct WorkerContext {
     pub thread_id: usize,
@@ -518,7 +504,7 @@ fn worker_thread_loop(context: &mut WorkerContext) {
 
                 // A latency step's thread its plan sits out (TODO 119): no test and none of its memory touched, its core idle in the wait
                 // for the next item; a measurer over its own block
-                let Some(test_config) = as_planned(&test_config, context.thread_id) else {
+                let Some(test_config) = test_config.as_planned(context.thread_id) else {
                     if context.result_sender.send(WorkResult::idle(context.thread_id, thread_start.elapsed())).is_err() {
                         log::error!("Failed to send result from thread {}", context.thread_id);
                     }
@@ -586,7 +572,7 @@ fn worker_thread_loop(context: &mut WorkerContext) {
                 let start = Instant::now();
                 crate::error_context::set(format!("{step}, thread {}", context.thread_id));
                 let progress = &context.live[context.thread_id];
-                let (errors, ops) = match as_planned(&test_config, context.thread_id) {
+                let (errors, ops) = match test_config.as_planned(context.thread_id) {
                     Some(config) => seal_before_step(&context.allocated_blocks, &config, test_name, progress, &mut context.unsealed),
                     // A thread that sits the step out overwrites none of its memory: nothing to check, nothing left to reseal (TODO 119)
                     None => (0, crate::ops::OpTally::default()),

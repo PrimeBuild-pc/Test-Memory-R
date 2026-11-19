@@ -275,6 +275,18 @@ pub fn create_test_configuration_report_v2(
                 ChunkMode::Absolute { .. } | ChunkMode::CacheTotal { .. } => String::new(),
             };
             chunk_mode = format!("{} x{}{overlap}{source}", size(spread.chunk()), spread.count());
+            // A planned latency step (TODO 119, `measure`): its measurers' block, whole, and how many of the threads measure it
+            if let Some(plan) = &config.measure {
+                let record = &plan.record;
+                let who = format!("{} of {thread_count} threads, latency-threads={}", record.measurers, record.threads);
+                match record.block_bytes {
+                    Some(block) => {
+                        extent_mode = format!("{} ({who})", size(block as usize));
+                        chunk_mode = format!("{} x1 (whole)", size(block as usize));
+                    }
+                    None => extent_mode = format!("{extent_mode}, {who}"),
+                }
+            }
             // Only when the memory is what limits the extent: a cache-sized extent smaller than its chunk is the test's design
             // (Mem-Refresh's 2 GiB chunk means "the whole extent")
             let memory_bounds_extent = sized.calculate_extent_size(name, 1 << 60) > lo;

@@ -140,11 +140,18 @@ fn layout_text(test_name: &str, covered: usize, asked: usize, chunk: usize) -> S
 }
 
 /// The step's line (TODO 105): what it covers on each thread, sized as `TestRunner::new` sizes it from the thread's span, the threads
-/// that share a layout counted together: "Running Mem-SimpleV2-Auto on 6 threads, each 2.00 GiB (extent ...), ..."
+/// that share a layout counted together: "Running Mem-SimpleV2-Auto on 6 threads, each 2.00 GiB (extent ...), ..."; a planned latency
+/// step's measurers alone, over their own block, and how many sit out (TODO 119): "Running Lat-DRAM-Read-Clean on 1 of 4 threads, ...;
+/// 3 sit out"
 pub fn step_line(name: &str, test_name: &str, config: &TestMemoryConfig, span_bytes: &[usize]) -> String {
     let mut groups: Vec<(String, usize)> = Vec::new();
-    for &memory in span_bytes {
-        let text = match crate::test_memory::resolve_layout(config, test_name, memory) {
+    let mut sat_out = 0;
+    for (thread, &memory) in span_bytes.iter().enumerate() {
+        let Some(config) = config.as_planned(thread) else {
+            sat_out += 1;
+            continue;
+        };
+        let text = match crate::test_memory::resolve_layout(&config, test_name, memory) {
             Some((covered, spread)) => layout_text(test_name, covered, config.calculate_extent_size(test_name, memory), spread.chunk()),
             None => "no memory".to_string(),
         };
@@ -153,14 +160,27 @@ pub fn step_line(name: &str, test_name: &str, config: &TestMemoryConfig, span_by
             None => groups.push((text, 1)),
         }
     }
-    let threads = span_bytes.len();
-    let (s, each) = if threads == 1 { ("", "") } else { ("s", "each ") };
-    match groups.as_slice() {
-        [(text, _)] => format!("Running {name} on {threads} thread{s}, {each}{text}"),
+    let all = span_bytes.len();
+    let threads = all - sat_out;
+    let (s, each) = if threads == 1 && sat_out == 0 {
+        ("", "")
+    } else if threads == 1 {
+        ("s", "")
+    } else {
+        ("s", "each ")
+    };
+    let on = if sat_out == 0 { threads.to_string() } else { format!("{threads} of {all}") };
+    let line = match groups.as_slice() {
+        [(text, _)] => format!("Running {name} on {on} thread{s}, {each}{text}"),
         _ => {
             let parts: Vec<String> = groups.iter().map(|(text, n)| format!("{n} on {text}")).collect();
-            format!("Running {name} on {threads} threads: {}", parts.join("; "))
+            format!("Running {name} on {on} threads: {}", parts.join("; "))
         }
+    };
+    match sat_out {
+        0 => line,
+        1 => format!("{line}; 1 sits out"),
+        n => format!("{line}; {n} sit out"),
     }
 }
 
@@ -714,6 +734,40 @@ mod tests {
             line(&[8 * MIB, 4 * MIB, 8 * MIB, 0]),
             "Running Mem-SimpleV2-Auto_A on 4 threads: 2 on 8 MiB (extent 8 MiB), 2 x 4 MiB chunks, overlap 0; 1 on 4 MiB (extent 4 MiB), \
              1 x 4 MiB chunks, overlap 0; 1 on no memory"
+        );
+    }
+
+    /// TODO 119: a planned latency step's line counts its measurers alone, over their plan's block, and the threads that sit out
+    #[test]
+    fn a_planned_steps_line_counts_its_measurers_and_who_sits_out() {
+        use crate::measure::{Plan, Record, Role};
+        use crate::tests::{ChunkMode, ExtentMode};
+        const MIB: usize = 1024 * 1024;
+        let record = Record {
+            threads: "clean".to_string(),
+            cores: "ranked".to_string(),
+            measurers: 1,
+            per_l3: 1,
+            block_bytes: Some(4 * MIB as u64),
+            l2_bytes: None,
+            l3_share_estimated: None,
+            target: None,
+            target_unmet: false,
+        };
+        let plan = |roles: Vec<Role>| {
+            let mut config = TestMemoryConfig::new(ExtentMode::Absolute { size_bytes: MIB }, ChunkMode::Whole);
+            config.measure = Some(std::sync::Arc::new(Plan { roles, record: record.clone() }));
+            config
+        };
+        let one = plan(vec![Role::Measures { extent: Some(4 * MIB) }, Role::SitsOut, Role::SitsOut, Role::SitsOut]);
+        assert_eq!(
+            step_line("Lat-DRAM-Read-Clean", "ReadLatency", &one, &[8 * MIB; 4]),
+            "Running Lat-DRAM-Read-Clean on 1 of 4 threads, 4 MiB (extent 4 MiB), 1 x 4 MiB chunks, overlap 0; 3 sit out"
+        );
+        let two = plan(vec![Role::Measures { extent: None }, Role::SitsOut, Role::Measures { extent: None }]);
+        assert_eq!(
+            step_line("Lat-L2-Read", "ReadLatency", &two, &[8 * MIB; 3]),
+            "Running Lat-L2-Read on 2 of 3 threads, each 1 MiB (extent 1 MiB), 1 x 1 MiB chunks, overlap 0; 1 sits out"
         );
     }
 
