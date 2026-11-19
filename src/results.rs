@@ -367,6 +367,10 @@ pub struct OverallStats {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub intermediate: OpRecords,
     pub per_step_averages: Vec<TestAverage>,
+    /// The final summary's grid and under-load table (TODO 119), for tools; absent when no step fills either, and in results written
+    /// before it. The summary is built again from the steps, never from this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub perf: Option<crate::reporting::perf::PerfRecord>,
 }
 
 /// One step's figures over the cycles it ran in.
@@ -598,6 +602,7 @@ impl TestRunResult {
                 seal_failing_bits: FailingBits::default(),
                 intermediate: OpRecords::new(),
                 per_step_averages: Vec::new(),
+                perf: None,
             },
         }
     }
@@ -725,6 +730,8 @@ impl TestRunResult {
 
         // Calculate per-test averages
         self.calculate_per_test_averages();
+        // From the averages just made, so a save mid-run carries the figures it has
+        self.overall_stats.perf = crate::reporting::perf::perf_summary(self).as_ref().map(crate::reporting::perf::PerfRecord::from);
     }
 
     fn calculate_per_test_averages(&mut self) {

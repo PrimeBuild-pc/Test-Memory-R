@@ -3,6 +3,8 @@
 //! A row, a column or the under-load table appears only when a step that fills it ran; neither for a `config=` run, whose tests can carry
 //! the built-in names with other settings.
 
+use serde::{Deserialize, Serialize};
+
 use crate::loaded::{Load, LoadedSummary};
 use crate::results::{TestAverage, TestRunResult};
 use crate::run_context::TestConfigSnapshot;
@@ -159,6 +161,172 @@ pub enum UnderLoadPart {
 pub struct PerfSummary {
     pub grid: Option<Grid>,
     pub under_load: Option<UnderLoadPart>,
+}
+
+/// `PerfSummary` as a results file keeps it, for tools (`OverallStats::perf`): figures unrounded, as the file keeps every figure; a cell
+/// no step filled absent, one whose step a stop came before named in `not_reached`, one a stop cut short in `cut_short`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PerfRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<GridRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub under_load: Option<UnderLoadRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridRecord {
+    pub widths: Vec<u32>,
+    pub threads: usize,
+    pub nodes: usize,
+    pub cycles: usize,
+    /// Memory's bandwidth is the whole allocation's (Spd-DRAMFull), no Spd-DRAMSmall step having run
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub memory_full: bool,
+    pub tiers: Vec<TierRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l3_share: Option<L3ShareRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TierRecord {
+    pub tier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_mib_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_mib_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_mib_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_p50_ns: Option<f64>,
+    /// The cells whose step was in the run but never ran: `read`, `write`, `copy`, `latency`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_reached: Vec<String>,
+    /// The cells whose step a stop ended early
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cut_short: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct L3ShareRecord {
+    pub threads: usize,
+    pub threads_per_core: usize,
+    pub block_bytes: u64,
+    pub l2_bytes: u64,
+    /// The L2's estimated share of the L3 row's chase (`L3Share::l2_share`), a model's, not a counter's
+    pub l2_share_estimated: f64,
+}
+
+/// The under-load table, `state` `measured` or `not_reached`
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UnderLoadRecord {
+    Measured {
+        measurer_node: u32,
+        loaders: usize,
+        nodes: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle_ns: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_mib_s: Option<f64>,
+        levels: Vec<LevelRecord>,
+        partial: bool,
+        cycles: usize,
+    },
+    NotReached,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LevelRecord {
+    /// The level as given, a share (`75%`); absent for a pinned MiB/s
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    pub target_mib_s: f64,
+    /// `measured`, `not_matched` or `not_reached`
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writes_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads_ns: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turnaround_ns: Option<f64>,
+    pub cycles: usize,
+    pub cycles_matched: usize,
+}
+
+impl From<&PerfSummary> for PerfRecord {
+    fn from(summary: &PerfSummary) -> Self {
+        let grid = summary.grid.as_ref().map(|g| GridRecord {
+            widths: g.widths.clone(),
+            threads: g.threads,
+            nodes: g.nodes,
+            cycles: g.cycles,
+            memory_full: g.memory_full,
+            tiers: g.rows.iter().map(TierRecord::from).collect(),
+            l3_share: g.l3_share.as_ref().map(|s| L3ShareRecord {
+                threads: s.threads,
+                threads_per_core: s.threads_per_core,
+                block_bytes: s.block_bytes,
+                l2_bytes: s.l2_bytes,
+                l2_share_estimated: s.l2_share(),
+            }),
+        });
+        let under_load = summary.under_load.as_ref().map(|u| match u {
+            UnderLoadPart::NotReached => UnderLoadRecord::NotReached,
+            UnderLoadPart::Measured(u) => UnderLoadRecord::Measured {
+                measurer_node: u.measurer_node,
+                loaders: u.loaders,
+                nodes: u.nodes,
+                idle_ns: u.idle_ns,
+                base_mib_s: u.base_mib_s,
+                levels: u.levels.iter().map(LevelRecord::from).collect(),
+                partial: u.partial,
+                cycles: u.cycles,
+            },
+        });
+        PerfRecord { grid, under_load }
+    }
+}
+
+impl From<&TierRow> for TierRecord {
+    fn from(row: &TierRow) -> Self {
+        let cells = [("read", row.speed[0]), ("write", row.speed[1]), ("copy", row.speed[2]), ("latency", row.latency)];
+        let value = |figure: Option<Figure>| match figure {
+            Some(Figure::Measured { value, .. }) => Some(value),
+            _ => None,
+        };
+        let named = |pick: fn(Option<Figure>) -> bool| cells.iter().filter(|(_, f)| pick(*f)).map(|(n, _)| n.to_string()).collect();
+        TierRecord {
+            tier: row.tier.name().to_string(),
+            read_mib_s: value(row.speed[0]),
+            write_mib_s: value(row.speed[1]),
+            copy_mib_s: value(row.speed[2]),
+            latency_p50_ns: value(row.latency),
+            not_reached: named(|f| f == Some(Figure::NotReached)),
+            cut_short: named(|f| matches!(f, Some(Figure::Measured { cut_short: true, .. }))),
+        }
+    }
+}
+
+impl From<&LevelRow> for LevelRecord {
+    fn from(level: &LevelRow) -> Self {
+        let (state, writes_ns, reads_ns, turnaround_ns) = match level.state {
+            LevelState::Measured { writes_ns, reads_ns, turnaround_ns } => {
+                ("measured", Some(writes_ns), Some(reads_ns), Some(turnaround_ns))
+            }
+            LevelState::NotMatched => ("not_matched", None, None, None),
+            LevelState::NotReached => ("not_reached", None, None, None),
+        };
+        LevelRecord {
+            level: level.share.clone(),
+            target_mib_s: level.target_mib_s,
+            state: state.to_string(),
+            writes_ns,
+            reads_ns,
+            turnaround_ns,
+            cycles: level.cycles,
+            cycles_matched: level.cycles_matched,
+        }
+    }
 }
 
 /// The run's grid and under-load table, `None` when no step fills either, or for a `config=` run
@@ -522,5 +690,38 @@ mod tests {
         assert!((writes_ns - want).abs() < 1e-9, "{writes_ns} against {want}");
         assert_eq!((under.levels[0].cycles, under.levels[0].cycles_matched), (2, 2));
         assert_eq!((under.levels[2].cycles_matched, under.levels[2].state), (0, LevelState::NotMatched));
+    }
+
+    /// The results file keeps the grid and the under-load table for tools, unrounded, and reads them back; a cell whose step a stop came
+    /// before is absent and named in `not_reached`. serde_json reads a float back to within an ulp, so figures are compared near.
+    #[test]
+    fn the_results_file_keeps_the_figures_for_tools() {
+        let result = perf_run();
+        let json = serde_json::to_value(&result).unwrap();
+        let perf = &json["overall_stats"]["perf"];
+        let near = |v: &serde_json::Value, want: f64| assert!((v.as_f64().unwrap() - want).abs() < 1e-6, "{v} against {want}");
+        assert_eq!((&perf["grid"]["tiers"][0]["tier"], &perf["grid"]["widths"]), (&serde_json::json!("L1"), &serde_json::json!([512])));
+        near(&perf["grid"]["tiers"][0]["read_mib_s"], 1_577_506.0);
+        near(&perf["grid"]["tiers"][1]["latency_p50_ns"], 2.74);
+        near(&perf["grid"]["l3_share"]["l2_share_estimated"], 1014.0 * 1024.0 / 1_327_104.0);
+        assert_eq!(perf["under_load"]["state"], "measured");
+        assert_eq!(perf["under_load"]["levels"].as_array().unwrap().iter().map(|l| l["state"].as_str()).collect::<Vec<_>>(), [
+            Some("measured"),
+            Some("measured"),
+            Some("not_matched")
+        ]);
+        assert!(perf["under_load"]["levels"][2].get("writes_ns").is_none(), "an unmatched level keeps no latencies");
+
+        let back: TestRunResult = serde_json::from_value(json.clone()).unwrap();
+        let grid = back.overall_stats.perf.and_then(|p| p.grid).expect("read back");
+        assert_eq!(grid.tiers.iter().map(|t| t.tier.as_str()).collect::<Vec<_>>(), ["L1", "L2", "L3", "Memory"]);
+
+        let stopped = perf_run_of(&[PerfStep::speed("Spd-L1-Read-Auto", "Spd-L1-Read-512_A", 0.0)], &[]);
+        let tier = &stopped.overall_stats.perf.as_ref().and_then(|p| p.grid.as_ref()).unwrap().tiers[0];
+        assert_eq!((tier.read_mib_s, tier.not_reached.as_slice()), (None, &["read".to_string()][..]));
+        // A results file written before the block loads without it
+        let mut older = json;
+        older["overall_stats"].as_object_mut().unwrap().remove("perf");
+        assert!(serde_json::from_value::<TestRunResult>(older).unwrap().overall_stats.perf.is_none());
     }
 }

@@ -489,6 +489,28 @@ pub(crate) fn perf_run_of(steps: &[PerfStep], loaded: &[Option<crate::loaded::Lo
     use crate::formatting::ByteSize;
     use crate::run_context::{CalibratedTier, CalibrationSnapshot, NumaThreadCount, TestConfigSnapshot};
     let mut result = TestRunResult::new(Default::default());
+    result.run_config.tests = steps
+        .iter()
+        .map(|s| TestConfigSnapshot {
+            test: s.test.to_string(),
+            name: s.name.to_string(),
+            label: s.name.to_string(),
+            simd_width_bits: s.width,
+            extent_bytes: s.extent_bytes,
+            ..Default::default()
+        })
+        .collect();
+    let threads = &mut result.run_config.threads;
+    threads.thread_count = 6;
+    threads.active_threads_per_core = 1;
+    threads.numa_distribution = vec![NumaThreadCount { numa_node: 0, threads: 6 }];
+    result.run_config.calibration = Some(CalibrationSnapshot {
+        tiers: vec![CalibratedTier { tier: "L2".to_string(), optimal_size: ByteSize(1014 << 10), median_latency_ns: 2.7 }],
+        ..Default::default()
+    });
+    result.identity.l2_cache_per_core = ByteSize(1 << 20);
+    result.identity.l3_cache = ByteSize(16 << 20);
+    // The run's config first: `finalize` builds the results' summary block from it
     let cycles = loaded.len().max(1);
     for cycle in 0..cycles {
         let summaries = steps
@@ -513,27 +535,6 @@ pub(crate) fn perf_run_of(steps: &[PerfStep], loaded: &[Option<crate::loaded::Lo
         result.add_cycle(cycle as u32 + 1, 60, summaries, None, false);
     }
     result.finalize(Duration::from_secs(60 * cycles as u64));
-    result.run_config.tests = steps
-        .iter()
-        .map(|s| TestConfigSnapshot {
-            test: s.test.to_string(),
-            name: s.name.to_string(),
-            label: s.name.to_string(),
-            simd_width_bits: s.width,
-            extent_bytes: s.extent_bytes,
-            ..Default::default()
-        })
-        .collect();
-    let threads = &mut result.run_config.threads;
-    threads.thread_count = 6;
-    threads.active_threads_per_core = 1;
-    threads.numa_distribution = vec![NumaThreadCount { numa_node: 0, threads: 6 }];
-    result.run_config.calibration = Some(CalibrationSnapshot {
-        tiers: vec![CalibratedTier { tier: "L2".to_string(), optimal_size: ByteSize(1014 << 10), median_latency_ns: 2.7 }],
-        ..Default::default()
-    });
-    result.identity.l2_cache_per_core = ByteSize(1 << 20);
-    result.identity.l3_cache = ByteSize(16 << 20);
     result
 }
 
