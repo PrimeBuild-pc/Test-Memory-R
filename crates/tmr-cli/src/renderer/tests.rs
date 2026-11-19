@@ -305,3 +305,12 @@ fn loaded() {
     }
     check("report_loaded", &text);
 }
+
+/// A plan=perf run's final summary (TODO 119): after the per-test tables, the grid of bandwidth and latency a tier, and memory's
+/// latency under the other cores' loads (`test_support::perf_run`: petz007's figures, the loaded fixture's 75% level not matched).
+#[test]
+fn final_summary_with_the_grid() {
+    let (result, text) = rendered(|reporter| reporter.report_final_summary(&test_support::perf_summary_report()));
+    result.unwrap();
+    check("report_final_summary_grid", &text);
+}

@@ -444,6 +444,131 @@ pub fn final_summary_report() -> FinalTestSummaryReport {
     crate::reporting::converters::create_overall_stats_summary_report(&run_with_errors())
 }
 
+/// A step of a run for TODO 119's grid: the name its plan gave it, the name it resolved to, its MiB/s and P50 (a step a stop came before
+/// has neither: `mib_s` 0 and no P50), the width it ran at, its extent, and whether a stop cut it short
+#[derive(Clone)]
+pub(crate) struct PerfStep {
+    pub test: &'static str,
+    pub name: &'static str,
+    pub mib_s: f64,
+    pub p50_ns: Option<f64>,
+    pub width: Option<u32>,
+    pub extent_bytes: u64,
+    pub stopped: bool,
+}
+
+impl PerfStep {
+    /// A bandwidth step at `mib_s`, `-Auto`'s resolved to 512 bits
+    pub fn speed(test: &'static str, name: &'static str, mib_s: f64) -> Self {
+        let width = test.ends_with("-Auto").then_some(512);
+        PerfStep { test, name, mib_s, p50_ns: None, width, extent_bytes: 0, stopped: false }
+    }
+
+    pub fn latency(test: &'static str, p50_ns: f64) -> Self {
+        PerfStep { test, name: test, mib_s: 0.0, p50_ns: Some(p50_ns), width: None, extent_bytes: 0, stopped: false }
+    }
+
+    /// Lat-Turnaround-DRAM, its figures in each cycle's loaded summary
+    pub fn turnaround() -> Self {
+        PerfStep {
+            test: "Lat-Turnaround-DRAM",
+            name: "Lat-Turnaround-DRAM",
+            mib_s: 0.0,
+            p50_ns: None,
+            width: None,
+            extent_bytes: 0,
+            stopped: false,
+        }
+    }
+}
+
+/// A run of `steps` over as many cycles as `loaded` has (one without), Lat-Turnaround-DRAM's loaded summary in each its cycle's: six
+/// threads on one node, a 1 MiB L2 (CPUID's; the calibration's, 1014 KiB) and 16 MiB of L3, as petz007 has. A step that ran took 10 s
+/// over 1 GiB.
+pub(crate) fn perf_run_of(steps: &[PerfStep], loaded: &[Option<crate::loaded::LoadedSummary>]) -> TestRunResult {
+    use crate::formatting::ByteSize;
+    use crate::run_context::{CalibratedTier, CalibrationSnapshot, NumaThreadCount, TestConfigSnapshot};
+    let mut result = TestRunResult::new(Default::default());
+    let cycles = loaded.len().max(1);
+    for cycle in 0..cycles {
+        let summaries = steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let loaded = (s.test == "Lat-Turnaround-DRAM").then(|| loaded.get(cycle).cloned().flatten()).flatten();
+                let ran = s.mib_s > 0.0 || s.p50_ns.is_some() || loaded.is_some();
+                TestSummary {
+                    test_index: i,
+                    name: s.name.to_string(),
+                    label: s.name.to_string(),
+                    throughput_mib_s: s.mib_s,
+                    latency_samples: s.p50_ns.map(|_| 1000),
+                    latency_p50_ns: s.p50_ns,
+                    loaded: loaded.map(Box::new),
+                    stopped_by: Some(if s.stopped { "stopped" } else { "time" }),
+                    ..summary(i + 1, if ran { 10_000 } else { 0 }, if ran { 1 << 30 } else { 0 }, 0)
+                }
+            })
+            .collect();
+        result.add_cycle(cycle as u32 + 1, 60, summaries, None, false);
+    }
+    result.finalize(Duration::from_secs(60 * cycles as u64));
+    result.run_config.tests = steps
+        .iter()
+        .map(|s| TestConfigSnapshot {
+            test: s.test.to_string(),
+            name: s.name.to_string(),
+            label: s.name.to_string(),
+            simd_width_bits: s.width,
+            extent_bytes: s.extent_bytes,
+            ..Default::default()
+        })
+        .collect();
+    let threads = &mut result.run_config.threads;
+    threads.thread_count = 6;
+    threads.active_threads_per_core = 1;
+    threads.numa_distribution = vec![NumaThreadCount { numa_node: 0, threads: 6 }];
+    result.run_config.calibration = Some(CalibrationSnapshot {
+        tiers: vec![CalibratedTier { tier: "L2".to_string(), optimal_size: ByteSize(1014 << 10), median_latency_ns: 2.7 }],
+        ..Default::default()
+    });
+    result.identity.l2_cache_per_core = ByteSize(1 << 20);
+    result.identity.l3_cache = ByteSize(16 << 20);
+    result
+}
+
+/// A plan=perf run's steps for the grid, at petz007's figures (2026-11-13: DDR5-6000, 512 bits, six threads), and Lat-Turnaround-DRAM's
+/// loaded summary (`loaded_summary(true)`, daddy-petz's, its 75% level not matched)
+pub(crate) fn perf_run() -> TestRunResult {
+    let mut l3 = PerfStep::latency("Lat-L3-Read", 4.6);
+    l3.extent_bytes = 1_327_104;
+    let steps = [
+        PerfStep::latency("Lat-L1-Read", 0.82),
+        PerfStep::latency("Lat-L2-Read", 2.74),
+        l3,
+        PerfStep::latency("Lat-DRAM-Read", 63.5),
+        PerfStep::turnaround(),
+        PerfStep::speed("Spd-L1-Read-Auto", "Spd-L1-Read-512_A", 1_577_506.0),
+        PerfStep::speed("Spd-L1-Write-Auto", "Spd-L1-Write-512_A", 872_545.0),
+        PerfStep::speed("Spd-L1-Copy-Auto", "Spd-L1-Copy-512_A", 1_711_623.0),
+        PerfStep::speed("Spd-L2-Read-Auto", "Spd-L2-Read-512_A", 871_126.0),
+        PerfStep::speed("Spd-L2-Write-Auto", "Spd-L2-Write-512_A", 844_195.0),
+        PerfStep::speed("Spd-L2-Copy-Auto", "Spd-L2-Copy-512_A", 851_371.0),
+        PerfStep::speed("Spd-L3-Read-Auto", "Spd-L3-Read-512_A", 650_150.0),
+        PerfStep::speed("Spd-L3-Write-Auto", "Spd-L3-Write-512_A", 629_007.0),
+        PerfStep::speed("Spd-L3-Copy-Auto", "Spd-L3-Copy-512_A", 635_318.0),
+        PerfStep::speed("Spd-DRAMSmall-Read-Auto", "Spd-DRAMSmall-Read-512_A", 60_926.0),
+        PerfStep::speed("Spd-DRAMSmall-Write-Auto", "Spd-DRAMSmall-Write-512_A", 60_894.0),
+        PerfStep::speed("Spd-DRAMSmall-Copy-Auto", "Spd-DRAMSmall-Copy-512_A", 75_307.0),
+    ];
+    perf_run_of(&steps, &[Some(loaded_summary(true))])
+}
+
+/// `perf_run`'s final summary, its grid and under-load table after the per-test tables
+pub fn perf_summary_report() -> FinalTestSummaryReport {
+    crate::reporting::converters::create_overall_stats_summary_report(&perf_run())
+}
+
 /// `final_summary_report`'s run, its overall figures as a save after its second cycle has them
 pub(crate) fn run_with_errors() -> TestRunResult {
     use crate::ops::Op;

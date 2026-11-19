@@ -7,6 +7,7 @@ pub mod formatters;
 /// 2. Formatters - Logic for transforming and formatting data
 /// 3. Renderers - Output mechanisms (console, GUI, JSON, etc.)
 pub mod models;
+pub mod perf;
 pub mod renderers;
 pub mod system_info_builder;
 pub mod tm5_patterns;
@@ -137,6 +138,25 @@ impl<R: Renderer> Reporter<R> {
             self.renderer.render_separator()?;
             let table = self.formatter.prepare_intermediate_table(report);
             self.renderer.render_table(&table)?;
+        }
+
+        // The run's bandwidth and latency a cache tier, and memory under load, when steps that fill them ran (TODO 119)
+        if let Some(perf) = &report.perf {
+            if let Some(grid) = &perf.grid {
+                self.renderer.render_separator()?;
+                self.renderer.render_table(&self.formatter.prepare_perf_grid_table(grid))?;
+            }
+            match &perf.under_load {
+                Some(perf::UnderLoadPart::Measured(under_load)) => {
+                    self.renderer.render_separator()?;
+                    self.renderer.render_table(&self.formatter.prepare_under_load_table(under_load))?;
+                }
+                Some(perf::UnderLoadPart::NotReached) => {
+                    self.renderer.render_separator()?;
+                    self.renderer.render_text("Memory under load: n/a, the run stopped before Lat-Turnaround-DRAM")?;
+                }
+                None => {}
+            }
         }
 
         // Where in the sequence it failed, only when something did (TODO 74)

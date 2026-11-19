@@ -271,6 +271,8 @@ pub struct FinalTestSummaryReport {
     pub seal_failing_bits: crate::failing_bits::FailingBits,
     /// The run's work around its tests, one row per operation in `ops::Op::ALL` (TODO 90)
     pub intermediate: Vec<IntermediateEntry>,
+    /// Its bandwidth and latency a cache tier, and memory's latency under load, when steps that fill them ran (TODO 119)
+    pub perf: Option<super::perf::PerfSummary>,
 }
 
 impl FinalTestSummaryReport {

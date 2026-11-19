@@ -741,6 +741,7 @@ pub fn create_overall_stats_summary_report(result: &crate::results::TestRunResul
         failing_bits: overall_stats.failing_bits.clone(),
         seal_failing_bits: overall_stats.seal_failing_bits.clone(),
         intermediate,
+        perf: super::perf::perf_summary(result),
     }
 }
 

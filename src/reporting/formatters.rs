@@ -79,6 +79,10 @@ pub trait ReportFormatter: Send + Sync {
     fn prepare_errors_by_step_table(&self, report: &FinalTestSummaryReport) -> TableData;
     fn prepare_intermediate_table(&self, report: &FinalTestSummaryReport) -> TableData;
     fn prepare_failing_bits_table(&self, report: &FinalTestSummaryReport) -> TableData;
+    /// The run's bandwidth and latency a cache tier (TODO 119): a row a tier that ran, the columns its steps fill
+    fn prepare_perf_grid_table(&self, grid: &super::perf::Grid) -> TableData;
+    /// Memory's read latency under the other cores' loads (TODO 119): Lat-Turnaround-DRAM's rows but its flat-out one
+    fn prepare_under_load_table(&self, under_load: &super::perf::UnderLoad) -> TableData;
 
     /// The allocation report's tables (TODO 81)
     fn prepare_allocation_nodes_table(&self, report: &AllocationReport) -> TableData;
@@ -1296,6 +1300,148 @@ impl ReportFormatter for DefaultFormatter {
             table = table.add_row(row);
         }
         table.with_footer("Over the run: each cycle's seal at its start and check at its end, and every step's work around its test. A step's time is its slowest thread's.")
+    }
+
+    fn prepare_perf_grid_table(&self, grid: &super::perf::Grid) -> TableData {
+        use super::perf::{Figure, OPS, Tier};
+        let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
+        let mut about = Vec::new();
+        match grid.widths.as_slice() {
+            [] => {}
+            [width] => about.push(format!("{width}-bit")),
+            widths => about.push(format!("{} bits", widths.iter().map(u32::to_string).collect::<Vec<_>>().join("/"))),
+        }
+        about.push(plural(grid.threads, "thread"));
+        if grid.nodes > 1 {
+            about.push(plural(grid.nodes, "node"));
+        }
+        if grid.cycles > 1 {
+            about.push(format!("mean of {} cycles", grid.cycles));
+        }
+        // A column only when some row has a figure for it: a run of the memory tests alone shows their row and columns alone
+        let ops: Vec<usize> = (0..OPS.len()).filter(|&op| grid.rows.iter().any(|r| r.speed[op].is_some())).collect();
+        let latency = grid.rows.iter().any(|r| r.latency.is_some());
+        let mut table =
+            TableData::new().with_title(format!("Cache & Memory: {}", about.join(", "))).add_header("Tier", ColumnAlignment::Left);
+        for &op in &ops {
+            table = table.add_header(format!("{} GiB/s", OPS[op]), ColumnAlignment::Right);
+        }
+        for &op in &ops {
+            table = table.add_header(format!("{} MiB/s", OPS[op]), ColumnAlignment::Right);
+        }
+        if latency {
+            table = table.add_header("Latency", ColumnAlignment::Right);
+        }
+        // ASCII cells only: the table lines its columns up by bytes
+        let cell = |figure: Option<Figure>, show: &dyn Fn(f64) -> String| match figure {
+            None => "-".to_string(),
+            Some(Figure::NotReached) => "n/a".to_string(),
+            Some(Figure::Measured { value, cut_short }) => format!("{}{}", if cut_short { "~" } else { "" }, show(value)),
+        };
+        let mut cut_short = false;
+        for row in &grid.rows {
+            let marked = row.tier == Tier::L3 && grid.l3_share.is_some();
+            let mut cells = vec![format!("{}{}", row.tier.name(), if marked { "*" } else { "" })];
+            cells.extend(ops.iter().map(|&op| cell(row.speed[op], &|mib_s| format!("{:.1}", mib_s / 1024.0))));
+            cells.extend(ops.iter().map(|&op| cell(row.speed[op], &|mib_s| format!("{mib_s:.0}"))));
+            if latency {
+                cells.push(cell(row.latency, &|ns| format!("{ns:.1} ns")));
+            }
+            cut_short |= row.speed.iter().chain([&row.latency]).any(|f| matches!(f, Some(Figure::Measured { cut_short: true, .. })));
+            table = table.add_row(cells);
+        }
+        let mut notes = Vec::new();
+        if !ops.is_empty() {
+            let mut note = "Bandwidth: every thread at once; copy counts the bytes read and the bytes written.".to_string();
+            let memory = grid.rows.iter().find(|r| r.tier == Tier::Memory);
+            if memory.is_some_and(|r| r.speed[1].is_some() || r.speed[2].is_some()) {
+                note.push_str(" Memory's write and copy are NT stores.");
+            }
+            if grid.memory_full && memory.is_some_and(|r| r.speed.iter().any(Option::is_some)) {
+                note.push_str(" Memory's bandwidth: over the whole allocation.");
+            }
+            notes.push(note);
+        }
+        if latency {
+            notes.push("Latency: the read chase's P50, every thread chasing at once.".to_string());
+        }
+        if let Some(share) = &grid.l3_share {
+            // Each thread's block against its L2, which needs no count of the threads sharing an L3: the results don't keep one
+            let chased = share.block_bytes * share.threads_per_core.max(1) as u64;
+            let chase = match share.threads_per_core {
+                0 | 1 => format!("each of the {} chases {}", plural(share.threads, "thread"), self.format_bytes(share.block_bytes)),
+                n => format!("each core's {n} threads chase {} in all", self.format_bytes(chased)),
+            };
+            notes.push(format!(
+                "* The L3 row's latency: {chase}, {:.2}x its {} L2, so the L2 serves an estimated {:.0}% of the chase.",
+                chased as f64 / share.l2_bytes.max(1) as f64,
+                self.format_bytes_precise(share.l2_bytes, 0),
+                share.l2_share() * 100.0
+            ));
+        }
+        if cut_short {
+            notes.push("~ A stop ended the step early: its figure is from part of its work.".to_string());
+        }
+        table.with_footer(notes.join("\n"))
+    }
+
+    fn prepare_under_load_table(&self, u: &super::perf::UnderLoad) -> TableData {
+        use super::perf::LevelState;
+        let mut title = format!(
+            "Memory under load: one core's read latency while {} other core{} load memory",
+            u.loaders,
+            if u.loaders == 1 { "" } else { "s" }
+        );
+        if u.nodes > 1 {
+            title.push_str(&format!(" on node {}, the other nodes idle", u.measurer_node));
+        }
+        if u.cycles > 1 {
+            title.push_str(&format!(", mean of {} cycles", u.cycles));
+        }
+        if u.partial {
+            title.push_str("; stopped before its schedule ended");
+        }
+        let mut table = TableData::new()
+            .with_title(title)
+            .add_header("Load", ColumnAlignment::Left)
+            .add_header("Under NT writes", ColumnAlignment::Right)
+            .add_header("Under reads", ColumnAlignment::Right)
+            .add_header("Turnaround", ColumnAlignment::Right);
+        if let Some(ns) = u.idle_ns {
+            table = table.add_row(vec!["idle".to_string(), format!("{ns:.1} ns"), String::new(), String::new()]);
+        }
+        for level in &u.levels {
+            // Labelled as the step's own table labels it; no MiB/s for a level no cycle reached
+            let mut load = match (&level.share, level.target_mib_s > 0.0) {
+                (Some(share), true) => format!("{share} {:.0} MiB/s", level.target_mib_s),
+                (Some(share), false) => share.clone(),
+                (None, _) => format!("{:.0} MiB/s", level.target_mib_s),
+            };
+            if level.cycles > 1 && level.cycles_matched > 0 && level.cycles_matched < level.cycles {
+                load.push_str(&format!(" ({} of {} cycles)", level.cycles_matched, level.cycles));
+            }
+            // An unmatched level's latencies were taken at other loads than its label's, so none of them is shown
+            let cells = match level.state {
+                LevelState::Measured { writes_ns, reads_ns, turnaround_ns } => {
+                    vec![format!("{writes_ns:.1} ns"), format!("{reads_ns:.1} ns"), format!("{turnaround_ns:+.1} ns")]
+                }
+                LevelState::NotMatched => vec!["not matched".to_string(); 3],
+                LevelState::NotReached => vec!["n/a".to_string(); 3],
+            };
+            table = table.add_row(std::iter::once(load).chain(cells).collect());
+        }
+        let mut notes = Vec::new();
+        if let Some(base) = u.base_mib_s.filter(|_| u.levels.iter().any(|l| l.share.is_some())) {
+            notes.push(format!("Load: shares of the other cores' lower flat-out MiB/s, {base:.0} MiB/s."));
+        }
+        if !u.levels.is_empty() {
+            notes.push(
+                "Turnaround: what a read pays when the other cores write rather than read at the same MiB/s, from paired windows, so it can \
+                 differ from the columns' difference; negative when reads cost a read more."
+                    .to_string(),
+            );
+        }
+        if notes.is_empty() { table } else { table.with_footer(notes.join("\n")) }
     }
 
     fn prepare_errors_by_step_table(&self, report: &FinalTestSummaryReport) -> TableData {
