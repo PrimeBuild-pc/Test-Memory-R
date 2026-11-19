@@ -48,6 +48,16 @@ impl Tier {
             Tier::Memory => "Lat-DRAM-Read",
         }
     }
+
+    /// The tier's latency read clean (TODO 119, `measure`): fewer threads to an L3 than the run has, the rest sitting out; none for a
+    /// core's own L1 and L2
+    fn clean_test(self) -> Option<&'static str> {
+        match self {
+            Tier::L3 => Some("Lat-L3-Read-Clean"),
+            Tier::Memory => Some("Lat-DRAM-Read-Clean"),
+            Tier::L1 | Tier::L2 => None,
+        }
+    }
 }
 
 /// The bandwidth tests' operations, in the grid's column order
@@ -75,6 +85,8 @@ pub struct TierRow {
     pub speed: [Option<Figure>; 3],
     /// The read latency's P50, ns, as the run's threads chased it
     pub latency: Option<Figure>,
+    /// Its `-Clean` test's P50: fewer threads to an L3, the rest sitting out (TODO 119)
+    pub latency_clean: Option<Figure>,
 }
 
 /// The L3 row's latency as the run's threads chased it: each thread's block beside the L2, so how much of the chase the L2 could still
@@ -108,6 +120,11 @@ pub struct Grid {
     /// Memory's bandwidth is the full allocation's: no Spd-DRAMSmall step ran
     pub memory_full: bool,
     pub l3_share: Option<L3Share>,
+    /// The Latency column's plan, when a setting (`latency-threads=`, `latency-cores=`) had fewer than all threads measure it
+    pub latency_plan: Option<crate::measure::Record>,
+    /// The clean column's plans: the L3's and Memory's `-Clean` steps'
+    pub l3_clean: Option<crate::measure::Record>,
+    pub memory_clean: Option<crate::measure::Record>,
 }
 
 /// A load level's row
@@ -185,6 +202,14 @@ pub struct GridRecord {
     pub tiers: Vec<TierRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub l3_share: Option<L3ShareRecord>,
+    /// The plans the latency columns ran under (TODO 119): the Latency column's when a setting had fewer threads measure it, and the
+    /// L3's and Memory's `-Clean` steps'
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_plan: Option<crate::measure::Record>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l3_clean: Option<crate::measure::Record>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_clean: Option<crate::measure::Record>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -198,7 +223,10 @@ pub struct TierRecord {
     pub copy_mib_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_p50_ns: Option<f64>,
-    /// The cells whose step was in the run but never ran: `read`, `write`, `copy`, `latency`
+    /// The `-Clean` test's (TODO 119)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_clean_p50_ns: Option<f64>,
+    /// The cells whose step was in the run but never ran: `read`, `write`, `copy`, `latency`, `latency_clean`
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_reached: Vec<String>,
     /// The cells whose step a stop ended early
@@ -269,6 +297,9 @@ impl From<&PerfSummary> for PerfRecord {
                 l2_bytes: s.l2_bytes,
                 l2_share_estimated: s.l2_share(),
             }),
+            latency_plan: g.latency_plan.clone(),
+            l3_clean: g.l3_clean.clone(),
+            memory_clean: g.memory_clean.clone(),
         });
         let under_load = summary.under_load.as_ref().map(|u| match u {
             UnderLoadPart::NotReached => UnderLoadRecord::NotReached,
@@ -289,7 +320,13 @@ impl From<&PerfSummary> for PerfRecord {
 
 impl From<&TierRow> for TierRecord {
     fn from(row: &TierRow) -> Self {
-        let cells = [("read", row.speed[0]), ("write", row.speed[1]), ("copy", row.speed[2]), ("latency", row.latency)];
+        let cells = [
+            ("read", row.speed[0]),
+            ("write", row.speed[1]),
+            ("copy", row.speed[2]),
+            ("latency", row.latency),
+            ("latency_clean", row.latency_clean),
+        ];
         let value = |figure: Option<Figure>| match figure {
             Some(Figure::Measured { value, .. }) => Some(value),
             _ => None,
@@ -301,6 +338,7 @@ impl From<&TierRow> for TierRecord {
             write_mib_s: value(row.speed[1]),
             copy_mib_s: value(row.speed[2]),
             latency_p50_ns: value(row.latency),
+            latency_clean_p50_ns: value(row.latency_clean),
             not_reached: named(|f| f == Some(Figure::NotReached)),
             cut_short: named(|f| matches!(f, Some(Figure::Measured { cut_short: true, .. }))),
         }
@@ -368,6 +406,11 @@ impl<'a> Steps<'a> {
         Steps { steps, result }
     }
 
+    /// The first step of `test`'s plan, when fewer than all threads measured it (TODO 119)
+    fn plan(&self, test: &str) -> Option<crate::measure::Record> {
+        self.named(test).first().and_then(|s| s.config.measure.clone())
+    }
+
     fn named(&self, test: &str) -> Vec<&Step<'a>> {
         self.steps.iter().filter(|s| s.config.test == test).collect()
     }
@@ -432,8 +475,9 @@ fn grid(result: &TestRunResult, steps: &Steps<'_>) -> Option<Grid> {
             memory_full = true;
         }
         let latency = steps.latency(&steps.named(tier.latency_test()));
-        if speed.iter().any(Option::is_some) || latency.is_some() {
-            rows.push(TierRow { tier, speed, latency });
+        let latency_clean = tier.clean_test().and_then(|test| steps.latency(&steps.named(test)));
+        if speed.iter().any(Option::is_some) || latency.is_some() || latency_clean.is_some() {
+            rows.push(TierRow { tier, speed, latency, latency_clean });
         }
     }
     if rows.is_empty() {
@@ -452,16 +496,22 @@ fn grid(result: &TestRunResult, steps: &Steps<'_>) -> Option<Grid> {
         cycles: result.overall_stats.cycles_completed as usize,
         memory_full,
         l3_share,
+        latency_plan: Tier::ALL.iter().find_map(|tier| steps.plan(tier.latency_test())),
+        l3_clean: Tier::L3.clean_test().and_then(|test| steps.plan(test)),
+        memory_clean: Tier::Memory.clean_test().and_then(|test| steps.plan(test)),
     })
 }
 
 fn l3_share(result: &TestRunResult, steps: &Steps<'_>) -> Option<L3Share> {
-    let block_bytes = steps.named(Tier::L3.latency_test()).first()?.config.extent_bytes;
+    let step = steps.named(Tier::L3.latency_test()).first().copied()?;
+    let block_bytes = step.config.extent_bytes;
+    // A setting that had fewer threads measure it: its measurers, one a core (`measure::plan`)
+    let planned = step.config.measure.as_ref().map(|plan| plan.measurers);
     let calibrated = result.run_config.calibration.as_ref().and_then(|c| c.tiers.iter().find(|t| t.tier == "L2")).map(|t| t.optimal_size.0);
     let threads = &result.run_config.threads;
     Some(L3Share {
-        threads: threads.thread_count,
-        threads_per_core: threads.active_threads_per_core,
+        threads: planned.unwrap_or(threads.thread_count),
+        threads_per_core: if planned.is_some() { 1 } else { threads.active_threads_per_core },
         block_bytes,
         l2_bytes: calibrated.unwrap_or(result.identity.l2_cache_per_core.0),
     })
@@ -669,6 +719,38 @@ mod tests {
         assert!((share.l2_share() - (1u64 << 20) as f64 / (2.0 * 1_327_104.0)).abs() < 1e-9);
     }
 
+    /// The `-Clean` steps fill the L3's and Memory's clean column, the private tiers' none, and the grid keeps their plans; every thread
+    /// measured the configured column, so it has no plan
+    #[test]
+    fn the_clean_steps_fill_their_column_with_their_plans() {
+        let grid = grid_of(&perf_run());
+        let clean: Vec<Option<f64>> =
+            grid.rows.iter().map(|r| r.latency_clean.map(|f| if let Figure::Measured { value, .. } = f { value } else { 0.0 })).collect();
+        assert_eq!(clean, [None, None, Some(8.7), Some(67.0)]);
+        assert!(grid.latency_plan.is_none());
+        let l3 = grid.l3_clean.expect("the L3's clean plan");
+        assert_eq!((l3.measurers, l3.per_l3, l3.block_bytes, l3.target_unmet), (1, 1, Some(7_864_320), true));
+        let memory = grid.memory_clean.expect("Memory's clean plan");
+        assert_eq!((memory.measurers, memory.block_bytes, memory.l3_share_estimated), (1, Some(1 << 30), None));
+        // The L3 note stays the configured step's: its six threads, not the clean step's one
+        assert_eq!(grid.l3_share.map(|s| (s.threads, s.block_bytes)), Some((6, 1_327_104)));
+    }
+
+    /// A setting that had fewer threads measure the configured L3 step: the note counts its measurers, one a core, and the grid keeps the
+    /// plan for the column's heading
+    #[test]
+    fn a_thinned_configured_step_counts_its_measurers() {
+        let mut result = perf_run();
+        result.run_config.threads.active_threads_per_core = 2;
+        let at = result.run_config.tests.iter().position(|t| t.test == "Lat-L3-Read").unwrap();
+        let mut plan = result.run_config.tests[at + 1].measure.clone().unwrap();
+        (plan.threads, plan.measurers) = ("2".to_string(), 2);
+        result.run_config.tests[at].measure = Some(plan);
+        let grid = grid_of(&result);
+        assert_eq!(grid.l3_share.map(|s| (s.threads, s.threads_per_core)), Some((2, 1)));
+        assert_eq!(grid.latency_plan.map(|p| p.threads), Some("2".to_string()));
+    }
+
     /// Lat-Turnaround-DRAM in the run but never reached; over two cycles, a level's figures are the mean of the cycles it matched in
     #[test]
     fn under_load_not_reached_and_over_cycles() {
@@ -704,6 +786,11 @@ mod tests {
         near(&perf["grid"]["tiers"][0]["read_mib_s"], 1_577_506.0);
         near(&perf["grid"]["tiers"][1]["latency_p50_ns"], 2.74);
         near(&perf["grid"]["l3_share"]["l2_share_estimated"], 1014.0 * 1024.0 / 1_327_104.0);
+        near(&perf["grid"]["tiers"][2]["latency_clean_p50_ns"], 8.7);
+        assert!(perf["grid"]["tiers"][1].get("latency_clean_p50_ns").is_none(), "the L2 has no clean form");
+        assert_eq!((&perf["grid"]["l3_clean"]["per_l3"], &perf["grid"]["l3_clean"]["target_unmet"]), (&1.into(), &true.into()));
+        assert_eq!(perf["grid"]["memory_clean"]["block_bytes"], 1u64 << 30);
+        assert!(perf["grid"].get("latency_plan").is_none(), "every thread measured the configured column");
         assert_eq!(perf["under_load"]["state"], "measured");
         assert_eq!(perf["under_load"]["levels"].as_array().unwrap().iter().map(|l| l["state"].as_str()).collect::<Vec<_>>(), [
             Some("measured"),

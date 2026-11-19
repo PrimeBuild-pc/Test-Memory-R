@@ -288,8 +288,8 @@ pub struct ThreadStepRecord {
     /// A latency test's figures, as the latency table's row for the thread; absent for one that took no samples
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency: Option<ThreadLatency>,
-    /// Its part in a loaded latency test (TODO 117, `loaded::Role::name`): `measures`, `loads` or `sits out`. Absent in every other
-    /// step, and in results written before it.
+    /// Its part in a loaded latency test (TODO 117, `loaded::Role::name`): `measures`, `loads` or `sits out`; in a planned latency step
+    /// (TODO 119, `measure::Plan`), `measures` or `sits out`. Absent in every other step, and in results written before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
 }

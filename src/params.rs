@@ -278,6 +278,24 @@ impl ParamRegistry {
             },
         });
 
+        // The latency read tests' measuring threads (TODO 119, `measure::Settings`): how many, `clean`'s target, which cores. Kept as
+        // text, which the session parses again.
+        params.insert("latency-threads", ParamDef {
+            key: "latency-threads",
+            can_override_config: true,
+            parser: |v| crate::measure::LatencyThreads::parse(v).map(|t| ParamValue::String(t.to_string())),
+        });
+        params.insert("latency-hits", ParamDef {
+            key: "latency-hits",
+            can_override_config: true,
+            parser: |v| crate::measure::parse_hits(v).map(|share| ParamValue::String(share.to_string())),
+        });
+        params.insert("latency-cores", ParamDef {
+            key: "latency-cores",
+            can_override_config: true,
+            parser: |v| crate::measure::LatencyCores::parse(v).map(|c| ParamValue::String(c.to_string())),
+        });
+
         // Pattern and repetition parameters
         params.insert("pattern-mode", ParamDef {
             key: "pattern-mode",

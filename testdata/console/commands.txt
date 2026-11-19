@@ -105,6 +105,12 @@ COMMAND LINE PARAMETERS:
   load-pairs=5                        # The loaded latency tests' ABBA pairs at each load, 1-50 (default
                                       #   3 for Lat-Loaded-DRAM, 5 for Lat-Turnaround-DRAM)
   load-window-ms=1000                 # Their timed window, each after a 0.2 s settle: 10-60000 ms
+  latency-threads=all                 # Which threads measure the Lat-*-Read tests: all (the default;
+                                      #   the -Clean ones clean), clean (as many to an L3 as keep its chase
+                                      #   in the L3, one for DRAM; the rest sit out), or a count
+  latency-hits=88%                    # clean's target: the chase's estimated share in the L3
+  latency-cores=ranked                # Which cores measure first: ranked (the run's order), performance
+                                      #   or efficiency (as TMR types them; core-priority=hybrid on an 8500G)
   pattern-mode=0                      # Pattern mode: 0-2 (TM5's), 10, 11, 13, 20, 30 (TMR's), or a native
                                       #   family alone on SimpleTest: 15 ident, 16 random, 17 linepair,
                                       #   21 lines, 31 switch, 32 quiet, 33 header; unset, SimpleTest runs

@@ -74,6 +74,7 @@ mod latency_tests; // Latency measurement tests
 mod latency_tests_v2; // v2 latency tests: Layout A/B reads + NT write saturation PoC
 mod layout;
 mod loaded; // Lat-Loaded-DRAM: a read's latency while the other cores load DRAM, NT writes or reads (TODO 117)
+mod measure; // which of the run's threads measure a latency step: all, clean or a count (TODO 119)
 mod memory;
 mod ops; // the work around a test, by operation: seal fills and checks, fills (TODO 90)
 mod params; // Centralized parameter registry

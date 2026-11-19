@@ -546,6 +546,10 @@ pub struct TestConfigSnapshot {
     /// width it is named for or has none, and in results written before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simd_width_bits: Option<u32>,
+    /// A latency step fewer than all of the run's threads measured (TODO 119, `measure::Plan`): how many, to an L3, over what block, and
+    /// the estimated share of its chase in the L3 against `clean`'s target. Absent when every thread measured, and in older results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure: Option<crate::measure::Record>,
 }
 
 // ===========================================================================
@@ -769,7 +773,8 @@ impl TestConfigSnapshot {
                 .map(|s| format!("{} (order {})", s.name(), s.order.name())),
             flush_before_verify: def.config.flush_before_verify,
             skip_init: def.config.skip_init,
-            extent_bytes: extent as u64,
+            // A planned latency step's measurers chase their plan's block, not the test's own extent (TODO 119)
+            extent_bytes: def.config.measure.as_ref().and_then(|plan| plan.record.block_bytes).unwrap_or(extent as u64),
             chunk_bytes: spread.as_ref().map_or(0, |s| s.chunk() as u64),
             // The page exchange's tiles sit apart, the last one shorter (TODO 28)
             chunks: spread
@@ -781,6 +786,7 @@ impl TestConfigSnapshot {
             cycle_limit: def.config.timing.cycles,
             time_limit_secs: def.config.timing.duration_secs,
             simd_width_bits: def.simd_width().map(crate::simd::Width::bits),
+            measure: def.config.measure.as_ref().map(|plan| plan.record.clone()),
         }
     }
 }

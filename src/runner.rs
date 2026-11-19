@@ -115,6 +115,8 @@ pub struct TestRunOverrides<'a> {
     pub load_levels_override: Option<&'a [crate::loaded::Level]>,
     pub load_pairs_override: Option<u32>,
     pub load_window_ms_override: Option<u32>,
+    /// Override the latency read tests' measuring threads (TODO 119): `latency-threads=`, `latency-hits=`, `latency-cores=`
+    pub latency_override: crate::measure::Overrides,
     /// Override the pattern-generation mode.
     pub pattern_mode_override: Option<u32>,
     /// Override Mem-Sequence's passes and default order (`sequence=`, `order=`).
@@ -313,6 +315,70 @@ fn apply_load_overrides(defs: &mut [TestDefinition], levels: Option<&[crate::loa
         context.load_pairs = pairs.or(context.load_pairs);
         context.load_window_ms = window_ms.or(context.load_window_ms);
     }
+}
+
+/// The command line's `latency-threads=`, `latency-hits=` and `latency-cores=` (TODO 119): each over every latency read test's own
+/// setting, a `-Clean` test's too; the tests that take none (the loaded tests have their own roles) left alone
+fn apply_latency_overrides(defs: &mut [TestDefinition], overrides: crate::measure::Overrides) {
+    if overrides.is_empty() {
+        return;
+    }
+    log::info!("🔧 Applying CLI latency overrides: {overrides:?}");
+    for def in defs.iter_mut() {
+        if let Some(settings) = def.config.latency.as_mut() {
+            *settings = overrides.apply(*settings);
+        }
+    }
+}
+
+/// Each latency step whose settings ask for fewer than all of the run's threads, its plan (TODO 119, `measure::plan`): from the run's
+/// threads (thread i on the CPU list's i-th CPU), their cores, core types and L3s as the topology has them, and their memory; blocks from
+/// the calibration, else CPUID's sizes. Why a setting fits no thread, naming its step, otherwise.
+fn plan_latency_steps(
+    defs: &mut [TestDefinition], blocks: &HashMap<usize, Vec<crate::AllocationBlock>>, cpus: Option<&[usize]>, cache_info: &CacheInfo,
+) -> Result<(), String> {
+    use crate::measure::{Sizes, Slot, Tier};
+    if !defs.iter().any(|d| d.config.latency.is_some_and(|s| s.constrains())) {
+        return Ok(());
+    }
+    let topology = crate::cpu_topology::get_cpu_topology();
+    let slots: Vec<Slot> = (0..blocks.len())
+        .map(|thread| {
+            let cpu = cpus.and_then(|cpus| cpus.get(thread).copied());
+            let info = cpu.and_then(|cpu| topology.iter().find(|t| t.logical_id == cpu));
+            Slot {
+                thread,
+                // Unpinned, a thread has no core of its own: each its own, one L3 for all
+                core: info.map_or(usize::MAX - thread, |i| i.physical_core_id),
+                core_type: info.map_or(crate::cpu_topology::CoreType::Performance(0), |i| i.core_type),
+                l3: info.map_or((0, 0), |i| i.l3),
+                allocated: blocks.get(&thread).map_or(0, |b| b.iter().map(|block| block.buffer.size()).sum()),
+            }
+        })
+        .collect();
+    let calibration = crate::tests::get_calibration_data();
+    // The L2 the L3 tests' blocks are floored by (`CacheTarget::L3`): the calibrated one, else CPUID's
+    let l2 = calibration
+        .as_ref()
+        .and_then(|c| c.tiers.get(&crate::calibration::CacheTier::L2))
+        .map_or(cache_info.per_core_l2, |t| t.optimal_size);
+    let sizes = Sizes { l2, l3: cache_info.l3_cache };
+    let reach = |k: usize| calibration.as_ref().and_then(|c| c.l3_reach(k)).unwrap_or(cache_info.l3_cache as f64 / k.max(1) as f64);
+    for def in defs.iter_mut() {
+        let Some(settings) = def.config.latency.filter(|s| s.constrains()) else { continue };
+        let plan = crate::measure::plan(&settings, Tier::of(&def.config.extent_mode), &slots, &sizes, &reach)
+            .map_err(|e| format!("{}: {e}", def.display_name))?;
+        log::info!(
+            "{}: {} of {} threads measure ({} an L3){}",
+            def.display_name,
+            plan.record.measurers,
+            slots.len(),
+            plan.record.per_l3,
+            plan.record.l3_share_estimated.map_or(String::new(), |s| format!(", an estimated {:.0}% of the chase in the L3", s * 100.0))
+        );
+        def.config.measure = Some(Arc::new(plan));
+    }
+    Ok(())
 }
 
 /// The command line's `pattern-mode=`. On a SimpleTest it replaces the native program, which would otherwise win and leave the mode
@@ -767,6 +833,7 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
         load_levels_override,
         load_pairs_override,
         load_window_ms_override,
+        latency_override,
         pattern_mode_override,
         sequence_override,
         order_override,
@@ -874,6 +941,8 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
 
     // The loaded latency tests' overrides: each sets its one field, the levels on Lat-Turnaround-DRAM alone (TODO 117)
     apply_load_overrides(&mut test_definitions, load_levels_override, load_pairs_override, load_window_ms_override);
+    // The latency read tests' measuring threads (TODO 119)
+    apply_latency_overrides(&mut test_definitions, latency_override);
 
     if let Some(mode) = pattern_mode_override {
         log::info!("Applying CLI pattern-mode override: {}", mode);
@@ -1127,6 +1196,14 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
             sizes_from: crate::tests::get_calibration_data().map(|stored| stored.timestamp),
         });
         fe.event(Run::Calibrated(calibrated).into());
+    }
+
+    // Which threads measure each latency step that asks for fewer than all, built once from the run's threads and the calibration just
+    // taken (TODO 119): a setting no thread fits stops the run here, before any worker starts
+    if let Err(e) = plan_latency_steps(&mut test_definitions, &allocated_blocks, runtime_config.cpu_list.as_deref(), cache_info) {
+        fe.event(Run::NotRun(NotRun::Config(e.clone())).into());
+        log::error!(target: crate::logfile::FILE_ONLY_TARGET, "Config error: {}", e);
+        return RunStatus::NotRun;
     }
 
     let tests_per_cycle = test_definitions.len() as u64;
@@ -1607,11 +1684,12 @@ fn execute_test_cycle(ctx: &CycleContext, cycle: u64) -> CycleEnd {
                     total_operations_for_test += result.total_operations;
                     test_ops.merge_thread(&result.ops);
 
-                    // Track maximum cycle count (to detect if any thread hit the limit)
-                    if result.cycles_completed > cycles_completed {
-                        cycles_completed = result.cycles_completed;
+                    // Track maximum cycle count (to detect if any thread hit the limit). A thread that sat the step out ran none (TODO
+                    // 119): neither its fewest nor its most.
+                    if !result.idle {
+                        cycles_completed = cycles_completed.max(result.cycles_completed);
+                        cycles_fewest = cycles_fewest.min(result.cycles_completed);
                     }
-                    cycles_fewest = cycles_fewest.min(result.cycles_completed);
                     // Track cycle limit from first thread (same for all)
                     if cycle_limit.is_none() {
                         cycle_limit = result.cycle_limit;
@@ -1652,6 +1730,13 @@ fn execute_test_cycle(ctx: &CycleContext, cycle: u64) -> CycleEnd {
             }
         }
         thread_records.sort_by_key(|record| record.thread);
+        // A planned latency step's threads (TODO 119): which measured and which sat out, as a loaded test's roles are named
+        if let Some(plan) = &test_config.measure {
+            for record in &mut thread_records {
+                let measures = matches!(plan.role(record.thread), crate::measure::Role::Measures { .. });
+                record.role = Some(if measures { "measures" } else { "sits out" }.to_string());
+            }
+        }
         // A loaded latency test's latencies (TODO 117): its measurer's rows, a load each, and each thread's role
         let loaded = latency_results.iter().find_map(|(_, _, stats)| stats.loaded.as_deref()).map(|part| {
             for record in &mut thread_records {
@@ -2865,7 +2950,8 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
             TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::L1_DEFAULT }, ChunkMode::Whole)
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
-                .with_memory_type(None),
+                .with_memory_type(None)
+                .with_latency(crate::measure::Settings::default()),
         ),
         (
             "Lat-L1-Write",
@@ -2890,7 +2976,8 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
             TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::L2_DEFAULT }, ChunkMode::Whole)
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
-                .with_memory_type(None),
+                .with_memory_type(None)
+                .with_latency(crate::measure::Settings::default()),
         ),
         (
             "Lat-L2-Write",
@@ -2915,7 +3002,19 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
             TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::L3_DEFAULT }, ChunkMode::Whole)
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
-                .with_memory_type(None),
+                .with_memory_type(None)
+                .with_latency(crate::measure::Settings::default()),
+        ),
+        // The L3's latency read clean (TODO 119): as many threads to an L3 as leave an estimated 88% of the chase in it, the rest
+        // sitting out, so each thread's block is far past its L2 (one on a 6-core Zen 4)
+        (
+            "Lat-L3-Read-Clean",
+            TestFunction::Latency(read_latency_multi),
+            TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::L3_DEFAULT }, ChunkMode::Whole)
+                .with_timing(TestTiming::duration_only(10))
+                .with_tsc(tsc_freq)
+                .with_memory_type(None)
+                .with_latency(crate::measure::Settings::CLEAN),
         ),
         (
             "Lat-L3-Write",
@@ -2940,7 +3039,19 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
             TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::DRAM_DEFAULT }, ChunkMode::Whole)
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
-                .with_memory_type(None),
+                .with_memory_type(None)
+                .with_latency(crate::measure::Settings::default()),
+        ),
+        // Memory's latency read clean (TODO 119): one thread over at least 1 GiB and 32 L3s, the rest sitting out, so no line of the
+        // chase stays in the L3 it has to itself
+        (
+            "Lat-DRAM-Read-Clean",
+            TestFunction::Latency(read_latency_multi),
+            TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::DRAM_DEFAULT }, ChunkMode::Whole)
+                .with_timing(TestTiming::duration_only(10))
+                .with_tsc(tsc_freq)
+                .with_memory_type(None)
+                .with_latency(crate::measure::Settings::CLEAN),
         ),
         (
             "Lat-DRAM-Write",
@@ -2965,7 +3076,8 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
             TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::DRAM_FULL_DEFAULT }, ChunkMode::Whole)
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
-                .with_memory_type(None),
+                .with_memory_type(None)
+                .with_latency(crate::measure::Settings::default()),
         ),
         (
             "Lat-DRAMFull-Write",
@@ -5382,6 +5494,32 @@ pub mod test_support {
             cycle
         }
 
+        /// TODO 119: a cycle of Lat-L1-Read alone, its 64 KiB extent, planned as `latency-threads=1` plans it: thread 0 measures 32 KiB,
+        /// thread 1 sits out
+        #[cfg(test)]
+        pub(crate) fn planned() -> Self {
+            use crate::measure::{Plan, Record, Role};
+            let mut cycle = FakeCycle::new(ErrorMode::Log, Flip::Verify);
+            let mut latency = cycle.steps.iter().find(|d| d.actual_name == "Lat-L1-Read").cloned().expect("the fake cycle's latency step");
+            latency.test_index = 0;
+            let record = Record {
+                threads: "1".to_string(),
+                cores: "ranked".to_string(),
+                measurers: 1,
+                per_l3: 1,
+                block_bytes: Some(32 * KIB as u64),
+                l2_bytes: None,
+                l3_share_estimated: None,
+                target: None,
+                target_unmet: false,
+            };
+            let roles = vec![Role::Measures { extent: Some(32 * KIB) }, Role::SitsOut];
+            latency.config.measure = Some(Arc::new(Plan { roles, record }));
+            cycle.steps = vec![latency];
+            set_step_seals(&mut cycle.steps, cycle.kernel, true);
+            cycle
+        }
+
         /// Runs the cycle, `fe` showing it: the workers' start, the cycle, and their end.
         pub fn run(self, fe: &dyn Frontend) -> CycleRun {
             let FakeCycle { error_mode, steps, kernel, cache_info, regions, blocks } = self;
@@ -7176,6 +7314,30 @@ mod tests {
         assert!(report.latency.is_none(), "no latency table by thread");
         assert!(report.threads.thread_timings.is_empty(), "its loaders' timing alone, and it has none");
         assert_eq!(report.summary.loaded.as_deref(), Some(loaded));
+    }
+
+    /// TODO 119: a planned latency step's measurer chases its own block and its latency is the step's; the thread that sits out takes no
+    /// samples, does no work, counts in neither the step's fewest nor its most passes, and leaves its memory as the seal left it.
+    #[test]
+    fn a_planned_step_measures_on_its_measurers_alone() {
+        let CycleRun { end, result, thread_totals } = FakeCycle::planned().run(&Unseen);
+        assert_eq!((end.stop, end.partial), (None, false), "the cycle ran to its end");
+        let cycle = &result.cycles[0];
+        let step = &cycle.tests[0];
+        assert_eq!((step.name.as_str(), step.errors), ("Lat-L1-Read", 0));
+        assert!(step.latency_samples.is_some_and(|n| n > 0) && step.latency_p50_ns.is_some(), "the measurer's samples are the step's");
+        let roles: Vec<(usize, Option<&str>, bool)> =
+            step.threads.iter().map(|r| (r.thread, r.role.as_deref(), r.latency.is_some())).collect();
+        assert_eq!(roles, [(0, Some("measures"), true), (1, Some("sits out"), false)]);
+        let sat_out = &step.threads[1];
+        assert_eq!((sat_out.bytes, sat_out.operations, sat_out.cycles), (0, 0, 0), "the thread that sat out did nothing");
+        let measured = &step.threads[0];
+        assert!(measured.bytes > 0 && measured.cycles > 0, "{measured:?}");
+        assert_eq!(step.cycles_completed_min, measured.cycles, "the fewest passes are the measurer's, not the idle thread's none");
+        assert_eq!(thread_totals.get(&1).map_or(0, |t| t.0), 0, "no bytes to the idle thread's totals");
+        let seal = cycle.seal.as_ref().expect("a sealed cycle");
+        assert!(seal.final_check_bytes > 0 && seal.final_check_errors == 0, "the final check found every thread's memory as sealed");
+        assert_eq!(step.seal_errors, 0, "the measurer's chunks checked clean before the step");
     }
 
     /// TODO 72: a cycle that errors=halt stops, at the verify's error, is partial in the results, as its end says: the steps that ran, and

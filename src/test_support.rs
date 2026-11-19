@@ -456,17 +456,19 @@ pub(crate) struct PerfStep {
     pub width: Option<u32>,
     pub extent_bytes: u64,
     pub stopped: bool,
+    /// Its plan when fewer than all threads measured it (TODO 119)
+    pub measure: Option<crate::measure::Record>,
 }
 
 impl PerfStep {
     /// A bandwidth step at `mib_s`, `-Auto`'s resolved to 512 bits
     pub fn speed(test: &'static str, name: &'static str, mib_s: f64) -> Self {
         let width = test.ends_with("-Auto").then_some(512);
-        PerfStep { test, name, mib_s, p50_ns: None, width, extent_bytes: 0, stopped: false }
+        PerfStep { test, name, mib_s, p50_ns: None, width, extent_bytes: 0, stopped: false, measure: None }
     }
 
     pub fn latency(test: &'static str, p50_ns: f64) -> Self {
-        PerfStep { test, name: test, mib_s: 0.0, p50_ns: Some(p50_ns), width: None, extent_bytes: 0, stopped: false }
+        PerfStep { test, name: test, mib_s: 0.0, p50_ns: Some(p50_ns), width: None, extent_bytes: 0, stopped: false, measure: None }
     }
 
     /// Lat-Turnaround-DRAM, its figures in each cycle's loaded summary
@@ -479,7 +481,25 @@ impl PerfStep {
             width: None,
             extent_bytes: 0,
             stopped: false,
+            measure: None,
         }
+    }
+
+    /// A `-Clean` step at `p50_ns` (TODO 119): `measurers` threads over `block_bytes` each, and for an L3 its estimated share against the
+    /// calibrated 1014 KiB L2 and clean's 88% target
+    pub fn clean(test: &'static str, p50_ns: f64, measurers: usize, block_bytes: u64, l3_share: Option<f64>) -> Self {
+        let measure = crate::measure::Record {
+            threads: "clean".to_string(),
+            cores: "ranked".to_string(),
+            measurers,
+            per_l3: measurers,
+            block_bytes: Some(block_bytes),
+            l2_bytes: l3_share.map(|_| 1014 << 10),
+            l3_share_estimated: l3_share,
+            target: l3_share.map(|_| crate::measure::DEFAULT_HITS),
+            target_unmet: l3_share.is_some_and(|s| s < crate::measure::DEFAULT_HITS),
+        };
+        PerfStep { extent_bytes: block_bytes, measure: Some(measure), ..PerfStep::latency(test, p50_ns) }
     }
 }
 
@@ -498,6 +518,7 @@ pub(crate) fn perf_run_of(steps: &[PerfStep], loaded: &[Option<crate::loaded::Lo
             label: s.name.to_string(),
             simd_width_bits: s.width,
             extent_bytes: s.extent_bytes,
+            measure: s.measure.clone(),
             ..Default::default()
         })
         .collect();
@@ -540,7 +561,8 @@ pub(crate) fn perf_run_of(steps: &[PerfStep], loaded: &[Option<crate::loaded::Lo
 }
 
 /// A plan=perf run's steps for the grid, at petz007's figures (2026-11-13: DDR5-6000, 512 bits, six threads), and Lat-Turnaround-DRAM's
-/// loaded summary (`loaded_summary(true)`, daddy-petz's, its 75% level not matched)
+/// loaded summary (`loaded_summary(true)`, daddy-petz's, its 75% level not matched). The clean steps' figures stand in until petz007 runs
+/// them: the L3's is its one-thread sweep's prediction at the plan's 7.5 MiB (87%, short of 88%), Memory's the loaded test's idle row.
 pub(crate) fn perf_run() -> TestRunResult {
     let mut l3 = PerfStep::latency("Lat-L3-Read", 4.6);
     l3.extent_bytes = 1_327_104;
@@ -548,7 +570,9 @@ pub(crate) fn perf_run() -> TestRunResult {
         PerfStep::latency("Lat-L1-Read", 0.82),
         PerfStep::latency("Lat-L2-Read", 2.74),
         l3,
+        PerfStep::clean("Lat-L3-Read-Clean", 8.7, 1, 7_864_320, Some(1.0 - 1_038_336.0 / 7_864_320.0)),
         PerfStep::latency("Lat-DRAM-Read", 63.5),
+        PerfStep::clean("Lat-DRAM-Read-Clean", 67.0, 1, 1 << 30, None),
         PerfStep::turnaround(),
         PerfStep::speed("Spd-L1-Read-Auto", "Spd-L1-Read-512_A", 1_577_506.0),
         PerfStep::speed("Spd-L1-Write-Auto", "Spd-L1-Write-512_A", 872_545.0),

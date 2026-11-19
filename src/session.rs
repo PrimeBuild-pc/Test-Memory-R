@@ -22,10 +22,12 @@ use crate::memory::allocation_strategy::EnhancedMemoryStrategy;
 use crate::runner::{RunStatus, TestSuiteTiming, ThreadPriority, detect_runtime_capabilities, run_tests_with_layout_and_timing_filtered};
 use crate::{ErrorMode, load_config, params};
 
-/// `--ram-latency`: the 6 DRAM latency tests, DRAM-* and DRAMFull-* (TODO 92)
-pub(crate) const RAM_LATENCY_FILTER: &str = "Lat-DRAM-*,Lat-DRAMFull-*";
+/// `--ram-latency`: the 6 DRAM latency tests, DRAM-* and DRAMFull-* (TODO 92). DRAM's by name: plan=perf's Lat-DRAM-Read-Clean (TODO 119)
+/// is no shortcut's
+pub(crate) const RAM_LATENCY_FILTER: &str = "Lat-DRAM-Read,Lat-DRAM-Write,Lat-DRAM-Copy,Lat-DRAMFull-*";
 /// `--cache-latency`: Read/Write/Copy at L1, L2, L3 and DRAM, 12 tests; DRAMFull is `--ram-latency`'s (TODO 92)
-pub(crate) const CACHE_LATENCY_FILTER: &str = "Lat-L1-*,Lat-L2-*,Lat-L3-*,Lat-DRAM-*";
+pub(crate) const CACHE_LATENCY_FILTER: &str =
+    "Lat-L1-*,Lat-L2-*,Lat-L3-Read,Lat-L3-Write,Lat-L3-Copy,Lat-DRAM-Read,Lat-DRAM-Write,Lat-DRAM-Copy";
 /// The flags that pick a mode's defaults, which `run` takes out before it looks for a one-shot command (`logfile::wanted` too)
 pub(crate) const MODE_FLAGS: [&str; 3] = ["--ram-latency", "--cache-latency", "--quick-test"];
 /// Every flag a session takes, exactly: any other is refused before anything runs (`Stopped::UnknownFlags`); `--help` names each
@@ -680,6 +682,7 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     };
 
     let (load_levels_override, load_pairs_override, load_window_ms_override) = load_overrides(&validated_params);
+    let latency_override = latency_overrides(&validated_params);
 
     // Extract pattern-mode override if provided
     let pattern_mode_override = if params::has_param(&validated_params, "pattern-mode") {
@@ -739,6 +742,7 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
                 load_levels_override: load_levels_override.as_deref(),
                 load_pairs_override,
                 load_window_ms_override,
+                latency_override,
                 pattern_mode_override,
                 sequence_override: sequence_override.as_deref(),
                 order_override: order_override.as_deref(),
@@ -766,6 +770,17 @@ fn load_overrides(validated: &HashMap<String, params::ParamValue>) -> (Option<Ve
     let pairs = params::has_param(validated, "load-pairs").then(|| params::get_u32(validated, "load-pairs", 0));
     let window_ms = params::has_param(validated, "load-window-ms").then(|| params::get_u32(validated, "load-window-ms", 0));
     (levels, pairs, window_ms)
+}
+
+/// The latency read tests' measuring threads, each if given (the parser has checked them): `latency-threads=`, `latency-hits=`,
+/// `latency-cores=` (TODO 119)
+fn latency_overrides(validated: &HashMap<String, params::ParamValue>) -> crate::measure::Overrides {
+    let text = |key: &str| params::has_param(validated, key).then(|| params::get_string(validated, key, ""));
+    crate::measure::Overrides {
+        threads: text("latency-threads").and_then(|v| crate::measure::LatencyThreads::parse(&v).ok()),
+        hits: text("latency-hits").and_then(|v| crate::measure::parse_hits(&v).ok()),
+        cores: text("latency-cores").and_then(|v| crate::measure::LatencyCores::parse(&v).ok()),
+    }
 }
 
 /// Gives `args` a mode's or a plan's `cycles=N` (`cycles`), unless they already limit the run: by `cycles=`, or by `duration=`, which a

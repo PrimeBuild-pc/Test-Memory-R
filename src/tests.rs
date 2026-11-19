@@ -841,6 +841,12 @@ pub struct TestMemoryConfig {
     /// The loaded latency tests' step (TODO 117, `loaded::Step`): the roles, the phase word and pace and the loaders' counts, set per
     /// dispatch by the worker pool for Lat-Loaded-DRAM and Lat-Turnaround-DRAM, `None` for every other test and outside a run.
     pub loaded: Option<std::sync::Arc<crate::loaded::Step>>,
+    /// A latency read test's settings, which threads measure it (TODO 119, `measure::Settings`): `None` for every test that doesn't take
+    /// them, which `latency-threads=` and its kind leave alone
+    pub latency: Option<crate::measure::Settings>,
+    /// Its plan, which threads measure and over what, built once at the run's start when the settings ask for fewer than all
+    /// (`measure::plan`); `None` otherwise, every thread measuring as ever
+    pub measure: Option<std::sync::Arc<crate::measure::Plan>>,
 }
 
 impl TestMemoryConfig {
@@ -871,7 +877,15 @@ impl TestMemoryConfig {
             exchange: None,                                      // Set per dispatch by the worker pool, for the page exchange
             storm: None,                                         // Set per dispatch by the worker pool, for the coherence storm
             loaded: None,                                        // Set per dispatch by the worker pool, for the loaded latency tests
+            latency: None,                                       // The latency read tests' own (`with_latency`)
+            measure: None,                                       // Set at the run's start, for a latency step fewer threads measure
         }
+    }
+
+    /// Builder: a latency read test's settings, which threads measure it (TODO 119)
+    pub fn with_latency(mut self, settings: crate::measure::Settings) -> Self {
+        self.latency = Some(settings);
+        self
     }
 
     /// Builder: Mem-Sequence's passes.

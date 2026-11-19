@@ -79,8 +79,49 @@ pub struct WorkResult {
     /// The bits that failed the test's own checks, and the seal's (TODO 97)
     pub failing_bits: FailingBits,
     pub seal_failing_bits: FailingBits,
+    /// It sat the step out (TODO 119, `measure::Role::SitsOut`): ran nothing, so its cycles count for nothing
+    pub idle: bool,
     /// The work around the test, by operation (TODO 90): for a seal stage, the stage itself
     pub ops: crate::ops::OpTally,
+}
+
+impl WorkResult {
+    /// A thread that sat a latency step out (TODO 119): nothing run, nothing touched, no cycles
+    fn idle(thread_id: usize, elapsed: Duration) -> Self {
+        WorkResult {
+            thread_id,
+            total_bytes: 0,
+            elapsed,
+            timed: None,
+            total_errors: 0,
+            total_operations: 0,
+            cycles_completed: 0,
+            cycle_limit: None,
+            stopped_by_time_limit: false,
+            latency_stats: None,
+            seal_errors: 0,
+            alarms: 0,
+            not_reproduced: 0,
+            failing_bits: FailingBits::default(),
+            seal_failing_bits: FailingBits::default(),
+            ops: crate::ops::OpTally::default(),
+            idle: true,
+        }
+    }
+}
+
+/// A latency step's config as this thread runs it (TODO 119, `measure::Plan`): with its own block when its plan gives one, as the step's
+/// otherwise; `None` when it sits the step out
+fn as_planned(config: &TestMemoryConfig, thread: usize) -> Option<std::borrow::Cow<'_, TestMemoryConfig>> {
+    use crate::measure::Role;
+    match config.measure.as_ref().map(|plan| plan.role(thread)) {
+        Some(Role::SitsOut) => None,
+        Some(Role::Measures { extent: Some(size_bytes) }) => Some(std::borrow::Cow::Owned(TestMemoryConfig {
+            extent_mode: crate::tests::ExtentMode::Absolute { size_bytes },
+            ..config.clone()
+        })),
+        Some(Role::Measures { extent: None }) | None => Some(std::borrow::Cow::Borrowed(config)),
+    }
 }
 
 // Thread pool worker context
@@ -460,6 +501,7 @@ fn run_seal_stage(
         failing_bits: bits.test,
         seal_failing_bits: bits.seal,
         ops,
+        idle: false,
     }
 }
 
@@ -473,6 +515,15 @@ fn worker_thread_loop(context: &mut WorkerContext) {
 
                 let thread_start = Instant::now();
                 crate::error_context::set(format!("{step}, thread {}", context.thread_id));
+
+                // A latency step's thread its plan sits out (TODO 119): no test and none of its memory touched, its core idle in the wait
+                // for the next item; a measurer over its own block
+                let Some(test_config) = as_planned(&test_config, context.thread_id) else {
+                    if context.result_sender.send(WorkResult::idle(context.thread_id, thread_start.elapsed())).is_err() {
+                        log::error!("Failed to send result from thread {}", context.thread_id);
+                    }
+                    continue;
+                };
 
                 // MultiBlock tests receive ALL allocated blocks and handle interleaving internally
                 let blocks_slice = &context.allocated_blocks[..];
@@ -523,6 +574,7 @@ fn worker_thread_loop(context: &mut WorkerContext) {
                     failing_bits: bits.test,
                     seal_failing_bits: bits.seal,
                     ops: stats.ops,
+                    idle: false,
                 };
 
                 if context.result_sender.send(result).is_err() {
@@ -534,7 +586,11 @@ fn worker_thread_loop(context: &mut WorkerContext) {
                 let start = Instant::now();
                 crate::error_context::set(format!("{step}, thread {}", context.thread_id));
                 let progress = &context.live[context.thread_id];
-                let (errors, ops) = seal_before_step(&context.allocated_blocks, &test_config, test_name, progress, &mut context.unsealed);
+                let (errors, ops) = match as_planned(&test_config, context.thread_id) {
+                    Some(config) => seal_before_step(&context.allocated_blocks, &config, test_name, progress, &mut context.unsealed),
+                    // A thread that sits the step out overwrites none of its memory: nothing to check, nothing left to reseal (TODO 119)
+                    None => (0, crate::ops::OpTally::default()),
+                };
                 let bits = crate::tests::take_failing_bits();
                 let result = WorkResult {
                     thread_id: context.thread_id,
@@ -553,6 +609,7 @@ fn worker_thread_loop(context: &mut WorkerContext) {
                     failing_bits: bits.test,
                     seal_failing_bits: bits.seal,
                     ops,
+                    idle: false,
                 };
                 if context.result_sender.send(result).is_err() {
                     log::error!("Failed to send result from thread {}", context.thread_id);

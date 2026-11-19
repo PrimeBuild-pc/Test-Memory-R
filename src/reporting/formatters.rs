@@ -310,6 +310,39 @@ fn thread_ids_label(ids: &[usize]) -> String {
     parts.join(", ")
 }
 
+/// The grid's clean column note (TODO 119): who measured each tier's `-Clean` step and over how much, from the steps' saved plans
+fn clean_latency_note(f: &dyn ReportFormatter, grid: &super::perf::Grid) -> String {
+    // `1 thread chases 7.50 MiB`, `2 threads chase 3.75 MiB each`
+    let chase = |n: usize, block: Option<u64>| match (n, block) {
+        (1, Some(block)) => format!("1 thread chases {}", f.format_bytes(block)),
+        (n, Some(block)) => format!("{n} threads chase {} each", f.format_bytes(block)),
+        (n, None) => format!("{n} thread{}", if n == 1 { "" } else { "s" }),
+    };
+    let mut parts = Vec::new();
+    if let Some(plan) = &grid.l3_clean {
+        let mut part = if plan.measurers > plan.per_l3 {
+            format!("on each L3, {} ({} in all)", chase(plan.per_l3, plan.block_bytes), plan.measurers)
+        } else {
+            format!("on the L3, {}", chase(plan.per_l3, plan.block_bytes))
+        };
+        if let Some(share) = plan.l3_share_estimated {
+            part.push_str(&format!(", an estimated {:.0}% of it in the L3", share * 100.0));
+            if let (true, Some(target)) = (plan.target_unmet, plan.target) {
+                part.push_str(&format!(", short of the {:.0}% target even with one", target * 100.0));
+            }
+        }
+        parts.push(part);
+    }
+    if let Some(plan) = &grid.memory_clean {
+        parts.push(format!("in Memory, {}", chase(plan.measurers, plan.block_bytes)));
+    }
+    if parts.is_empty() {
+        return "Latency, clean: every thread, a latency-threads= setting overrode the clean one.".to_string();
+    }
+    let cores = [&grid.l3_clean, &grid.memory_clean].into_iter().flatten().map(|p| p.cores.as_str()).find(|&c| c != "ranked");
+    format!("Latency, clean{}: {}; the other threads sit out.", cores.map_or(String::new(), |c| format!(" on {c} cores")), parts.join("; "))
+}
+
 impl ReportFormatter for DefaultFormatter {
     fn format_bytes(&self, bytes: u64) -> String {
         self.format_bytes_precise(bytes, 2)
@@ -1321,6 +1354,12 @@ impl ReportFormatter for DefaultFormatter {
         // A column only when some row has a figure for it: a run of the memory tests alone shows their row and columns alone
         let ops: Vec<usize> = (0..OPS.len()).filter(|&op| grid.rows.iter().any(|r| r.speed[op].is_some())).collect();
         let latency = grid.rows.iter().any(|r| r.latency.is_some());
+        let clean = grid.rows.iter().any(|r| r.latency_clean.is_some());
+        // The configured column, headed with who measured it: every thread, or a setting's
+        let configured = match &grid.latency_plan {
+            None => format!("Latency, {}", plural(grid.threads, "thread")),
+            Some(plan) => format!("Latency, {}", plan.threads.parse::<usize>().map_or(plan.threads.clone(), |n| plural(n, "thread"))),
+        };
         let mut table = TableData::new()
             .with_title(format!("Cache & Memory: {}", about.join(", ")))
             .with_emphasis()
@@ -1332,7 +1371,10 @@ impl ReportFormatter for DefaultFormatter {
             table = table.add_header(format!("{} MiB/s", OPS[op]), ColumnAlignment::Right);
         }
         if latency {
-            table = table.add_header("Latency", ColumnAlignment::Right);
+            table = table.add_header(configured, ColumnAlignment::Right);
+        }
+        if clean {
+            table = table.add_header("Latency, clean", ColumnAlignment::Right);
         }
         // ASCII cells only: the table lines its columns up by bytes
         let cell = |figure: Option<Figure>, show: &dyn Fn(f64) -> String| match figure {
@@ -1349,7 +1391,14 @@ impl ReportFormatter for DefaultFormatter {
             if latency {
                 cells.push(cell(row.latency, &|ns| format!("{ns:.1} ns")));
             }
-            cut_short |= row.speed.iter().chain([&row.latency]).any(|f| matches!(f, Some(Figure::Measured { cut_short: true, .. })));
+            if clean {
+                cells.push(cell(row.latency_clean, &|ns| format!("{ns:.1} ns")));
+            }
+            cut_short |= row
+                .speed
+                .iter()
+                .chain([&row.latency, &row.latency_clean])
+                .any(|f| matches!(f, Some(Figure::Measured { cut_short: true, .. })));
             table = table.add_row(cells);
         }
         let mut notes = Vec::new();
@@ -1365,7 +1414,14 @@ impl ReportFormatter for DefaultFormatter {
             notes.push(note);
         }
         if latency {
-            notes.push("Latency: the read chase's P50, every thread chasing at once.".to_string());
+            notes.push(match &grid.latency_plan {
+                None => "Latency: the read chase's P50, every thread chasing at once.".to_string(),
+                Some(plan) => format!(
+                    "Latency: the read chase's P50, latency-threads={}{}: a step's measurers chase at once, the other threads sitting out.",
+                    plan.threads,
+                    if plan.cores == "ranked" { String::new() } else { format!(" latency-cores={}", plan.cores) }
+                ),
+            });
         }
         if let Some(share) = &grid.l3_share {
             // Each thread's block against its L2, which needs no count of the threads sharing an L3: the results don't keep one
@@ -1380,6 +1436,9 @@ impl ReportFormatter for DefaultFormatter {
                 self.format_bytes_precise(share.l2_bytes, 0),
                 share.l2_share() * 100.0
             ));
+        }
+        if clean {
+            notes.push(clean_latency_note(self, grid));
         }
         if cut_short {
             notes.push("~ A stop ended the step early: its figure is from part of its work.".to_string());
