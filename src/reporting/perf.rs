@@ -524,6 +524,10 @@ fn grid(result: &TestRunResult, steps: &Steps<'_>) -> Option<Grid> {
 
 fn l3_share(result: &TestRunResult, steps: &Steps<'_>) -> Option<L3Share> {
     let step = steps.named(Tier::L3.latency_test()).first().copied()?;
+    // This note models one block size. A plan with different blocks has no common L2/block ratio.
+    if step.config.measure.as_ref().is_some_and(|p| p.placement.windows(2).any(|w| w[0].block_bytes != w[1].block_bytes)) {
+        return None;
+    }
     let block_bytes = step.config.extent_bytes;
     // A setting that had fewer threads measure it: its measurers, and the most of them on one core (`measure::plan`)
     let planned = step.config.measure.as_ref().map(|plan| (plan.measurers, plan.per_core));
@@ -758,6 +762,35 @@ mod tests {
         assert_eq!(grid.memory_write.map(|p| (p.measurers, p.block_bytes)), Some((1, Some(1 << 30))));
         // The L3 note stays the configured step's: its six threads, not the clean step's one
         assert_eq!(grid.l3_share.map(|s| (s.threads, s.block_bytes)), Some((6, 1_327_104)));
+    }
+
+    #[test]
+    fn the_grid_reports_different_blocks_and_uneven_l3_groups() {
+        use crate::measure::Measurer;
+        use crate::reporting::formatters::{DefaultFormatter, ReportFormatter};
+        let formatter = DefaultFormatter::new();
+        let mut result = perf_run();
+        let clean = result.run_config.tests.iter_mut().find(|t| t.test == "Lat-L3-Read-Clean").unwrap().measure.as_mut().unwrap();
+        clean.measurers = 3;
+        clean.per_l3 = 2;
+        clean.placement = [12, 16, 16]
+            .into_iter()
+            .enumerate()
+            .map(|(thread, mib)| Measurer { thread, cpu: Some(thread), block_bytes: Some(mib << 20) })
+            .collect();
+        clean.block_bytes = Some(12 << 20);
+        let mixed = clean.clone();
+        for name in ["Lat-L3-Read", WRITE_LATENCY_TEST] {
+            result.run_config.tests.iter_mut().find(|t| t.test == name).unwrap().measure = Some(mixed.clone());
+        }
+        let mut grid = grid_of(&result);
+        assert!(grid.l3_share.is_none(), "different blocks have no common L2/block ratio");
+        let footer = |g: &Grid| formatter.prepare_perf_grid_table(g).footer.unwrap();
+        let note = footer(&grid);
+        assert!(note.contains("12.00 MiB to 16.00 MiB each (up to 2 per L3)"), "{note}");
+        assert!(note.contains("3 threads over 12.00 MiB to 16.00 MiB per thread"), "{note}");
+        grid.l3_clean.as_mut().unwrap().placement.clear();
+        assert!(footer(&grid).contains("at least 12.00 MiB"), "an older record has only the minimum");
     }
 
     /// A setting that had fewer threads measure the configured L3 step: the note counts its measurers, one a core, and the grid keeps the

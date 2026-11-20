@@ -100,15 +100,18 @@ summary's L3 and Memory rows show both.
   blocks are sized for itself alone, its sibling sitting out. `clean` on an L3 test takes as
   many threads to each L3 as keep the chase's estimated share in the L3 at `latency-hits=` (88% by
   default) or above; when even one thread falls short, one thread measures and the summary says
-  the target wasn't met. On a DRAM test `clean` is one thread over at least 1 GiB and 32 L3s, so
-  none of its chain stays in the L3 it has to itself (at Lat-DRAM-Read's four L3s, one thread
-  reads 18-22% low). L1 and L2 are a core's own: every thread measures them. A DRAMFull test keeps
-  its whole memory.
+  the target wasn't met. A built-in clean DRAM test uses one thread. Its preferred block is
+  the larger of 1 GiB and 32 times one L3's capacity, capped at the thread's allocation.
+  A smaller allocation can leave a substantial part of the chase in cache. Check the reported
+  block when comparing results. Under `clean`, L1 and L2 use one thread per eligible core.
+  A DRAMFull test keeps its whole memory.
 - **The estimate**: a thread whose block is B finds about L2/B of its chase in its L2 and the rest
-  in the L3, so the share in the L3 is 1 - L2/B. A model, not a count of hits, so the summary
+  in the L3, so the estimated L3 share is max(0, 1 - L2/B). This is a model, so the summary
   calls it an estimate. It holds only while B is inside what a thread reaches of its L3: past
   that part of the chase is the DRAM's, and the summary gives no estimate. Clean on an L3 judges
-  each thread by its own block, which its memory can cap, and passes over one that would miss.
+  each thread by its own block, which its memory can cap. A sibling can measure when its
+  larger allocation meets the target. If blocks differ, the summary shows their range and
+  the lowest estimated share.
 - **`latency-cores=`**: `performance` or `efficiency` takes the measurers from one kind of core
   only, as TMR types them (on a Ryzen 5 8500G, `core-priority=hybrid` tells its Zen 4 cores from
   its Zen 4c ones); `ranked`, the default, takes the run's order.
@@ -304,6 +307,8 @@ so it runs unsealed.
   does, the run stops before it starts, giving both sizes. Under `latency-threads=all` every
   thread measures, so every thread must hold it. Clean on an L3 test needs an L3 share
   (`"target": "L3/2"`, its built-in size), whose scale sizes the block; another extent is refused.
+  The read chase and fenced-store test sample across the entire measurer's extent.
+  The chunk column describes the harness layout, including any explicit `chunk` in the entry.
 
 ## Caveats
 

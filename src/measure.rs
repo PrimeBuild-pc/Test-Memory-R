@@ -351,6 +351,19 @@ impl Plan {
     pub fn role(&self, thread: usize) -> Role {
         self.roles.get(thread).copied().unwrap_or(Role::SitsOut)
     }
+
+    /// The representative worker used in both the startup table and the saved layout. Break ties in thread order.
+    pub(crate) fn smallest_measurer(&self) -> Option<usize> {
+        self.roles
+            .iter()
+            .enumerate()
+            .filter_map(|(thread, role)| match role {
+                Role::Measures { extent } => Some((extent.unwrap_or(usize::MAX), thread)),
+                Role::SitsOut => None,
+            })
+            .min()
+            .map(|(_, thread)| thread)
+    }
 }
 
 fn one() -> usize {

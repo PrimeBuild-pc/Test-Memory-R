@@ -750,12 +750,7 @@ impl TestConfigSnapshot {
         // plan's `block_bytes`): its extent, chunks and overlap all that one config's (TODO 119)
         // over its own memory, which a thread sitting out with less can't shrink
         let planned = def.config.measure.as_ref().and_then(|plan| {
-            let (_, thread) = (0..plan.roles.len())
-                .filter_map(|t| match plan.role(t) {
-                    crate::measure::Role::Measures { extent } => Some((extent.unwrap_or(usize::MAX), t)),
-                    crate::measure::Role::SitsOut => None,
-                })
-                .min()?;
+            let thread = plan.smallest_measurer()?;
             Some((def.config.as_planned(thread)?, plan.allocated.get(thread).copied().unwrap_or(thread_memory_least)))
         });
         let (config, memory) = planned.as_ref().map_or((&def.config, thread_memory_least), |(c, m)| (&**c, *m));
@@ -1628,6 +1623,20 @@ mod tests {
         clean.config.measure = Some(std::sync::Arc::new(Plan { roles, allocated: vec![256 * MIB, 2 << 30], record }));
         let big = TestConfigSnapshot::capture(&clean, false, cache_info, 2, 256 * MIB);
         assert_eq!((big.extent_bytes, big.chunk_bytes, big.chunks), (1 << 30, 1 << 30, 1), "the measurer's layout, not the idle thread's");
+        // A config may set its own chunk. The startup table and the saved layout must resolve it over the same 1 GiB extent.
+        clean.config.chunk_mode = crate::tests::ChunkMode::Absolute { size_bytes: 64 * MIB };
+        let saved = TestConfigSnapshot::capture(&clean, false, cache_info, 2, 256 * MIB);
+        let sequence = crate::reporting::converters::PlanSequence { order: None, seal: None, seal_off_reason: "", tm5: false, width: None };
+        let table = crate::reporting::converters::create_test_configuration_report_v2(
+            &[clean],
+            &Default::default(),
+            cache_info,
+            &[256 * MIB, 2 << 30],
+            None,
+            &sequence,
+        );
+        assert_eq!((saved.chunk_bytes, saved.chunks), (64 * MIB as u64, 16));
+        assert_eq!(table.tests[0].chunk_mode, "64.00 MiB x16");
     }
 
     /// TODO 72: each test records its parameter as its step's Config line shows it (`format_parameter_context`): a TM5 stride as the

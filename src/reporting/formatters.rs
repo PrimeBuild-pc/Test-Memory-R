@@ -310,24 +310,38 @@ fn thread_ids_label(ids: &[usize]) -> String {
     parts.join(", ")
 }
 
+/// The block per measurer. Older results can have only the smallest block.
+pub(super) fn measurer_block_sizes(f: &dyn ReportFormatter, plan: &crate::measure::Record) -> Option<String> {
+    let min = plan.block_bytes?;
+    let low = f.format_bytes(min);
+    if plan.measurers > 1 && (plan.placement.len() != plan.measurers || plan.placement.iter().any(|m| m.block_bytes.is_none())) {
+        return Some(format!("at least {low}"));
+    }
+    let max = plan.placement.iter().filter_map(|m| m.block_bytes).max().unwrap_or(min);
+    Some(if max > min { format!("{low} to {}", f.format_bytes(max)) } else { low })
+}
+
 /// The grid's clean column note (TODO 119): who measured each tier's `-Clean` step and over how much, from the steps' saved plans
 fn clean_latency_note(f: &dyn ReportFormatter, grid: &super::perf::Grid) -> String {
-    // `1 thread chases 7.50 MiB`, `2 threads chase 3.75 MiB each`
-    let chase = |n: usize, block: Option<u64>| match (n, block) {
-        (1, Some(block)) => format!("1 thread chases {}", f.format_bytes(block)),
-        (n, Some(block)) => format!("{n} threads chase {} each", f.format_bytes(block)),
+    let chase = |plan: &crate::measure::Record| match (plan.measurers, measurer_block_sizes(f, plan)) {
+        (1, Some(size)) => format!("1 thread chases {size}"),
+        (n, Some(size)) => format!("{n} threads chase {size} each"),
         (n, None) => format!("{n} thread{}", if n == 1 { "" } else { "s" }),
     };
     let mut parts = Vec::new();
     if let Some(plan) = &grid.l3_clean {
         let mut part = if plan.measurers > plan.per_l3 {
-            format!("on each L3, {} ({} in all)", chase(plan.per_l3, plan.block_bytes), plan.measurers)
+            format!("across L3s, {} (up to {} per L3)", chase(plan), plan.per_l3)
         } else {
-            format!("on the L3, {}", chase(plan.per_l3, plan.block_bytes))
+            format!("on the L3, {}", chase(plan))
         };
         match plan.l3_share_estimated {
             Some(share) => {
-                part.push_str(&format!(", an estimated {:.0}% of it in the L3", share * 100.0));
+                if plan.measurers == 1 {
+                    part.push_str(&format!(", an estimated {:.0}% of it in the L3", share * 100.0));
+                } else {
+                    part.push_str(&format!(", lowest estimated L3 share {:.0}%", share * 100.0));
+                }
                 if let (true, Some(target)) = (plan.target_unmet, plan.target) {
                     part.push_str(&format!(", short of the {:.0}% target even with one", target * 100.0));
                 }
@@ -338,13 +352,18 @@ fn clean_latency_note(f: &dyn ReportFormatter, grid: &super::perf::Grid) -> Stri
         parts.push(part);
     }
     if let Some(plan) = &grid.memory_clean {
-        parts.push(format!("in Memory, {}", chase(plan.measurers, plan.block_bytes)));
+        parts.push(format!("in Memory, {}", chase(plan)));
     }
     if parts.is_empty() {
         return "Latency, clean: every thread, a latency-threads= setting overrode the clean one.".to_string();
     }
     let cores = [&grid.l3_clean, &grid.memory_clean].into_iter().flatten().map(|p| p.cores.as_str()).find(|&c| c != "ranked");
-    format!("Latency, clean{}: {}; the other threads sit out.", cores.map_or(String::new(), |c| format!(" on {c} cores")), parts.join("; "))
+    let other = if [&grid.l3_clean, &grid.memory_clean].into_iter().flatten().any(|p| p.measurers < grid.threads) {
+        "; the other threads sit out"
+    } else {
+        ""
+    };
+    format!("Latency, clean{}: {}{other}.", cores.map_or(String::new(), |c| format!(" on {c} cores")), parts.join("; "))
 }
 
 impl ReportFormatter for DefaultFormatter {
@@ -1432,7 +1451,7 @@ impl ReportFormatter for DefaultFormatter {
             let chased = share.block_bytes * share.threads_per_core.max(1) as u64;
             let chase = match share.threads_per_core {
                 0 | 1 => format!("each of the {} chases {}", plural(share.threads, "thread"), self.format_bytes(share.block_bytes)),
-                n => format!("each core's {n} threads chase {} in all", self.format_bytes(chased)),
+                n => format!("a core with {n} measuring threads chases {} in all", self.format_bytes(chased)),
             };
             notes.push(format!(
                 "* The L3 row's latency: {chase}, {:.2}x its {} L2, so the L2 serves an estimated {:.0}% of the chase.",
@@ -1451,8 +1470,8 @@ impl ReportFormatter for DefaultFormatter {
             };
             let on = grid.memory_write.as_ref().map_or(String::new(), |plan| {
                 let threads = if plan.measurers == 1 { "one thread".to_string() } else { format!("{} threads", plan.measurers) };
-                match plan.block_bytes {
-                    Some(block) => format!(", {threads} over {}", self.format_bytes(block)),
+                match measurer_block_sizes(self, plan) {
+                    Some(block) => format!(", {threads} over {block}{}", if plan.measurers == 1 { "" } else { " per thread" }),
                     None => format!(", {threads}"),
                 }
             });

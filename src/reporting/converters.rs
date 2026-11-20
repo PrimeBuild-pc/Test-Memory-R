@@ -257,8 +257,12 @@ pub fn create_test_configuration_report_v2(
                     format!("{sizes} ({})", target.name_with_context(thread_count, cache_info.is_virtual_machine))
                 }
             };
-            let resolution = sized.resolve_chunk(name, lo);
-            let spread = ChunkSpread::new(lo, resolution.resolved);
+            // Use the same representative measurer as the saved layout. A smaller thread that sits out has no chunks in this step.
+            let (chunk_extent, chunk_memory) = config.measure.as_ref().and_then(|p| {
+                Some((p.record.block_bytes? as usize, *p.allocated.get(p.smallest_measurer()?)?))
+            }).unwrap_or((lo, least));
+            let resolution = sized.resolve_chunk(name, chunk_extent);
+            let spread = ChunkSpread::new(chunk_extent, resolution.resolved);
             if access.is_some_and(|a| a.period_lines >= spread.chunk() / 64) {
                 notes.push(format!(
                     "ℹ  Test {}: on the smallest chunks ({}), each offset pass has one visit; no period hop fits. \
@@ -279,20 +283,22 @@ pub fn create_test_configuration_report_v2(
             if let Some(plan) = &config.measure {
                 let record = &plan.record;
                 let who = format!("{} of {thread_count} threads, latency-threads={}", record.measurers, record.threads);
-                match record.block_bytes {
+                match super::formatters::measurer_block_sizes(&formatter, record) {
                     Some(block) => {
-                        extent_mode = format!("{} ({who})", size(block as usize));
-                        chunk_mode = format!("{} x1 (whole)", size(block as usize));
+                        extent_mode = format!("{block} ({who})");
+                        if matches!(config.chunk_mode, ChunkMode::Whole) {
+                            chunk_mode = format!("{block} x1 (whole)");
+                        }
                     }
                     None => extent_mode = format!("{extent_mode}, {who}"),
                 }
             }
             // Only when the memory is what limits the extent: a cache-sized extent smaller than its chunk is the test's design
             // (Mem-Refresh's 2 GiB chunk means "the whole extent")
-            let memory_bounds_extent = sized.calculate_extent_size(name, 1 << 60) > lo;
-            if resolution.shrunk_by_memory() && memory_bounds_extent {
+            let memory_bounds_extent = sized.calculate_extent_size(name, 1 << 60) > chunk_extent;
+            if resolution.shrunk_by_memory() && memory_bounds_extent && (config.measure.is_none() || chunk_memory == chunk_extent) {
                 notes.push(format!("⚠  Chunk size was adjusted for test {} ({}) from {} -> {}, as the memory allocation ({} per thread) can't support it",
-                                   i + 1, test_def.display_name, size(resolution.requested), size(resolution.resolved), size(lo)));
+                                   i + 1, test_def.display_name, size(resolution.requested), size(resolution.resolved), size(chunk_memory)));
             }
         }
 

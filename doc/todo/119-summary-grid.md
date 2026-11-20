@@ -344,6 +344,19 @@ Not built, deferred: the loaded tests' choosable measurer (latency-cores= for La
 E-core cluster's four cores on one L2: clean would apply at L2 there; no Intel hybrid reachable). Open for the owner: which
 read-chase-plus-store latency tests retire, as a list approved before anything is deleted.
 
+## Post-merge fixes (2026-11-20)
+
+A JSON entry for `Lat-DRAM-NTStore-SFence` could panic during chunk setup. The worker now uses
+the registered test name. The regression runs the kernel with inherited, 64 KiB and whole chunks.
+
+Clean L3 selection considers both SMT siblings' allocations before choosing one per core. The
+estimated L3 share is zero when the whole block fits in L2. Results record each measurer's block
+even when a config gives the test another tier's extent. The summary reports the range for
+unequal blocks and the maximum number of measurers sharing one L3. DRAM sizing also uses a
+calibrated L3 edge when the calibration contains no DRAM probe.
+
+Step 7 is the remaining hardware validation.
+
 ## Known limits
 
 - On the hybrid 8500G the configured L1/L2 median is the Zen 4c cores' (4 of 6 threads): L1 1.06 ns against 0.85 on its Zen 4 cores.
