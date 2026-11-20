@@ -336,8 +336,9 @@ On branch `feat/summary-grid-119`, one commit a step:
    plan=perf here on 2fc10de (2026-11-20): DRAM*4 1920 MiB a thread; Lat-DRAM-Read 138.7 ns, clean 138.3, DRAMFull 139.3;
    Spd-DRAMSmall read 62631 MiB/s, DRAMFull 61938 (write and copy within 1.4%); 5 min 27 s, as before.
 7. Queued for the next hardware run set (the owner, 2026-11-20: a final validation before TODO 119 closes), as
-   `hw-pass\queues\<host>-119.txt`, commented out until that set is approved. On the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
-   (`latency-cores=`), and the metal box (the L3 groups across processor groups).
+   `hw-pass\queues\<host>-119.txt`, commented out until that set is approved. On the physical boxes: plan=perf on
+   daddy-petz and petz007 (the write figure against the probe's there), the 8500G (`latency-cores=`), and the metal box (the L3
+   groups across processor groups).
 
 Not built, deferred: the loaded tests' choosable measurer (latency-cores= for Lat-Loaded/Turnaround), and L2 sharing (an Intel
 E-core cluster's four cores on one L2: clean would apply at L2 there; no Intel hybrid reachable). Open for the owner: which
