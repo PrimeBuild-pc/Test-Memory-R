@@ -343,7 +343,7 @@ pub(crate) fn takes_latency_settings(name: &str) -> bool {
 fn plan_latency_steps(
     defs: &mut [TestDefinition], blocks: &HashMap<usize, Vec<crate::AllocationBlock>>, cpus: Option<&[usize]>, cache_info: &CacheInfo,
 ) -> Result<(), String> {
-    use crate::measure::{Block, Sizes, Slot};
+    use crate::measure::{Block, Sizes, Slot, Tier};
     if !defs.iter().any(|d| d.config.latency.is_some()) {
         return Ok(());
     }
@@ -379,16 +379,17 @@ fn plan_latency_steps(
         let threads = slots.len();
         let private = |target: CacheTarget| move |n: usize| target.size_bytes_sharing(cache_info, threads, n);
         let l1_l2;
-        let block = match &def.config.extent_mode {
-            ExtentMode::Cache { target: target @ (CacheTarget::L1 { .. } | CacheTarget::L2 { .. }) } => {
+        let block = match (tier, &def.config.extent_mode) {
+            (Tier::Private, ExtentMode::Cache { target: target @ (CacheTarget::L1 { .. } | CacheTarget::L2 { .. }) }) => {
                 l1_l2 = private(*target);
                 Block::Private(&l1_l2)
             }
-            ExtentMode::Cache { target: CacheTarget::L3 { scale } } => Block::L3 { scale: *scale },
-            ExtentMode::Cache { target: CacheTarget::Dram { .. } } => Block::CleanDram,
-            ExtentMode::Cache { target: CacheTarget::DRAMFull } | ExtentMode::FullAllocation => Block::Whole,
-            ExtentMode::Absolute { size_bytes } => Block::Exactly(*size_bytes),
-            ExtentMode::CacheTotal { .. } => Block::Exactly(def.config.calculate_extent_size(def.actual_name, usize::MAX)),
+            (Tier::L3, ExtentMode::Cache { target: CacheTarget::L3 { scale } }) => Block::L3 { scale: *scale },
+            (Tier::Dram | Tier::DramFull, ExtentMode::Cache { target: CacheTarget::Dram { .. } }) => Block::CleanDram,
+            (_, ExtentMode::Cache { target: CacheTarget::DRAMFull } | ExtentMode::FullAllocation) => Block::Whole,
+            (_, ExtentMode::Cache { target }) => Block::ConfiguredCache(*target, target.size_bytes(cache_info, threads)),
+            (_, ExtentMode::Absolute { size_bytes }) => Block::Exactly(*size_bytes),
+            (_, ExtentMode::CacheTotal { .. }) => Block::Exactly(def.config.calculate_extent_size(def.actual_name, usize::MAX)),
         };
         // Every thread measures, as the test always has, when the settings ask for no fewer: no plan, but a block given outright must
         // fit each thread, as under a plan's `all` (`measure::holds_all`)
@@ -6382,6 +6383,38 @@ mod tests {
             let stats = unsafe { run(&region.blocks, 0, ErrorMode::Log, &TestTiming::cycles_only(1), &step.config, None) };
             assert!(stats.sample_count > 0 && region.guards_intact());
         }
+    }
+
+    #[test]
+    fn a_configured_cache_extent_is_recorded_for_every_latency_measurer() {
+        use crate::test_memory::{GRANULE, resolve_layout};
+        let cache = crate::tests::get_cache_info();
+        let mut config = crate::config::ModernConfig::create_demo_config();
+        config.test_sequence = vec![
+            serde_json::from_value(serde_json::json!({
+                "enabled": true, "function": "Lat-DRAM-Read", "latency_threads": "2", "extent": {"mode":"cache","target":"L3/2"}
+            }))
+            .unwrap(),
+        ];
+        let record = |sizes: [usize; 3]| {
+            let mut regions = sizes.map(|s| Region::new(&[s]));
+            let blocks = regions.iter_mut().enumerate().map(|(i, r)| (i, std::mem::take(&mut r.blocks))).collect();
+            let (mut steps, _) = create_test_definitions_from_config(&config, cache).unwrap();
+            plan_latency_steps(&mut steps, &blocks, None, cache).unwrap();
+            let step = &steps[0];
+            let record = &step.config.measure.as_ref().unwrap().record;
+            assert_eq!(record.measurers, 2);
+            for (i, measurer) in record.placement.iter().enumerate() {
+                assert_eq!(measurer.thread, i);
+                let actual = resolve_layout(&step.config.as_planned(i).unwrap(), step.actual_name, sizes[i]).unwrap().0;
+                assert_eq!((actual, measurer.block_bytes), (sizes[i], Some(sizes[i] as u64)));
+            }
+            assert_eq!(record.block_bytes, Some(GRANULE as u64));
+            record.clone()
+        };
+        let a = record([GRANULE, 2 * GRANULE, 3 * GRANULE]);
+        let b = record([GRANULE, 3 * GRANULE, 2 * GRANULE]);
+        assert_ne!(a.measuring(), b.measuring(), "the second measurer's size matters to --compare-results");
     }
 
     /// TODO 119: a config's latency tests take their registrations' latency settings (clean for the `-Clean` reads and the write, every

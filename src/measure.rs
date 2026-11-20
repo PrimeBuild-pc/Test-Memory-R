@@ -178,6 +178,8 @@ pub enum Block<'a> {
     L3 { scale: f64 },
     /// A few L3s (a DRAM target's): the clean block, max(1 GiB, 32 L3s), as much of it as the measurer's memory holds, a preference
     CleanDram,
+    /// A config names a different tier than the test measures. Keep that target's ordinary size, capped by each measurer's allocation.
+    ConfiguredCache(crate::tests::CacheTarget, usize),
     /// A size given outright, a config's: the block, which a measurer must hold whole
     Exactly(usize),
     /// The measurer's whole memory
@@ -190,6 +192,7 @@ impl Block<'_> {
             Block::Private(_) => "an L1 or L2 share".to_string(),
             Block::L3 { .. } => "an L3 share".to_string(),
             Block::CleanDram => "a DRAM share".to_string(),
+            Block::ConfiguredCache(target, _) => target.name(),
             Block::Exactly(b) => format!("{} outright", bytes(*b as u64)),
             Block::Whole => "the whole memory".to_string(),
         }
@@ -393,7 +396,9 @@ pub fn plan(
     // those has. The estimated share of a block's chase in the L3: what the L2 doesn't hold, while the block is inside what a thread
     // reaches of its L3 with `k` measuring; past that the model would count the DRAM's part as the L3's, so there is none
     let l3_block = |scale: f64, k: usize, n: usize| granules((scale * reach(k)).max((sizes.l2_each(n) + (64 << 10)) as f64));
-    let share = |block: usize, n: usize, k: usize| (block as f64 <= reach(k)).then(|| 1.0 - sizes.l2_each(n) as f64 / block as f64);
+    let share = |block: usize, n: usize, k: usize| {
+        (block > 0 && block as f64 <= reach(k)).then(|| block.saturating_sub(sizes.l2_each(n)) as f64 / block as f64)
+    };
     let meets = |share: Option<f64>| share.is_some_and(|s| s >= settings.hits);
 
     let measurers: Vec<&Slot> = match settings.threads {
@@ -405,14 +410,21 @@ pub fn plan(
         LatencyThreads::Clean => match (tier, block) {
             (Tier::Private, _) => one_a_core,
             (Tier::Dram | Tier::DramFull, _) => one_a_core[..1].to_vec(),
-            (Tier::L3, Block::L3 { scale }) => by_l3(&one_a_core)
+            (Tier::L3, Block::L3 { scale }) => by_l3(&eligible)
                 .into_iter()
                 .flat_map(|on| {
                     // On each L3, the most whose blocks reach the target, each block as much of the step's as the thread's memory
                     // holds: a thread whose smaller block would miss is passed over. Else the one thread whose block comes nearest
-                    let most = (1..=on.len()).rev().find_map(|k| {
+                    let cores = on.iter().map(|s| s.core).collect::<HashSet<_>>().len();
+                    let most = (1..=cores).rev().find_map(|k| {
                         let b = l3_block(*scale, k, 1);
-                        let meeting: Vec<&Slot> = on.iter().copied().filter(|s| meets(share(b.min(s.allocated), 1, k))).take(k).collect();
+                        let mut chosen = HashSet::new();
+                        let meeting: Vec<_> = on
+                            .iter()
+                            .copied()
+                            .filter(|s| meets(share(b.min(s.allocated), 1, k)) && chosen.insert(s.core))
+                            .take(k)
+                            .collect();
                         (meeting.len() == k).then_some(meeting)
                     });
                     most.unwrap_or_else(|| {
@@ -441,6 +453,7 @@ pub fn plan(
     let per_core = measurers.iter().map(|s| on_core(s)).max().unwrap_or(1);
     let extent_of = |slot: &Slot| -> Option<usize> {
         match (tier, block) {
+            (_, Block::ConfiguredCache(_, bytes)) => Some(granules(*bytes as f64).min(slot.allocated)),
             (_, Block::Exactly(b)) => Some(granules(*b as f64)),
             (_, Block::Whole) => Some(granules(slot.allocated as f64)),
             (Tier::Private, Block::Private(size)) => Some(granules(size(on_core(slot)) as f64).min(slot.allocated)),
@@ -757,6 +770,21 @@ mod tests {
         assert_eq!(past.record.l3_share_estimated, None, "a 60 MiB block past the 15 MiB reach has no estimate");
         let clean_past = plan(&Settings::CLEAN, Tier::L3, &Block::L3 { scale: 4.0 }, &slots, &sizes, &reach_of(15 * MIB)).unwrap();
         assert!(clean_past.record.target_unmet && clean_past.record.l3_share_estimated.is_none());
+    }
+
+    #[test]
+    fn clean_l3_checks_siblings_before_choosing_one_per_core() {
+        let sizes = Sizes { l2: 2 * MIB, l2_smt: None, l3: 64 * MIB };
+        let clean = |slots: &[Slot]| plan(&Settings::CLEAN, Tier::L3, &L3_HALF, slots, &sizes, &reach_of(64 * MIB)).unwrap().record;
+        let mut slots = [slot(0, 0, 0, 16 * MIB), slot(1, 0, 0, 64 * MIB)];
+        let record = clean(&slots);
+        assert_eq!((record.cpus(), record.l3_share_estimated, record.target_unmet), (vec![1], Some(0.9375), false));
+        slots[0].allocated = slots[1].allocated;
+        assert_eq!(clean(&slots).cpus(), [0], "prefer the ranked sibling when both qualify");
+        slots[0].allocated = MIB / 2;
+        slots[1].allocated = MIB;
+        let record = clean(&slots);
+        assert_eq!((record.l3_share_estimated, record.target_unmet), (Some(0.0), true), "either block fits inside L2");
     }
 
     #[test]
