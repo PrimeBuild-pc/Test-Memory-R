@@ -67,7 +67,7 @@ jobs:
       run: python tools/build_release.py
 
     - name: Keep the build manifest
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: build-manifest
         path: target/release/tmr.build.json
