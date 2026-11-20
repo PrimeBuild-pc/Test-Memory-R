@@ -8,7 +8,7 @@ source to model a similar test structure, then used Claude AI (with a little bit
 reimplement it in Rust for modern 64-bit Windows (11 or Server 2022+) and today's hardware (AVX2, DDR4
 or DDR5).
 
-**Status: 0.1.1, an early release.** TMR works, but it is young: its settings and files may
+**Status: 0.1.2, an early release.** TMR works, but it is young: its settings and files may
 change between versions until 1.0. **An unstable overclock can freeze, crash or restart your PC
 while TMR runs**, as any memory test can: save your work and close other programs first.
 
