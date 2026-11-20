@@ -333,6 +333,8 @@ On branch `feat/summary-grid-119`, one commit a step:
    the dev box the edge, 19.3 MiB of 480, made Lat-DRAM-Read's 4 L3s 77 MiB a thread, which the L3 held: 104 ns against the clean
    form's 138, and Spd-DRAMSmall's read 33% over Spd-DRAMFull's. On the 2026-11-13 desktops the edge is 68-90% of CPUID's (DRAM*4
    43.5-94.6 MiB, to 64-128 MiB) and DRAMSmall's bandwidth was within 1% of DRAMFull's; the metal box's 104 MiB edge is CPUID's.
+   plan=perf here on 2fc10de (2026-11-20): DRAM*4 1920 MiB a thread; Lat-DRAM-Read 138.7 ns, clean 138.3, DRAMFull 139.3;
+   Spd-DRAMSmall read 62631 MiB/s, DRAMFull 61938 (write and copy within 1.4%); 5 min 27 s, as before.
 7. Later, on the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
    (`latency-cores=`), and the metal box (the L3 groups across processor groups).
 
