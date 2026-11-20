@@ -850,6 +850,8 @@ pub struct TestMemoryConfig {
     /// A latency read test's settings, which threads measure it (TODO 119, `measure::Settings`): `None` for every test that doesn't take
     /// them, which `latency-threads=` and its kind leave alone
     pub latency: Option<crate::measure::Settings>,
+    /// What it measures, which decides who measures under its settings (`measure::Tier`): its registration's, never its extent's
+    pub latency_tier: Option<crate::measure::Tier>,
     /// Its plan, which threads measure and over what, built once at the run's start when the settings ask for fewer than all
     /// (`measure::plan`); `None` otherwise, every thread measuring as ever
     pub measure: Option<std::sync::Arc<crate::measure::Plan>>,
@@ -884,13 +886,15 @@ impl TestMemoryConfig {
             storm: None,                                         // Set per dispatch by the worker pool, for the coherence storm
             loaded: None,                                        // Set per dispatch by the worker pool, for the loaded latency tests
             latency: None,                                       // The latency read tests' own (`with_latency`)
+            latency_tier: None,                                  // With them
             measure: None,                                       // Set at the run's start, for a latency step fewer threads measure
         }
     }
 
-    /// Builder: a latency read test's settings, which threads measure it (TODO 119)
-    pub fn with_latency(mut self, settings: crate::measure::Settings) -> Self {
+    /// Builder: a latency test's settings, which threads measure it, and the tier it measures, which decides who (TODO 119)
+    pub fn with_latency(mut self, settings: crate::measure::Settings, tier: crate::measure::Tier) -> Self {
         self.latency = Some(settings);
+        self.latency_tier = Some(tier);
         self
     }
 

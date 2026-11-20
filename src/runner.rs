@@ -343,7 +343,7 @@ pub(crate) fn takes_latency_settings(name: &str) -> bool {
 fn plan_latency_steps(
     defs: &mut [TestDefinition], blocks: &HashMap<usize, Vec<crate::AllocationBlock>>, cpus: Option<&[usize]>, cache_info: &CacheInfo,
 ) -> Result<(), String> {
-    use crate::measure::{Sizes, Slot, Tier};
+    use crate::measure::{Block, Sizes, Slot};
     if !defs.iter().any(|d| d.config.latency.is_some_and(|s| s.constrains())) {
         return Ok(());
     }
@@ -354,6 +354,7 @@ fn plan_latency_steps(
             let info = cpu.and_then(|cpu| topology.iter().find(|t| t.logical_id == cpu));
             Slot {
                 thread,
+                cpu,
                 // Unpinned, a thread has no core of its own: each its own, one L3 for all
                 core: info.map_or(usize::MAX - thread, |i| i.physical_core_id),
                 core_type: info.map_or(crate::cpu_topology::CoreType::Performance(0), |i| i.core_type),
@@ -373,14 +374,25 @@ fn plan_latency_steps(
     let reach = |k: usize| calibration.as_ref().and_then(|c| c.l3_reach(k)).unwrap_or(cache_info.l3_cache as f64 / k.max(1) as f64);
     for def in defs.iter_mut() {
         let Some(settings) = def.config.latency.filter(|s| s.constrains()) else { continue };
-        // An L1 or L2 step's block as its cache target sizes it with `n` of a core's threads measuring, not the run's threads a core
-        let target = match &def.config.extent_mode {
-            ExtentMode::Cache { target: target @ (CacheTarget::L1 { .. } | CacheTarget::L2 { .. }) } => Some(*target),
-            _ => None,
+        let Some(tier) = def.config.latency_tier else { continue };
+        // What the step's extent asks of a measurer's block; who measures is its tier's, whatever the extent (`measure::Block`). An L1 or
+        // L2 share is sized with `n` of a core's threads measuring, not the run's threads a core
+        let threads = slots.len();
+        let private = |target: CacheTarget| move |n: usize| target.size_bytes_sharing(cache_info, threads, n);
+        let l1_l2;
+        let block = match &def.config.extent_mode {
+            ExtentMode::Cache { target: target @ (CacheTarget::L1 { .. } | CacheTarget::L2 { .. }) } => {
+                l1_l2 = private(*target);
+                Block::Private(&l1_l2)
+            }
+            ExtentMode::Cache { target: CacheTarget::L3 { scale } } => Block::L3 { scale: *scale },
+            ExtentMode::Cache { target: CacheTarget::Dram { .. } } => Block::CleanDram,
+            ExtentMode::Cache { target: CacheTarget::DRAMFull } | ExtentMode::FullAllocation => Block::Whole,
+            ExtentMode::Absolute { size_bytes } => Block::Exactly(*size_bytes),
+            ExtentMode::CacheTotal { .. } => Block::Exactly(def.config.calculate_extent_size(def.actual_name, usize::MAX)),
         };
-        let private = |n: usize| target.map(|t| t.size_bytes_sharing(cache_info, slots.len(), n));
-        let plan = crate::measure::plan(&settings, Tier::of(&def.config.extent_mode), &slots, &sizes, &reach, &private)
-            .map_err(|e| format!("{}: {e}", def.display_name))?;
+        let plan =
+            crate::measure::plan(&settings, tier, &block, &slots, &sizes, &reach).map_err(|e| format!("{}: {e}", def.display_name))?;
         log::info!(
             "{}: {} of {} threads measure ({} an L3){}",
             def.display_name,
@@ -2964,7 +2976,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None)
-                .with_latency(crate::measure::Settings::default()),
+                .with_latency(crate::measure::Settings::default(), crate::measure::Tier::Private),
         ),
         (
             "Lat-L1-Write",
@@ -2990,7 +3002,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None)
-                .with_latency(crate::measure::Settings::default()),
+                .with_latency(crate::measure::Settings::default(), crate::measure::Tier::Private),
         ),
         (
             "Lat-L2-Write",
@@ -3016,7 +3028,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None)
-                .with_latency(crate::measure::Settings::default()),
+                .with_latency(crate::measure::Settings::default(), crate::measure::Tier::L3),
         ),
         // The L3's latency read clean (TODO 119): as many threads to an L3 as leave an estimated 88% of the chase in it, the rest
         // sitting out, so each thread's block is far past its L2 (one on a 6-core Zen 4)
@@ -3027,7 +3039,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None)
-                .with_latency(crate::measure::Settings::CLEAN),
+                .with_latency(crate::measure::Settings::CLEAN, crate::measure::Tier::L3),
         ),
         (
             "Lat-L3-Write",
@@ -3053,7 +3065,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None)
-                .with_latency(crate::measure::Settings::default()),
+                .with_latency(crate::measure::Settings::default(), crate::measure::Tier::Dram),
         ),
         // Memory's latency read clean (TODO 119): one thread over at least 1 GiB and 32 L3s, the rest sitting out, so no line of the
         // chase stays in the L3 it has to itself
@@ -3064,7 +3076,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None)
-                .with_latency(crate::measure::Settings::CLEAN),
+                .with_latency(crate::measure::Settings::CLEAN, crate::measure::Tier::Dram),
         ),
         (
             "Lat-DRAM-Write",
@@ -3091,7 +3103,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None)
-                .with_latency(crate::measure::Settings::CLEAN),
+                .with_latency(crate::measure::Settings::CLEAN, crate::measure::Tier::Dram),
         ),
         // DRAMFull - Low TLB hit rate (stress with page miss overhead) - Read, Write, Copy
         (
@@ -3101,7 +3113,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
                 .with_timing(TestTiming::duration_only(10))
                 .with_tsc(tsc_freq)
                 .with_memory_type(None)
-                .with_latency(crate::measure::Settings::default()),
+                .with_latency(crate::measure::Settings::default(), crate::measure::Tier::DramFull),
         ),
         (
             "Lat-DRAMFull-Write",
@@ -4715,10 +4727,11 @@ fn create_test_definitions_from_config(
         // A latency test's measuring settings are its registration's (every thread; clean for the `-Clean` tests and the write
         // latency), the entry's own over them, and the command line's over both (`apply_latency_overrides`, TODO 119). Its extent,
         // chunk and length stay the entry's or the config's defaults, as every latency test's in a config: the name fixes who measures.
-        if let Some(settings) =
-            built_in.iter().find(|d| d.actual_name == test_name || d.original_name == Some(test_name)).and_then(|d| d.config.latency)
+        if let Some(registered) = built_in.iter().find(|d| d.actual_name == test_name || d.original_name == Some(test_name))
+            && let Some(settings) = registered.config.latency
         {
             test.config.latency = Some(test.latency.apply(settings));
+            test.config.latency_tier = registered.config.latency_tier;
         }
         // Look up function by name: the aliases first, then the built-in suite
         let test_function = crate::tests::get_test_function_by_name(test_name)
@@ -5540,6 +5553,7 @@ pub mod test_support {
                 measurers: 1,
                 per_l3: 1,
                 per_core: 1,
+                cpus: vec![0],
                 block_bytes: Some(32 * KIB as u64),
                 l2_bytes: None,
                 l3_share_estimated: None,
@@ -5547,7 +5561,7 @@ pub mod test_support {
                 target_unmet: false,
             };
             let roles = vec![Role::Measures { extent: Some(32 * KIB) }, Role::SitsOut];
-            latency.config.measure = Some(Arc::new(Plan { roles, record }));
+            latency.config.measure = Some(Arc::new(Plan { roles, allocated: vec![10 * 1024 * KIB; 2], record }));
             cycle.steps = vec![latency];
             set_step_seals(&mut cycle.steps, cycle.kernel, true);
             cycle
@@ -6364,6 +6378,16 @@ mod tests {
             entry("Mem-StuckBit256"),
         ];
         let (mut steps, _) = create_test_definitions_from_config(&config, cache_info).unwrap();
+        // Who measures is the test's own, whatever extent the config gives it (the review of 2026-11-20)
+        use crate::measure::Tier;
+        assert_eq!(steps.iter().map(|d| d.config.latency_tier).collect::<Vec<_>>(), [
+            Some(Tier::L3),
+            Some(Tier::Dram),
+            Some(Tier::Dram),
+            Some(Tier::Private),
+            Some(Tier::Dram),
+            None
+        ]);
         let settings = |steps: &[TestDefinition]| steps.iter().map(|d| d.config.latency).collect::<Vec<_>>();
         let two_efficiency = Settings { threads: LatencyThreads::Count(2), cores: LatencyCores::Efficiency, ..Settings::default() };
         assert_eq!(settings(&steps), [

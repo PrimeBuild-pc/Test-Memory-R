@@ -749,6 +749,7 @@ mod tests {
             measurers: 1,
             per_l3: 1,
             per_core: 1,
+            cpus: vec![0],
             block_bytes: Some(4 * MIB as u64),
             l2_bytes: None,
             l3_share_estimated: None,
@@ -757,7 +758,7 @@ mod tests {
         };
         let plan = |roles: Vec<Role>| {
             let mut config = TestMemoryConfig::new(ExtentMode::Absolute { size_bytes: MIB }, ChunkMode::Whole);
-            config.measure = Some(std::sync::Arc::new(Plan { roles, record: record.clone() }));
+            config.measure = Some(std::sync::Arc::new(Plan { allocated: vec![8 << 20; roles.len()], roles, record: record.clone() }));
             config
         };
         let one = plan(vec![Role::Measures { extent: Some(4 * MIB) }, Role::SitsOut, Role::SitsOut, Role::SitsOut]);

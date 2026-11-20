@@ -288,8 +288,12 @@ L2 step's is sized for the threads measuring on its core, a sibling that sits ou
 - **Defaults:** the test's own: `all` for the plain reads; `clean` for the `-Clean` reads and Lat-DRAM-NTStore-SFence;
   `latency_hits` 88%; `latency_cores` `ranked`
 - **JSON config fields:** `"latency_threads": "clean"`, `"latency_hits": "90%"`, `"latency_cores": "efficiency"`, over the
-  test's own. A config's latency test keeps its name's settings (a `-Clean` read stays clean) but takes its extent, chunk and
-  length from its entry or the config's defaults, as every latency test in a config does.
+  test's own. A config's latency test keeps its name's settings and tier (a `-Clean` read stays clean, on the threads its tier
+  takes) and its extent, chunk and length from its entry or the config's defaults. The extent sizes the block, never who
+  measures (`measure::Block`): an L1 or L2 share sized for the siblings measuring; an L3 share, its scale of the reach with the
+  measurers on its L3; a DRAM share, the clean block (a preference, capped by the measurer's memory); a size given outright, the
+  block, which a measurer must hold (the first eligible thread that does; with none the run stops at setup, giving both sizes);
+  the whole memory, each measurer's. Clean on an L3 test refuses any extent but an L3 share.
 - **Command line:** `latency-threads=`, `latency-hits=`, `latency-cores=`, over a config's entries and the built-in tests'
 - **Results:** each planned step's `run_config.tests[].measure` (who measured, the block, the estimated share, the target) and
   each thread's `role`; `--compare-results` lists a change of measurers as a setting that differs

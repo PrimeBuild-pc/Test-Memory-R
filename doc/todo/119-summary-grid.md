@@ -319,6 +319,14 @@ On branch `feat/summary-grid-119`, one commit a step:
    siblings measuring, `CacheTarget::size_bytes_sharing`, and the plan records `per_core`); the results file's layout of a planned
    step mixed the plan's extent with the unplanned chunk (now a measurer's planned config, whole); `--compare-results` ignored who
    measured (now a `measurers` setting change; no record is every thread).
+   Astra's recheck of 2251981 (2026-11-20), four more, each checked against the code and fixed: who measures came from how the
+   extent was written (an outright size was planned as L1/L2; now the test's registered tier, `with_latency(settings, tier)`, and the
+   extent only sizes the block, `measure::Block`: an outright size must fit a measurer, the next eligible thread that holds it
+   measuring, else the run stops at setup with both sizes; clean on an L3 test needs an L3 share, whose scale it now honours); the
+   snapshot resolved a measurer over the run's least memory (now its own, `Plan::allocated`); the comparison missed a moved CPU and a
+   4 KiB block change (now `Record::cpus` and the exact block, compared as values); clean L3 capped a short-memory thread after
+   choosing the count (now it passes over a thread that can't hold the block). `--disable-pinning`: a sentence in the docs only (the
+   owner and Astra).
 7. Later, on the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
    (`latency-cores=`), and the metal box (the L3 groups across processor groups).
 

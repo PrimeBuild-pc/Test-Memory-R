@@ -110,6 +110,8 @@ summary's L3 and Memory rows show both.
 - **`latency-cores=`**: `performance` or `efficiency` takes the measurers from one kind of core
   only, as TMR types them (on a Ryzen 5 8500G, `core-priority=hybrid` tells its Zen 4 cores from
   its Zen 4c ones); `ranked`, the default, takes the run's order.
+- **With `--disable-pinning`**, the core types and L3 groups the plan uses describe where the
+  threads were placed; Windows may run a measurer elsewhere.
 - **Sitting out**: a thread that sits a step out runs nothing in it, no test and no seal check,
   and leaves its memory as it was. Its row in the step's thread table has no bytes, and the
   results file names each thread's role in the step, `measures` or `sits out`.
@@ -290,9 +292,12 @@ so it runs unsealed.
 
   An entry can give `"latency_threads"`, `"latency_hits"` and `"latency_cores"`, as the command
   line's settings, over the test's own; the command line's override them. A `-Clean` test or
-  Lat-DRAM-NTStore-SFence keeps its clean setting in a config, but its extent is the entry's or
-  the config's, as for any latency test: give Lat-L3-Read-Clean `"target": "L3/2"` (its built-in
-  size), or it chases the config's default extent.
+  Lat-DRAM-NTStore-SFence keeps its clean setting in a config. Its extent, the entry's or the
+  config's, sizes the block and never chooses who measures: Lat-DRAM-Read-Clean over 1 GiB given
+  outright and over the whole of a thread's 1 GiB measures on the same one thread. A size given
+  outright must fit a measurer: the first eligible thread that holds it measures, and if none
+  does, the run stops before it starts, giving both sizes. Clean on an L3 test needs an L3 share
+  (`"target": "L3/2"`, its built-in size), whose scale sizes the block; another extent is refused.
 
 ## Caveats
 
