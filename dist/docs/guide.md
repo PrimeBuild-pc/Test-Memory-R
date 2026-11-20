@@ -18,9 +18,8 @@ change between versions. The project's page has the details:
   and Settings > Apps uninstalls it.
 - **winget**, once TMR's package is accepted there: `winget install Petz.TMR`. winget installs it
   for you only, and brings the two runtimes below with it. For all users, install the runtimes
-  first, `winget install Microsoft.VCRedist.2015+.x64 Microsoft.WindowsAppRuntime.2`, then
-  `winget install Petz.TMR --scope machine`: with `--scope`, winget asks the same scope of each
-  package TMR depends on, and neither runtime offers both.
+  first (the two commands below), then `winget install Petz.TMR --scope machine`: with `--scope`,
+  winget asks the same scope of each package TMR depends on, and neither runtime offers both.
 - **The bare `tmr.exe`**, from the same releases: put it in a folder of its own that you can write
   to. TMR keeps its files beside it.
 
@@ -30,12 +29,18 @@ TMR needs:
   runs on Server 2022 too.
 - **A CPU from 2015 or later**: Intel 6th gen Core (Skylake) or AMD Ryzen (Zen) and later. TMR
   checks at startup, and says so on an older one.
-- **The Microsoft Visual C++ Redistributable (x64)**, which most PCs have:
-  `winget install Microsoft.VCRedist.2015+.x64`. Without it Windows won't start `tmr.exe`. TMR
-  takes it from Windows' `System32` folder only, where the Redistributable puts it: a copy of its
-  DLL beside `tmr.exe` isn't used.
+- **The Microsoft Visual C++ Redistributable (x64)**, which most PCs have (the first command
+  below). Without it Windows won't start `tmr.exe`. TMR takes it from Windows' `System32` folder
+  only, where the Redistributable puts it: a copy of its DLL beside `tmr.exe` isn't used.
 - **The Windows App Runtime 2.4 or later**, for the window only: TMR offers to download it when
-  it's missing, or `winget install Microsoft.WindowsAppRuntime.2`.
+  it's missing, or use the second command below.
+
+On a new PC, these install both runtimes: the console needs the first, the window both.
+
+```
+winget install --id Microsoft.VCRedist.2015+.x64 --exact --source winget
+winget install --id Microsoft.WindowsAppRuntime.2 --exact --source winget
+```
 
 TMR bundles neither runtime, on purpose: each is shared by many programs, so your PC keeps one
 copy of each up to date.

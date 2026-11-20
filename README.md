@@ -47,8 +47,17 @@ Cascadia Mono: [Windows Terminal](https://github.com/microsoft/terminal) (it shi
 boxes, TMR says so at a run's start and end. Both install with winget:
 
 ```
-winget install --id Microsoft.WindowsTerminal --source winget
-winget install --id Microsoft.PowerShell --source winget
+winget install --id Microsoft.WindowsTerminal --exact --source winget
+winget install --id Microsoft.PowerShell --exact --source winget
+```
+
+That PowerShell is 7.7 or later, which winget installs as an MSIX package, for your account
+only: other accounts, scheduled tasks and services don't see it, among other gaps
+([PowerShell/PowerShell#27565](https://github.com/PowerShell/PowerShell/issues/27565)). For
+PowerShell for all users, install the 7.6 LTS line's MSI instead:
+
+```
+winget install --id Microsoft.PowerShell --exact --version 7.6.10.0 --source winget --installer-type wix
 ```
 
 ## Install and run
@@ -170,6 +179,13 @@ L3, so they reach it.
 
 ## Requirements
 
+On a new PC, these install both runtimes below: the console needs the first, the window both.
+
+```
+winget install --id Microsoft.VCRedist.2015+.x64 --exact --source winget
+winget install --id Microsoft.WindowsAppRuntime.2 --exact --source winget
+```
+
 - **Windows and a CPU** from the lists above.
 - **The Microsoft Visual C++ runtime** (`VCRUNTIME140.dll`), for the console and the window alike.
   `tmr.exe` is built with Microsoft's C++ toolchain, which keeps part of its C runtime in that DLL
@@ -178,14 +194,14 @@ L3, so they reach it.
   only, where the runtime installs it: a copy beside `tmr.exe` is never used, so no other program
   can put its own there for an elevated `tmr.exe` to run. Most PCs have it already: games and many
   apps install it. Get it from
-  <https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist>, or:
-  `winget install Microsoft.VCRedist.2015+.x64`
+  <https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist>, or with the first
+  command above.
 - **The Windows App Runtime 2** (2.4 or later), for the window only: the window's controls (WinUI 3)
   are in that runtime, which Microsoft ships apart from Windows. The console runs without it. When
   the window can't find it, TMR offers to open the download page,
-  <https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads>. Or:
-  `winget install Microsoft.WindowsAppRuntime.2` (not `Microsoft.WindowsAppRuntime.2.0`, an older
-  2.0 release).
+  <https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads>, or use the second command
+  above (`Microsoft.WindowsAppRuntime.2`, not `Microsoft.WindowsAppRuntime.2.0`, an older 2.0
+  release).
 - **Neither runtime is bundled with TMR**, on purpose: both are shared by many programs, so each PC
   should keep its one copy up to date (`winget upgrade --all`, or each package by its name above),
   and it keeps `tmr.exe` and this repository small.
