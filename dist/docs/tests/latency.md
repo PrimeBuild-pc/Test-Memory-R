@@ -106,7 +106,9 @@ summary's L3 and Memory rows show both.
   its whole memory.
 - **The estimate**: a thread whose block is B finds about L2/B of its chase in its L2 and the rest
   in the L3, so the share in the L3 is 1 - L2/B. A model, not a count of hits, so the summary
-  calls it an estimate.
+  calls it an estimate. It holds only while B is inside what a thread reaches of its L3: past
+  that part of the chase is the DRAM's, and the summary gives no estimate. Clean on an L3 judges
+  each thread by its own block, which its memory can cap, and passes over one that would miss.
 - **`latency-cores=`**: `performance` or `efficiency` takes the measurers from one kind of core
   only, as TMR types them (on a Ryzen 5 8500G, `core-priority=hybrid` tells its Zen 4 cores from
   its Zen 4c ones); `ranked`, the default, takes the run's order.
@@ -296,7 +298,8 @@ so it runs unsealed.
   config's, sizes the block and never chooses who measures: Lat-DRAM-Read-Clean over 1 GiB given
   outright and over the whole of a thread's 1 GiB measures on the same one thread. A size given
   outright must fit a measurer: the first eligible thread that holds it measures, and if none
-  does, the run stops before it starts, giving both sizes. Clean on an L3 test needs an L3 share
+  does, the run stops before it starts, giving both sizes. Under `latency-threads=all` every
+  thread measures, so every thread must hold it. Clean on an L3 test needs an L3 share
   (`"target": "L3/2"`, its built-in size), whose scale sizes the block; another extent is refused.
 
 ## Caveats

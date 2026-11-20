@@ -251,9 +251,9 @@ pub struct Record {
     pub per_l3: usize,
     #[serde(default = "one")]
     pub per_core: usize,
-    /// The measurers' logical CPUs, in thread order; none unpinned
+    /// Each measurer, in thread order: its thread, its CPU and its block
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cpus: Vec<usize>,
+    pub placement: Vec<Measurer>,
     /// Its measurers' block, the smallest when they differ; none for a step that keeps its own extent
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_bytes: Option<u64>,
@@ -267,6 +267,18 @@ pub struct Record {
     pub target: Option<f64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub target_unmet: bool,
+}
+
+/// Where one measurer ran, and over what
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Measurer {
+    pub thread: usize,
+    /// Its logical CPU; none unpinned
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<usize>,
+    /// Its block; none when it kept the step's own extent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_bytes: Option<u64>,
 }
 
 /// A step's measurers, built before its workers start
@@ -286,30 +298,48 @@ fn bytes(b: u64) -> String {
 }
 
 /// What a record's two runs must share to have measured a step alike: everything but the estimate, which follows from the rest
-type Measuring<'a> = (&'a str, &'a str, usize, usize, usize, &'a [usize], Option<u64>);
+type Measuring<'a> = (&'a str, &'a str, usize, usize, usize, &'a [Measurer], Option<u64>);
 
 impl Record {
-    /// What decides whether two runs measured a step alike (`run_context::setting_changes`): the settings, how many measured, where,
-    /// and the block to the byte
+    /// What decides whether two runs measured a step alike (`run_context::setting_changes`): the settings, how many measured, each
+    /// measurer's thread, CPU and block to the byte
     pub fn measuring(&self) -> Measuring<'_> {
-        (&self.threads, &self.cores, self.measurers, self.per_l3, self.per_core, &self.cpus, self.block_bytes)
+        (&self.threads, &self.cores, self.measurers, self.per_l3, self.per_core, &self.placement, self.block_bytes)
+    }
+
+    /// The measurers' CPUs, in thread order
+    pub fn cpus(&self) -> Vec<usize> {
+        self.placement.iter().filter_map(|m| m.cpu).collect()
     }
 
     /// Who measured, for a comparison of two runs: `1 thread (latency-threads=clean) on CPU 0, 1 an L3, over 1.00 GiB`, the cores when a
-    /// filter chose them, the most on a core when two shared one; with `exact`, the block's bytes too, when two blocks differ by less
-    /// than their sizes show
+    /// filter chose them, the most on a core when two shared one, each measurer's block when theirs differ; with `exact`, the bytes too,
+    /// for two blocks that differ by less than their sizes show
     pub fn describe(&self, exact: bool) -> String {
         let threads = format!("{} thread{}", self.measurers, if self.measurers == 1 { "" } else { "s" });
         let cores = if self.cores == "ranked" { String::new() } else { format!(" latency-cores={}", self.cores) };
-        let on = match self.cpus.as_slice() {
-            [] => String::new(),
-            [cpu] => format!(" on CPU {cpu}"),
-            cpus => format!(" on CPUs {}", cpus.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")),
-        };
+        let size = |b: u64| if exact { format!("{} ({b} B)", bytes(b)) } else { bytes(b) };
+        let at = |m: &Measurer| m.cpu.map_or_else(|| format!("thread {}", m.thread), |cpu| format!("CPU {cpu}"));
+        let list = |n: &[usize]| n.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
         let per_core = if self.per_core > 1 { format!(", {} a core", self.per_core) } else { String::new() };
-        let block = self
-            .block_bytes
-            .map_or(String::new(), |b| if exact { format!(", over {} ({b} B)", bytes(b)) } else { format!(", over {}", bytes(b)) });
+        if !self.placement.windows(2).all(|w| w[0].block_bytes == w[1].block_bytes) {
+            let each: Vec<String> = self
+                .placement
+                .iter()
+                .map(|m| format!("{} over {}", at(m), m.block_bytes.map_or_else(|| "its own extent".to_string(), size)))
+                .collect();
+            return format!("{threads} (latency-threads={}{cores}) on {}, {} an L3{per_core}", self.threads, each.join(", "), self.per_l3);
+        }
+        let cpus: Option<Vec<usize>> = self.placement.iter().map(|m| m.cpu).collect();
+        let threads_of: Vec<usize> = self.placement.iter().map(|m| m.thread).collect();
+        let on = match (self.placement.len(), cpus) {
+            (0, _) => String::new(),
+            (1, Some(cpus)) => format!(" on CPU {}", cpus[0]),
+            (_, Some(cpus)) => format!(" on CPUs {}", list(&cpus)),
+            (1, None) => format!(" on thread {}", threads_of[0]),
+            (_, None) => format!(" on threads {}", list(&threads_of)),
+        };
+        let block = self.block_bytes.map_or(String::new(), |b| format!(", over {}", size(b)));
         format!("{threads} (latency-threads={}{cores}){on}, {} an L3{per_core}{block}", self.threads, self.per_l3)
     }
 }
@@ -341,8 +371,12 @@ pub fn plan(
     if admitted.is_empty() {
         return Err(format!("latency-cores={}: none of the run's threads is on a {} core", settings.cores, settings.cores));
     }
-    // A block given outright is held whole: a thread with less memory is passed over for the next that holds it, never given less
+    // A block given outright is held whole, never given less. Under `all` every eligible thread measures, so each must hold it; under a
+    // count or clean, a thread that can't is passed over for the next that can
     let need = if let Block::Exactly(b) = block { *b } else { 0 };
+    if settings.threads == LatencyThreads::All {
+        holds_all(need, &admitted)?;
+    }
     let eligible: Vec<&Slot> = admitted.iter().copied().filter(|s| s.allocated >= need).collect();
     if eligible.is_empty() {
         let most = admitted.iter().map(|s| s.allocated).max().unwrap_or(0);
@@ -356,9 +390,11 @@ pub fn plan(
     let mut cores = HashSet::new();
     let one_a_core: Vec<&Slot> = eligible.iter().copied().filter(|s| cores.insert(s.core)).collect();
     // An L3 step's block, `scale` of the reach with `k` measurers on its L3 and `n` on the measurer's core, floored by the L2 each of
-    // those has; and the estimated share of its chase in the L3
+    // those has. The estimated share of a block's chase in the L3: what the L2 doesn't hold, while the block is inside what a thread
+    // reaches of its L3 with `k` measuring; past that the model would count the DRAM's part as the L3's, so there is none
     let l3_block = |scale: f64, k: usize, n: usize| granules((scale * reach(k)).max((sizes.l2_each(n) + (64 << 10)) as f64));
-    let share = |block: usize, n: usize| 1.0 - sizes.l2_each(n) as f64 / block as f64;
+    let share = |block: usize, n: usize, k: usize| (block as f64 <= reach(k)).then(|| 1.0 - sizes.l2_each(n) as f64 / block as f64);
+    let meets = |share: Option<f64>| share.is_some_and(|s| s >= settings.hits);
 
     let measurers: Vec<&Slot> = match settings.threads {
         LatencyThreads::All => eligible,
@@ -372,16 +408,17 @@ pub fn plan(
             (Tier::L3, Block::L3 { scale }) => by_l3(&one_a_core)
                 .into_iter()
                 .flat_map(|on| {
-                    // On each L3, the most that reach the target, each holding its block whole: a thread with less memory is passed
-                    // over, not given a smaller block that would miss it. Else one, the first that holds one thread's block
+                    // On each L3, the most whose blocks reach the target, each block as much of the step's as the thread's memory
+                    // holds: a thread whose smaller block would miss is passed over. Else the one thread whose block comes nearest
                     let most = (1..=on.len()).rev().find_map(|k| {
                         let b = l3_block(*scale, k, 1);
-                        let holding: Vec<&Slot> = on.iter().copied().filter(|s| s.allocated >= b).take(k).collect();
-                        (share(b, 1) >= settings.hits && holding.len() == k).then_some(holding)
+                        let meeting: Vec<&Slot> = on.iter().copied().filter(|s| meets(share(b.min(s.allocated), 1, k))).take(k).collect();
+                        (meeting.len() == k).then_some(meeting)
                     });
                     most.unwrap_or_else(|| {
                         let b = l3_block(*scale, 1, 1);
-                        vec![on.iter().copied().find(|s| s.allocated >= b).unwrap_or(on[0])]
+                        let of = |s: &Slot| share(b.min(s.allocated), 1, 1).unwrap_or(f64::NEG_INFINITY);
+                        vec![on.iter().copied().fold(on[0], |best, s| if of(s) > of(best) { s } else { best })]
                     })
                 })
                 .collect(),
@@ -397,6 +434,8 @@ pub fn plan(
 
     let on_l3 = by_l3(&measurers);
     let per_l3 = on_l3.iter().map(Vec::len).max().unwrap_or(0);
+    // The measurers on a measurer's L3, itself among them
+    let k_of = |slot: &Slot| on_l3.iter().find(|on| on.iter().any(|s| s.thread == slot.thread)).map_or(1, Vec::len);
     // The measurers on a measurer's core, itself among them
     let on_core = |slot: &Slot| measurers.iter().filter(|s| s.core == slot.core).count().max(1);
     let per_core = measurers.iter().map(|s| on_core(s)).max().unwrap_or(1);
@@ -405,10 +444,7 @@ pub fn plan(
             (_, Block::Exactly(b)) => Some(granules(*b as f64)),
             (_, Block::Whole) => Some(granules(slot.allocated as f64)),
             (Tier::Private, Block::Private(size)) => Some(granules(size(on_core(slot)) as f64).min(slot.allocated)),
-            (Tier::L3, Block::L3 { scale }) => {
-                let k = on_l3.iter().find(|on| on.iter().any(|s| s.thread == slot.thread)).map_or(1, Vec::len);
-                Some(l3_block(*scale, k, on_core(slot)).min(slot.allocated))
-            }
+            (Tier::L3, Block::L3 { scale }) => Some(l3_block(*scale, k_of(slot), on_core(slot)).min(slot.allocated)),
             (Tier::Dram | Tier::DramFull, Block::CleanDram) => {
                 Some(granules(DRAM_MIN_BYTES.max(DRAM_L3S * sizes.l3) as f64).min(slot.allocated))
             }
@@ -426,9 +462,11 @@ pub fn plan(
         roles[slot.thread] = Role::Measures { extent: extent_of(slot) };
     }
     let blocks: Vec<usize> = measurers.iter().filter_map(|s| extent_of(s)).collect();
+    // The lowest any measurer has; none when one's block is past the reach, or the step keeps its own extent
     let l3_share = (tier == Tier::L3)
-        .then(|| measurers.iter().filter_map(|s| Some(share(extent_of(s)?, on_core(s)))).fold(f64::INFINITY, f64::min))
-        .filter(|s| s.is_finite());
+        .then(|| measurers.iter().map(|s| share(extent_of(s)?, on_core(s), k_of(s))).collect::<Option<Vec<f64>>>())
+        .flatten()
+        .and_then(|shares| shares.into_iter().reduce(f64::min));
     let clean = settings.threads == LatencyThreads::Clean;
     let record = Record {
         threads: settings.threads.to_string(),
@@ -436,14 +474,33 @@ pub fn plan(
         measurers: measurers.len(),
         per_l3,
         per_core,
-        cpus: measurers.iter().filter_map(|s| s.cpu).collect(),
+        placement: measurers
+            .iter()
+            .map(|s| Measurer { thread: s.thread, cpu: s.cpu, block_bytes: extent_of(s).map(|b| b as u64) })
+            .collect(),
         block_bytes: blocks.iter().min().map(|&b| b as u64),
         l2_bytes: (tier == Tier::L3).then_some(sizes.l2 as u64),
         l3_share_estimated: l3_share,
         target: (clean && tier == Tier::L3).then_some(settings.hits),
-        target_unmet: clean && tier == Tier::L3 && l3_share.is_some_and(|s| s < settings.hits),
+        target_unmet: clean && tier == Tier::L3 && !meets(l3_share),
     };
     Ok(Plan { roles, allocated, record })
+}
+
+/// Every one of `threads` holds `need` bytes, as `latency-threads=all` asks of a block given outright, or the first that doesn't, with its
+/// memory (TODO 119). A step that plans nothing, every thread measuring, is checked the same (`runner::plan_latency_steps`).
+pub fn holds_all(need: usize, threads: &[&Slot]) -> Result<(), String> {
+    match threads.iter().find(|s| s.allocated < need) {
+        None => Ok(()),
+        Some(s) => Err(format!(
+            "its extent is {} a measurer, and every thread measures under latency-threads=all, but thread {}{} has {}: give it a smaller \
+             extent, or more memory=",
+            bytes(need as u64),
+            s.thread,
+            s.cpu.map_or(String::new(), |cpu| format!(" (CPU {cpu})")),
+            bytes(s.allocated as u64)
+        )),
+    }
 }
 
 /// `slots` by their L3, each L3's in the run's order, the L3s by their first thread
@@ -497,7 +554,7 @@ mod tests {
         assert!(!at(0.70).target_unmet);
 
         let dram = plan(&Settings::CLEAN, Tier::Dram, &Block::CleanDram, &slots, &sizes, &reach).unwrap();
-        assert_eq!((dram.record.measurers, dram.role(0), dram.record.cpus.as_slice()), (1, Role::Measures { extent: Some(GIB) }, &[0][..]));
+        assert_eq!((dram.record.measurers, dram.role(0), dram.record.cpus()), (1, Role::Measures { extent: Some(GIB) }, vec![0]));
         assert_eq!(dram.record.target, None, "DRAM has no L3 share to reach");
         assert_eq!(dram.allocated, [4 * GIB; 6]);
     }
@@ -546,7 +603,7 @@ mod tests {
         let all = plan(&efficiency, Tier::Private, &Block::Private(&half_l2), &slots, &sizes, &reach).unwrap();
         let measures = Role::Measures { extent: Some(512 << 10) };
         assert_eq!(all.roles, [Role::SitsOut, Role::SitsOut, Role::SitsOut, Role::SitsOut, measures, measures]);
-        assert_eq!(all.record.cpus, [4, 5]);
+        assert_eq!(all.record.cpus(), [4, 5]);
         let (uniform, _) = petz007();
         assert!(plan(&efficiency, Tier::Private, &Block::Private(&half_l2), &uniform, &sizes, &reach).unwrap_err().contains("efficiency"));
     }
@@ -589,10 +646,7 @@ mod tests {
         assert!(refused.contains("2.00 GiB") && refused.contains("1.00 GiB"), "{refused}");
         slots[2].allocated = 4 * GIB;
         let fits = plan(&Settings::CLEAN, Tier::Dram, &Block::Exactly(2 * GIB), &slots, &sizes, &reach).unwrap();
-        assert_eq!(
-            (fits.role(0), fits.role(2), fits.record.cpus.as_slice()),
-            (Role::SitsOut, Role::Measures { extent: Some(2 * GIB) }, &[2][..])
-        );
+        assert_eq!((fits.role(0), fits.role(2), fits.record.cpus()), (Role::SitsOut, Role::Measures { extent: Some(2 * GIB) }, vec![2]));
     }
 
     /// Clean on an L3 passes over a thread that can't hold the block: three of four threads at 90.6%, where taking the first three and
@@ -604,7 +658,7 @@ mod tests {
         let sizes = Sizes { l2: MIB, l2_smt: None, l3: 64 * MIB };
         // 32/k MiB: 8 MiB at four threads, 87.5%; 10.67 MiB at three, 90.6%
         let clean = plan(&Settings::CLEAN, Tier::L3, &L3_HALF, &slots, &sizes, &reach_of(64 * MIB)).unwrap();
-        assert_eq!(clean.record.cpus, [0, 1, 3]);
+        assert_eq!(clean.record.cpus(), [0, 1, 3]);
         assert!(!clean.record.target_unmet && clean.record.l3_share_estimated.unwrap() > 0.9);
         assert_eq!(clean.role(2), Role::SitsOut);
     }
@@ -636,8 +690,8 @@ mod tests {
         let siblings = Settings { cores: LatencyCores::Performance, ..Settings::default() };
         let both = plan(&siblings, Tier::Private, &Block::Private(&half_l2), &slots, &sizes, &reach_of(32 * MIB)).unwrap();
         assert_eq!((both.role(0), both.role(4), both.record.per_core), (Role::Measures { extent: Some(MIB / 4) }, both.role(0), 2));
-        // An L3 step's floor: the half L2 a sibling has, plus 64 KiB, above half a small reach
-        let l3 = plan(&siblings, Tier::L3, &L3_HALF, &slots, &sizes, &reach_of(MIB / 2)).unwrap();
+        // An L3 step's floor: the half L2 a sibling has, plus 64 KiB, above half the reach of eight (1 MiB) and inside it
+        let l3 = plan(&siblings, Tier::L3, &L3_HALF, &slots, &sizes, &reach_of(8 * MIB)).unwrap();
         assert_eq!(l3.role(0), Role::Measures { extent: Some(MIB / 2 + (64 << 10)) });
         assert!((l3.record.l3_share_estimated.unwrap() - (1.0 - 0.5 / (0.5 + 1.0 / 16.0))).abs() < 1e-9);
     }
@@ -649,9 +703,60 @@ mod tests {
         let dram = plan(&Settings::CLEAN, Tier::Dram, &Block::CleanDram, &slots, &sizes, &reach_of(15 * MIB)).unwrap().record;
         assert_eq!(dram.describe(false), "1 thread (latency-threads=clean) on CPU 0, 1 an L3, over 1.00 GiB");
         assert_eq!(dram.describe(true), "1 thread (latency-threads=clean) on CPU 0, 1 an L3, over 1.00 GiB (1073741824 B)");
-        let moved = Record { cpus: vec![2], ..dram.clone() };
+        let moved = Record { placement: vec![Measurer { cpu: Some(2), ..dram.placement[0].clone() }], ..dram.clone() };
         assert_ne!(dram.measuring(), moved.measuring());
         assert_eq!(dram.measuring(), dram.clone().measuring());
+        // Two measurers over blocks of their own: each named with its own
+        let two = Record {
+            measurers: 2,
+            placement: vec![Measurer { thread: 0, cpu: Some(0), block_bytes: Some(512 << 20) }, Measurer {
+                thread: 1,
+                cpu: Some(2),
+                block_bytes: Some(3 << 29),
+            }],
+            block_bytes: Some(512 << 20),
+            ..dram.clone()
+        };
+        assert_eq!(two.describe(false), "2 threads (latency-threads=clean) on CPU 0 over 512.00 MiB, CPU 2 over 1.50 GiB, 1 an L3");
+    }
+
+    /// TODO 119 (Astra's recheck of c1bfae6): under `all` every thread measures, so a block given outright must fit every one, the
+    /// short one named; and a step that plans nothing is held to the same
+    #[test]
+    fn all_needs_every_thread_to_hold_a_block_given_outright() {
+        let slots: Vec<Slot> = (0..4).map(|t| slot(t, t, 0, MIB)).collect();
+        let sizes = Sizes { l2: 256 << 10, l2_smt: None, l3: 16 * MIB };
+        let all_performance = Settings { cores: LatencyCores::Performance, ..Settings::default() };
+        let refused = plan(&all_performance, Tier::Dram, &Block::Exactly(2 * MIB), &slots, &sizes, &reach_of(15 * MIB)).unwrap_err();
+        assert!(refused.contains("thread 0 (CPU 0) has 1.00 MiB"), "{refused}");
+        let mut one_short = slots.clone();
+        for s in &mut one_short {
+            s.allocated = 4 * MIB;
+        }
+        one_short[3].allocated = MIB;
+        let refused = holds_all(2 * MIB, &one_short.iter().collect::<Vec<_>>()).unwrap_err();
+        assert!(refused.contains("thread 3 (CPU 3) has 1.00 MiB"), "{refused}");
+        assert!(holds_all(MIB, &slots.iter().collect::<Vec<_>>()).is_ok());
+    }
+
+    /// Clean on an L3 judges each thread by the share its own block reaches, its memory capping it: with a 1 MiB L2, threads with 2 and 16
+    /// MiB short of the preferred 32 MiB, the second's 16 MiB reaches 93.75% where the first's 2 MiB reads 50% (Astra's recheck of
+    /// c1bfae6). And a block past a thread's reach of the L3 has no estimate, the target not shown met
+    #[test]
+    fn clean_judges_each_threads_l3_block_as_its_memory_caps_it() {
+        let slots = vec![slot(0, 0, 0, 2 * MIB), slot(1, 1, 0, 16 * MIB)];
+        let sizes = Sizes { l2: MIB, l2_smt: None, l3: 64 * MIB };
+        let clean = plan(&Settings::CLEAN, Tier::L3, &L3_HALF, &slots, &sizes, &reach_of(64 * MIB)).unwrap();
+        assert_eq!((clean.record.cpus(), clean.role(1)), (vec![1], Role::Measures { extent: Some(16 * MIB) }));
+        assert!(!clean.record.target_unmet && (clean.record.l3_share_estimated.unwrap() - 0.9375).abs() < 1e-9);
+
+        let (slots, sizes) = petz007();
+        let four = Settings { threads: LatencyThreads::Count(1), ..Settings::default() };
+        let past = plan(&four, Tier::L3, &Block::L3 { scale: 4.0 }, &slots, &sizes, &reach_of(15 * MIB)).unwrap();
+        assert_eq!(past.record.block_bytes, Some(60 * MIB as u64));
+        assert_eq!(past.record.l3_share_estimated, None, "a 60 MiB block past the 15 MiB reach has no estimate");
+        let clean_past = plan(&Settings::CLEAN, Tier::L3, &Block::L3 { scale: 4.0 }, &slots, &sizes, &reach_of(15 * MIB)).unwrap();
+        assert!(clean_past.record.target_unmet && clean_past.record.l3_share_estimated.is_none());
     }
 
     #[test]

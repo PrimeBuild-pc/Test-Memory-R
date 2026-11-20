@@ -344,7 +344,7 @@ fn plan_latency_steps(
     defs: &mut [TestDefinition], blocks: &HashMap<usize, Vec<crate::AllocationBlock>>, cpus: Option<&[usize]>, cache_info: &CacheInfo,
 ) -> Result<(), String> {
     use crate::measure::{Block, Sizes, Slot};
-    if !defs.iter().any(|d| d.config.latency.is_some_and(|s| s.constrains())) {
+    if !defs.iter().any(|d| d.config.latency.is_some()) {
         return Ok(());
     }
     let topology = crate::cpu_topology::get_cpu_topology();
@@ -373,8 +373,7 @@ fn plan_latency_steps(
     let sizes = Sizes { l2, l2_smt, l3: cache_info.l3_cache };
     let reach = |k: usize| calibration.as_ref().and_then(|c| c.l3_reach(k)).unwrap_or(cache_info.l3_cache as f64 / k.max(1) as f64);
     for def in defs.iter_mut() {
-        let Some(settings) = def.config.latency.filter(|s| s.constrains()) else { continue };
-        let Some(tier) = def.config.latency_tier else { continue };
+        let (Some(settings), Some(tier)) = (def.config.latency, def.config.latency_tier) else { continue };
         // What the step's extent asks of a measurer's block; who measures is its tier's, whatever the extent (`measure::Block`). An L1 or
         // L2 share is sized with `n` of a core's threads measuring, not the run's threads a core
         let threads = slots.len();
@@ -391,6 +390,14 @@ fn plan_latency_steps(
             ExtentMode::Absolute { size_bytes } => Block::Exactly(*size_bytes),
             ExtentMode::CacheTotal { .. } => Block::Exactly(def.config.calculate_extent_size(def.actual_name, usize::MAX)),
         };
+        // Every thread measures, as the test always has, when the settings ask for no fewer: no plan, but a block given outright must
+        // fit each thread, as under a plan's `all` (`measure::holds_all`)
+        if !settings.constrains() {
+            if let Block::Exactly(need) = block {
+                crate::measure::holds_all(need, &slots.iter().collect::<Vec<_>>()).map_err(|e| format!("{}: {e}", def.display_name))?;
+            }
+            continue;
+        }
         let plan =
             crate::measure::plan(&settings, tier, &block, &slots, &sizes, &reach).map_err(|e| format!("{}: {e}", def.display_name))?;
         log::info!(
@@ -5553,7 +5560,7 @@ pub mod test_support {
                 measurers: 1,
                 per_l3: 1,
                 per_core: 1,
-                cpus: vec![0],
+                placement: vec![crate::measure::Measurer { thread: 0, cpu: Some(0), block_bytes: Some(32 * KIB as u64) }],
                 block_bytes: Some(32 * KIB as u64),
                 l2_bytes: None,
                 l3_share_estimated: None,

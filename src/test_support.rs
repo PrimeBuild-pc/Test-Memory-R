@@ -494,7 +494,7 @@ impl PerfStep {
             measurers,
             per_l3: measurers,
             per_core: 1,
-            cpus: vec![0],
+            placement: vec![crate::measure::Measurer { thread: 0, cpu: Some(0), block_bytes: Some(block_bytes) }],
             block_bytes: Some(block_bytes),
             l2_bytes: l3_share.map(|_| 1014 << 10),
             l3_share_estimated: l3_share,

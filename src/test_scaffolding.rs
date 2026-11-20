@@ -749,7 +749,7 @@ mod tests {
             measurers: 1,
             per_l3: 1,
             per_core: 1,
-            cpus: vec![0],
+            placement: vec![crate::measure::Measurer { thread: 0, cpu: Some(0), block_bytes: Some(4 * MIB as u64) }],
             block_bytes: Some(4 * MIB as u64),
             l2_bytes: None,
             l3_share_estimated: None,

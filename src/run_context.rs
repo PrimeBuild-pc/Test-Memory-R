@@ -1271,7 +1271,8 @@ fn setting_changes(b: &TestConfigSnapshot, c: &TestConfigSnapshot) -> Vec<(&'sta
         _ => true,
     };
     if differs {
-        let exact = matches!((&b.measure, &c.measure), (Some(x), Some(y)) if x.block_bytes != y.block_bytes);
+        // The bytes when the two read alike without them: a block a few KiB apart
+        let exact = matches!((&b.measure, &c.measure), (Some(x), Some(y)) if x.describe(false) == y.describe(false));
         let measured = |t: &TestConfigSnapshot| t.measure.as_ref().map_or_else(|| "every thread".to_string(), |r| r.describe(exact));
         note("measurers", measured(b), measured(c));
     }
@@ -1604,7 +1605,7 @@ mod tests {
             measurers: 2,
             per_l3: 1,
             per_core: 1,
-            cpus: vec![0],
+            placement: Vec::new(),
             block_bytes: Some(4 * MIB as u64),
             l2_bytes: None,
             l3_share_estimated: None,
@@ -1689,30 +1690,34 @@ mod tests {
     /// thread's, so one with a plan differs from it, and two alike don't
     #[test]
     fn a_step_measured_by_other_threads_is_a_setting_that_differs() {
-        use crate::measure::Record;
-        let record = |measurers: usize, cores: &str| crate::measure::Record {
+        use crate::measure::{Measurer, Record};
+        // Measurers on `cpus`, threads 0 up, each over `block`
+        let on = |cpus: &[usize], cores: &str, block: u64| Record {
             threads: "clean".to_string(),
             cores: cores.to_string(),
-            measurers,
-            per_l3: measurers,
+            measurers: cpus.len(),
+            per_l3: cpus.len(),
             per_core: 1,
-            cpus: vec![0],
-            block_bytes: Some(1 << 30),
+            placement: cpus
+                .iter()
+                .enumerate()
+                .map(|(thread, &cpu)| Measurer { thread, cpu: Some(cpu), block_bytes: Some(block) })
+                .collect(),
+            block_bytes: Some(block),
             l2_bytes: None,
             l3_share_estimated: None,
             target: None,
             target_unmet: false,
         };
-        let with = |measure: Option<crate::measure::Record>| {
-            plan_of([step("Lat-L1-Read"), TestConfigSnapshot { measure, ..step("Lat-DRAM-Read-Clean") }])
-        };
-        let differs = |a: Option<crate::measure::Record>, b: Option<crate::measure::Record>| {
+        let one = |cores: &str| on(&[0], cores, 1 << 30);
+        let with = |measure: Option<Record>| plan_of([step("Lat-L1-Read"), TestConfigSnapshot { measure, ..step("Lat-DRAM-Read-Clean") }]);
+        let differs = |a: Option<Record>, b: Option<Record>| {
             let (changes, matched) = compare_plans(&with(a), &with(b));
             let settings: Vec<_> =
                 changes.settings.iter().map(|s| (s.step, s.setting.clone(), s.baseline.clone(), s.current.clone())).collect();
             (settings, matched.iter().map(|m| m.settings_differ).collect::<Vec<_>>())
         };
-        let (settings, flagged) = differs(Some(record(1, "ranked")), Some(Record { cpus: vec![0, 2], ..record(2, "ranked") }));
+        let (settings, flagged) = differs(Some(one("ranked")), Some(on(&[0, 2], "ranked", 1 << 30)));
         assert_eq!(flagged, [false, true]);
         assert_eq!(settings, [(
             2,
@@ -1721,17 +1726,16 @@ mod tests {
             "2 threads (latency-threads=clean) on CPUs 0, 2, 2 an L3, over 1.00 GiB".to_string()
         )]);
         assert_eq!(
-            differs(None, Some(record(1, "efficiency"))).0[0].3,
+            differs(None, Some(one("efficiency"))).0[0].3,
             "1 thread (latency-threads=clean latency-cores=efficiency) on CPU 0, 1 an L3, over 1.00 GiB"
         );
-        assert_eq!(differs(None, Some(record(1, "ranked"))).0[0].2, "every thread");
-        assert!(differs(Some(record(1, "ranked")), Some(record(1, "ranked"))).0.is_empty());
+        assert_eq!(differs(None, Some(one("ranked"))).0[0].2, "every thread");
+        assert!(differs(Some(one("ranked")), Some(one("ranked"))).0.is_empty());
         assert!(differs(None, None).0.is_empty());
         // The review of 2026-11-20: the sole measurer moved to another CPU, and a 7 GiB block 4 KiB smaller, which reads 7.00 GiB as well
-        let moved = differs(Some(record(1, "ranked")), Some(Record { cpus: vec![2], ..record(1, "ranked") }));
+        let moved = differs(Some(one("ranked")), Some(on(&[2], "ranked", 1 << 30)));
         assert_eq!(moved.0[0].3, "1 thread (latency-threads=clean) on CPU 2, 1 an L3, over 1.00 GiB");
-        let seven = |bytes: u64| Some(Record { block_bytes: Some(bytes), ..record(1, "ranked") });
-        let smaller = differs(seven(7 << 30), seven((7 << 30) - 4096));
+        let smaller = differs(Some(on(&[0], "ranked", 7 << 30)), Some(on(&[0], "ranked", (7 << 30) - 4096)));
         assert_eq!(
             (smaller.0[0].2.as_str(), smaller.0[0].3.as_str()),
             (
@@ -1739,6 +1743,15 @@ mod tests {
                 "1 thread (latency-threads=clean) on CPU 0, 1 an L3, over 7.00 GiB (7516188672 B)"
             )
         );
+        // Astra's recheck of c1bfae6: two measurers, the first's block the same and the smallest, the second's 1 GiB, then 1.5 GiB
+        let mixed = |second: u64| {
+            let mut r = on(&[0, 2], "ranked", 512 << 20);
+            r.placement[1].block_bytes = Some(second);
+            r
+        };
+        let grown = differs(Some(mixed(1 << 30)), Some(mixed(3 << 29)));
+        assert_eq!(grown.1, [false, true], "the second measurer's block grew, though the smallest didn't");
+        assert_eq!(grown.0[0].3, "2 threads (latency-threads=clean) on CPU 0 over 512.00 MiB, CPU 2 over 1.50 GiB, 2 an L3");
     }
 
     /// TODO 72: a config's two tests on one function without ids, each run once in file order, are two tests with their own settings: the

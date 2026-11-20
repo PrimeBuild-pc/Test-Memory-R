@@ -325,11 +325,15 @@ fn clean_latency_note(f: &dyn ReportFormatter, grid: &super::perf::Grid) -> Stri
         } else {
             format!("on the L3, {}", chase(plan.per_l3, plan.block_bytes))
         };
-        if let Some(share) = plan.l3_share_estimated {
-            part.push_str(&format!(", an estimated {:.0}% of it in the L3", share * 100.0));
-            if let (true, Some(target)) = (plan.target_unmet, plan.target) {
-                part.push_str(&format!(", short of the {:.0}% target even with one", target * 100.0));
+        match plan.l3_share_estimated {
+            Some(share) => {
+                part.push_str(&format!(", an estimated {:.0}% of it in the L3", share * 100.0));
+                if let (true, Some(target)) = (plan.target_unmet, plan.target) {
+                    part.push_str(&format!(", short of the {:.0}% target even with one", target * 100.0));
+                }
             }
+            // A block past what a thread reaches of its L3: part of the chase is the DRAM's, which the estimate can't tell from the L3's
+            None => part.push_str(", past what a thread reaches of its L3, so no estimate of its share there"),
         }
         parts.push(part);
     }
