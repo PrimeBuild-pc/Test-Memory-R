@@ -127,13 +127,12 @@ impl CacheTarget {
     /// DRAM-Full uses the entire thread allocation.
     pub const DRAM_FULL_DEFAULT: Self = Self::DRAMFull;
 
-    /// Map CacheTarget to the corresponding calibration CacheTier
-    fn to_calibration_tier(self) -> Option<crate::calibration::CacheTier> {
+    /// The measured tier that supplies this target's size. DRAM scales the L3 edge.
+    fn sizing_tier(self) -> Option<crate::calibration::CacheTier> {
         match self {
             CacheTarget::L1 { .. } => Some(crate::calibration::CacheTier::L1),
             CacheTarget::L2 { .. } => Some(crate::calibration::CacheTier::L2),
-            CacheTarget::L3 { .. } => Some(crate::calibration::CacheTier::L3),
-            CacheTarget::Dram { .. } => Some(crate::calibration::CacheTier::Dram),
+            CacheTarget::L3 { .. } | CacheTarget::Dram { .. } => Some(crate::calibration::CacheTier::L3),
             CacheTarget::DRAMFull => None, // Always uses full allocation
         }
     }
@@ -156,7 +155,7 @@ impl CacheTarget {
     fn calculate_from_calibration(
         &self, cal: &crate::calibration::CalibrationResults, cache_info: &CacheInfo, thread_count: usize, per_core: usize,
     ) -> Option<usize> {
-        let tier = self.to_calibration_tier()?;
+        let tier = self.sizing_tier()?;
         let tier_result = cal.tiers.get(&tier)?;
 
         // The calibrated optimal_size: the largest working set that stays in this tier on one thread (anchor A). Each target scales its own
@@ -292,8 +291,8 @@ impl CacheTarget {
     /// Get a human-readable name that reflects actual calculation with thread count and VM status. Shows `[cal]` suffix when calibration
     /// data is active for this tier.
     pub fn name_with_context(&self, thread_count: usize, is_vm: bool) -> String {
-        let has_cal =
-            get_calibration_data().is_some_and(|cal| self.to_calibration_tier().is_some_and(|tier| cal.tiers.contains_key(&tier)));
+        let calibration = get_calibration_data();
+        let has_cal = calibration.as_ref().is_some_and(|cal| self.sizing_tier().is_some_and(|tier| cal.tiers.contains_key(&tier)));
         let suffix = if has_cal { " [cal]" } else { "" };
 
         match self {
@@ -315,7 +314,7 @@ impl CacheTarget {
             }
             // `[cal]` only when the calibrated edge, not CPUID's L3, is what it is a multiple of (`dram_base`)
             CacheTarget::Dram { scale } => {
-                let calibrated = has_cal && Self::dram_base(get_calibration_data().as_deref(), get_cache_info()).1;
+                let calibrated = Self::dram_base(calibration.as_deref(), get_cache_info()).1;
                 format!("DRAM{}{}", Self::format_scale(*scale), if calibrated { " [cal]" } else { "" })
             }
             CacheTarget::DRAMFull => "DRAM-Full".to_string(),
@@ -10946,17 +10945,16 @@ mod l3_share {
         reset_run_settings();
         let calibrated = |l3_edge: usize| {
             let mut cal = crate::calibration::CalibrationResults::new(crate::calibration::CpuSignature::default());
-            for (tier, optimal_size) in [(crate::calibration::CacheTier::L3, l3_edge), (crate::calibration::CacheTier::Dram, 1 << 30)] {
-                cal.add_tier_result(crate::calibration::TierCalibrationResult {
-                    tier,
-                    optimal_size,
-                    median_latency_ns: 30.0,
-                    spread_ratio: 1.1,
-                    probes_attempted: 1,
-                    converged: true,
-                    fallback_used: false,
-                });
-            }
+            // A partial calibration has an L3 edge even when its DRAM probe was skipped.
+            cal.add_tier_result(crate::calibration::TierCalibrationResult {
+                tier: crate::calibration::CacheTier::L3,
+                optimal_size: l3_edge,
+                median_latency_ns: 30.0,
+                spread_ratio: 1.1,
+                probes_attempted: 1,
+                converged: true,
+                fallback_used: false,
+            });
             set_calibration_data(Some(cal));
         };
         let xeon = CacheInfo { l3_cache: 480 * MIB, ..Default::default() };
