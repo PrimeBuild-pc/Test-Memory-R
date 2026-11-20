@@ -312,7 +312,7 @@ On branch `feat/summary-grid-119`, one commit a step:
    fit the CPUID 480 MiB L3; the calibration's DRAM: 140.7). The run line and plan table showed a planned step's test extent on
    every thread; fixed (f2cfd4e).
 6. Done: docs (5298be9, 51af41f); the spill table against main's, kernel for kernel the same but the new kernel's one gpr reload;
-   the batch's full `tools/ci_local.py` (builds\51af41fe3727-1af69b810aa3282b). Merging to main is the owner's call.
+   the batch's full `tools/ci_local.py` (builds\51af41fe3727-1af69b810aa3282b). Merged to main and pushed 2026-11-20 (233e28b).
    Review 2026-11-20 (`119-implementation-review-2026-11-20.md`), four findings, each checked against the code and fixed: a config's
    latency tests lost their settings (now their registration's, the entry's `latency_threads`/`latency_hits`/`latency_cores` over
    them, the command line's over both; refused on other tests); an L1/L2 measurer's block counted its idle sibling (now sized for the
@@ -335,7 +335,8 @@ On branch `feat/summary-grid-119`, one commit a step:
    43.5-94.6 MiB, to 64-128 MiB) and DRAMSmall's bandwidth was within 1% of DRAMFull's; the metal box's 104 MiB edge is CPUID's.
    plan=perf here on 2fc10de (2026-11-20): DRAM*4 1920 MiB a thread; Lat-DRAM-Read 138.7 ns, clean 138.3, DRAMFull 139.3;
    Spd-DRAMSmall read 62631 MiB/s, DRAMFull 61938 (write and copy within 1.4%); 5 min 27 s, as before.
-7. Later, on the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
+7. Queued for the next hardware run set (the owner, 2026-11-20: a final validation before TODO 119 closes), as
+   `hw-pass\queues\<host>-119.txt`, commented out until that set is approved. On the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
    (`latency-cores=`), and the metal box (the L3 groups across processor groups).
 
 Not built, deferred: the loaded tests' choosable measurer (latency-cores= for Lat-Loaded/Turnaround), and L2 sharing (an Intel
