@@ -138,6 +138,19 @@ impl CacheTarget {
         }
     }
 
+    /// The L3 a DRAM target is a multiple of, and whether it is the calibration's (TODO 119): one L3 instance as CPUID gives it, or the
+    /// calibration's L3 edge where that is larger. The edge is where one thread's latency leaves the L3's, which on a CPU whose L3 latency
+    /// climbs the whole way is far inside the cache: on the Xeon 6975P-C (TODO 22's 35-70 ns climb) 19.3 MiB of its 480 MiB, so four of
+    /// them were 77 MiB a thread, 308 MiB on four threads, which the L3 held. Lat-DRAM-Read read 104 ns there against the whole memory's
+    /// 138, and Spd-DRAMSmall's read 33% over Spd-DRAMFull's; on the desktops, where the edge is 68-90% of CPUID's, the two agree to 1%.
+    fn dram_base(cal: Option<&crate::calibration::CalibrationResults>, cache_info: &CacheInfo) -> (f64, bool) {
+        let cpuid = cache_info.l3_cache as f64;
+        match cal.and_then(|c| c.tiers.get(&crate::calibration::CacheTier::L3)).map(|t| t.optimal_size as f64) {
+            Some(edge) if edge > cpuid => (edge, true),
+            _ => (cpuid, false),
+        }
+    }
+
     /// Calculate extent size using calibration data (measured tier boundaries).
     /// Returns None if calibration data is unavailable or missing the needed tier.
     fn calculate_from_calibration(
@@ -176,11 +189,10 @@ impl CacheTarget {
                 (reach * scale).max(floor) as usize
             }
             CacheTarget::Dram { scale } => {
-                // DRAM: each thread's working set is sized off the L3-spill threshold (A's L3, one group's). No thread divisor — sharing L3
-                // across threads would make the per-thread region too small for a clean DRAM measurement under multi-thread cache
-                // competition.
-                let cal_l3 = cal.tiers.get(&crate::calibration::CacheTier::L3).map(|t| t.optimal_size as f64).unwrap_or(calibrated);
-                (cal_l3 * scale) as usize
+                // DRAM: each thread's working set is a multiple of one group's L3, the larger of CPUID's and the calibrated edge
+                // (`dram_base`). No thread divisor — sharing L3 across threads would make the per-thread region too small for a clean DRAM
+                // measurement under multi-thread cache competition.
+                (Self::dram_base(Some(cal), cache_info).0 * scale) as usize
             }
             CacheTarget::DRAMFull => return None, // Handled by sentinel
         };
@@ -301,7 +313,11 @@ impl CacheTarget {
                     if total_div == 1 { format!("L3{}", scale_frag) } else { format!("L3/{}{}", total_div, scale_frag) }
                 }
             }
-            CacheTarget::Dram { scale } => format!("DRAM{}{}", Self::format_scale(*scale), suffix),
+            // `[cal]` only when the calibrated edge, not CPUID's L3, is what it is a multiple of (`dram_base`)
+            CacheTarget::Dram { scale } => {
+                let calibrated = has_cal && Self::dram_base(get_calibration_data().as_deref(), get_cache_info()).1;
+                format!("DRAM{}{}", Self::format_scale(*scale), if calibrated { " [cal]" } else { "" })
+            }
             CacheTarget::DRAMFull => "DRAM-Full".to_string(),
         }
     }
@@ -10917,6 +10933,46 @@ mod l3_share {
         set_calibration_data(Some(cal));
         let curve = l3.size_bytes(&cache_info, 16);
         assert!(curve.abs_diff(3 * MIB) <= 2, "on the curve: {curve}");
+        reset_run_settings();
+    }
+
+    /// TODO 119: a calibrated DRAM extent is a multiple of the larger of CPUID's L3 and the calibrated L3 edge: the Xeon 6975P-C's edge,
+    /// 19.3 MiB of its 480 MiB, made `DRAM*4` 77 MiB, which four threads' L3 held; now 1.875 GiB. A desktop's edge below its L3, the
+    /// L3's; an edge past it, the edge's, labelled `[cal]`
+    #[test]
+    fn a_dram_extent_is_past_the_l3_whatever_the_calibrated_edge() {
+        let _settings = RUN_SETTINGS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        const MIB: usize = 1 << 20;
+        reset_run_settings();
+        let calibrated = |l3_edge: usize| {
+            let mut cal = crate::calibration::CalibrationResults::new(crate::calibration::CpuSignature::default());
+            for (tier, optimal_size) in [(crate::calibration::CacheTier::L3, l3_edge), (crate::calibration::CacheTier::Dram, 1 << 30)] {
+                cal.add_tier_result(crate::calibration::TierCalibrationResult {
+                    tier,
+                    optimal_size,
+                    median_latency_ns: 30.0,
+                    spread_ratio: 1.1,
+                    probes_attempted: 1,
+                    converged: true,
+                    fallback_used: false,
+                });
+            }
+            set_calibration_data(Some(cal));
+        };
+        let xeon = CacheInfo { l3_cache: 480 * MIB, ..Default::default() };
+        calibrated(20_221_726);
+        assert_eq!(CacheTarget::DRAM_DEFAULT.size_bytes(&xeon, 4), 1920 * MIB, "4 of CPUID's 480 MiB, not of the 19.3 MiB edge");
+        let desktop = CacheInfo { l3_cache: 16 * MIB, ..Default::default() };
+        calibrated(11_410_029);
+        assert_eq!(CacheTarget::DRAM_DEFAULT.size_bytes(&desktop, 6), 64 * MIB, "petz007: 4 of its 16 MiB L3");
+        calibrated(40 * MIB);
+        assert_eq!(CacheTarget::DRAM_DEFAULT.size_bytes(&desktop, 6), 160 * MIB, "an edge past CPUID's L3, the edge's");
+        // The label says which: an edge past any CPU's L3 is the calibration's, one under any isn't
+        calibrated(1 << 40);
+        assert_eq!(CacheTarget::DRAM_DEFAULT.name_with_context(6, false), "DRAM*4 [cal]");
+        calibrated(MIB);
+        assert_eq!(CacheTarget::DRAM_DEFAULT.name_with_context(6, false), "DRAM*4");
+        set_calibration_data(None);
         reset_run_settings();
     }
 

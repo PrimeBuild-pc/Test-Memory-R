@@ -16,7 +16,7 @@ DRAMFull the same way).
 | L1 | half a core's L1 data cache | `L1/2` |
 | L2 | half a core's L2 | `L2/2` |
 | L3 | half the L3 a thread reaches while the run's other threads in its L3 group use theirs | `L3(6)/2 [cal]`, or from CPUID `L3/6/2` |
-| DRAMSmall | four times one L3 group's L3 | `DRAM*4` |
+| DRAMSmall | four times one L3 group's L3: CPUID's, or the calibrated edge where that is larger | `DRAM*4` |
 | DRAMFull | all of the thread's memory | `DRAM-Full` |
 
 The extent is the memory a test covers, from the start of each thread's memory. Every thread runs

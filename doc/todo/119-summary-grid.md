@@ -327,6 +327,12 @@ On branch `feat/summary-grid-119`, one commit a step:
    4 KiB block change (now `Record::cpus` and the exact block, compared as values); clean L3 capped a short-memory thread after
    choosing the count (now it passes over a thread that can't hold the block). `--disable-pinning`: a sentence in the docs only (the
    owner and Astra).
+   Astra's recheck of c1bfae6 (df334f5): `all` makes every thread hold an outright size; clean L3 judges each thread by its own
+   capped block; no estimate past the L3's reach; the record keeps each measurer's CPU and block. And, the owner's call (2026-11-20),
+   in this batch rather than a TODO of its own: a DRAM target is a multiple of the larger of CPUID's L3 and the calibrated edge. On
+   the dev box the edge, 19.3 MiB of 480, made Lat-DRAM-Read's 4 L3s 77 MiB a thread, which the L3 held: 104 ns against the clean
+   form's 138, and Spd-DRAMSmall's read 33% over Spd-DRAMFull's. On the 2026-11-13 desktops the edge is 68-90% of CPUID's (DRAM*4
+   43.5-94.6 MiB, to 64-128 MiB) and DRAMSmall's bandwidth was within 1% of DRAMFull's; the metal box's 104 MiB edge is CPUID's.
 7. Later, on the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
    (`latency-cores=`), and the metal box (the L3 groups across processor groups).
 

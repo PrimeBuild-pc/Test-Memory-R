@@ -52,7 +52,7 @@ thread's memory.
 | L1 | half the L1 a thread has: a core's L1, split between the run's threads on that core | `L1/2` |
 | L2 | half the L2 a thread has, the same way | `L2/2` |
 | L3 | half the thread's share of its L3 (on a CPU with several L3s, its own group's), and never less than its L2 plus 64 KiB | `L3/6/2`, or `L3(6)/2 [cal]` |
-| DRAM | four times one L3, whatever the thread count | `DRAM*4` |
+| DRAM | four times one L3, whatever the thread count: CPUID's L3, or the calibrated edge where that is larger | `DRAM*4` |
 | DRAMFull | the thread's whole memory | `DRAM-Full` |
 
 **`[cal]`** means the size came from this machine's cache calibration in `tmr-cfg.json`, which the
@@ -119,10 +119,13 @@ summary's L3 and Memory rows show both.
   results file names each thread's role in the step, `measures` or `sits out`.
 
 Where the two forms part, the every-thread one reads its tier less cleanly. On an EC2 r8i.2xlarge
-(a Xeon 6975P-C, 4 threads, 2026-11-19) the calibration reaches 19.3 MiB of L3 for a thread, so
-Lat-DRAM-Read's four L3s are 77 MiB a thread, 308 MiB in all, which its 480 MiB L3 can hold: it read
-103-106 ns, the clean form over 7 GiB 137.8-137.9, as the calibration's DRAM did (140.7). Its L3
-read 25.4 ns every thread (an estimated 30% of it in the L2), and 30.4-30.5 clean.
+(a Xeon 6975P-C, 4 threads, 2026-11-19) the L3 read 25.4 ns every thread (an estimated 30% of it
+in the L2), and 30.4-30.5 clean. Its DRAM read showed why a DRAM extent is a multiple of CPUID's L3
+and not only the calibrated edge: the calibration reaches 19.3 MiB of the 480 MiB L3 for a thread
+(its L3 latency climbs the whole way), so four of those were 77 MiB a thread, 308 MiB in all, which
+the L3 held. Lat-DRAM-Read read 103-106 ns there, the clean form over 7 GiB 137.8-137.9, as the
+calibration's DRAM did (140.7), and Spd-DRAMSmall's read was 33% over Spd-DRAMFull's. Four of
+CPUID's 480 MiB are 1.875 GiB a thread.
 
 Lat-L3-Read-Clean and Lat-DRAM-Read-Clean are Lat-L3-Read and Lat-DRAM-Read with
 `latency-threads=clean` built in. A `latency-threads=` on the command line overrides it, on every
