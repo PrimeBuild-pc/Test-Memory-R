@@ -96,7 +96,8 @@ L2's. The clean form runs the same chase on fewer threads, so each has more of t
 summary's L3 and Memory rows show both.
 
 - **`latency-threads=`** sets which threads measure: `all` (the default), `clean`, or a count. A
-  count takes that many threads, one a core, in the run's order. `clean` on an L3 test takes as
+  count takes that many threads, one a core, in the run's order, and a measurer's L1 and L2
+  blocks are sized for itself alone, its sibling sitting out. `clean` on an L3 test takes as
   many threads to each L3 as keep the chase's estimated share in the L3 at `latency-hits=` (88% by
   default) or above; when even one thread falls short, one thread measures and the summary says
   the target wasn't met. On a DRAM test `clean` is one thread over at least 1 GiB and 32 L3s, so
@@ -286,6 +287,12 @@ so it runs unsealed.
     "extent": { "mode": "cache", "target": "L2*0.8" }, "chunk": { "mode": "whole" },
     "duration_secs": 10, "min_duration_secs": 10 }
   ```
+
+  An entry can give `"latency_threads"`, `"latency_hits"` and `"latency_cores"`, as the command
+  line's settings, over the test's own; the command line's override them. A `-Clean` test or
+  Lat-DRAM-NTStore-SFence keeps its clean setting in a config, but its extent is the entry's or
+  the config's, as for any latency test: give Lat-L3-Read-Clean `"target": "L3/2"` (its built-in
+  size), or it chases the config's default extent.
 
 ## Caveats
 

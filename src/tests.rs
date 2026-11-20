@@ -141,7 +141,7 @@ impl CacheTarget {
     /// Calculate extent size using calibration data (measured tier boundaries).
     /// Returns None if calibration data is unavailable or missing the needed tier.
     fn calculate_from_calibration(
-        &self, cal: &crate::calibration::CalibrationResults, cache_info: &CacheInfo, thread_count: usize,
+        &self, cal: &crate::calibration::CalibrationResults, cache_info: &CacheInfo, thread_count: usize, per_core: usize,
     ) -> Option<usize> {
         let tier = self.to_calibration_tier()?;
         let tier_result = cal.tiers.get(&tier)?;
@@ -151,7 +151,7 @@ impl CacheTarget {
         // applied downstream in TestMemoryConfig::calculate_extent_size.
         let calibrated = tier_result.optimal_size as f64;
 
-        let per_core = get_active_threads_per_core();
+        let per_core = per_core.max(1);
         // A tier a thread has with its SMT sibling running too: measured (TODO 22's anchor B) when the run puts two threads on a core and
         // the calibration has it, else the single thread's split between them
         let shared_by_siblings = |tier: crate::calibration::CacheTier, single: f64| {
@@ -192,7 +192,7 @@ impl CacheTarget {
             calibrated,
             thread_count,
             l3_sharers(thread_count),
-            get_active_threads_per_core()
+            per_core
         );
 
         Some(size)
@@ -201,26 +201,32 @@ impl CacheTarget {
     /// Calculate actual extent size in bytes based on cache info and thread count.
     /// Uses calibration data when available, falls back to CPUID heuristics.
     pub fn size_bytes(&self, cache_info: &CacheInfo, thread_count: usize) -> usize {
+        self.size_bytes_sharing(cache_info, thread_count, get_active_threads_per_core())
+    }
+
+    /// `size_bytes` with `per_core` of a core's threads sharing its L1 and L2, where the run's threads a core is the usual count: a planned
+    /// latency step's measurers, its siblings that sit out not counted (TODO 119, `measure::plan`)
+    pub fn size_bytes_sharing(&self, cache_info: &CacheInfo, thread_count: usize, per_core: usize) -> usize {
         // Try calibrated sizing first
         if let Some(cal) = get_calibration_data()
-            && let Some(size) = self.calculate_from_calibration(&cal, cache_info, thread_count)
+            && let Some(size) = self.calculate_from_calibration(&cal, cache_info, thread_count, per_core)
         {
             return size;
         }
 
         // CPUID-based fallback
-        self.size_bytes_cpuid(cache_info, thread_count)
+        self.size_bytes_cpuid(cache_info, thread_count, per_core.max(1))
     }
 
     /// CPUID-based extent sizing (original heuristic path)
-    fn size_bytes_cpuid(&self, cache_info: &CacheInfo, thread_count: usize) -> usize {
+    fn size_bytes_cpuid(&self, cache_info: &CacheInfo, thread_count: usize, per_core: usize) -> usize {
         match self {
             CacheTarget::L1 { scale } => {
-                let per_thread = cache_info.per_core_l1d as f64 / get_active_threads_per_core() as f64;
+                let per_thread = cache_info.per_core_l1d as f64 / per_core as f64;
                 (per_thread * scale) as usize
             }
             CacheTarget::L2 { scale } => {
-                let per_thread = cache_info.per_core_l2 as f64 / get_active_threads_per_core() as f64;
+                let per_thread = cache_info.per_core_l2 as f64 / per_core as f64;
                 (per_thread * scale) as usize
             }
             CacheTarget::L3 { scale } => {

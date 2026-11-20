@@ -313,6 +313,12 @@ On branch `feat/summary-grid-119`, one commit a step:
    every thread; fixed (f2cfd4e).
 6. Done: docs (5298be9, 51af41f); the spill table against main's, kernel for kernel the same but the new kernel's one gpr reload;
    the batch's full `tools/ci_local.py` (builds\51af41fe3727-1af69b810aa3282b). Merging to main is the owner's call.
+   Review 2026-11-20 (`119-implementation-review-2026-11-20.md`), four findings, each checked against the code and fixed: a config's
+   latency tests lost their settings (now their registration's, the entry's `latency_threads`/`latency_hits`/`latency_cores` over
+   them, the command line's over both; refused on other tests); an L1/L2 measurer's block counted its idle sibling (now sized for the
+   siblings measuring, `CacheTarget::size_bytes_sharing`, and the plan records `per_core`); the results file's layout of a planned
+   step mixed the plan's extent with the unplanned chunk (now a measurer's planned config, whole); `--compare-results` ignored who
+   measured (now a `measurers` setting change; no record is every thread).
 7. Later, on the physical boxes: plan=perf on daddy-petz and petz007 (the write figure against the probe's there), the 8500G
    (`latency-cores=`), and the metal box (the L3 groups across processor groups).
 

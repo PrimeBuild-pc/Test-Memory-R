@@ -748,6 +748,7 @@ mod tests {
             cores: "ranked".to_string(),
             measurers: 1,
             per_l3: 1,
+            per_core: 1,
             block_bytes: Some(4 * MIB as u64),
             l2_bytes: None,
             l3_share_estimated: None,

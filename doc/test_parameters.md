@@ -274,6 +274,26 @@ restarts every loader at a random 4 KiB block, so it is a fresh instance of the 
   given and resolved, a row a load and every raw window; no `latency_*`.
 - **Plans:** `perf`, after the unloaded latency tests, and `all`; or `test=` runs them.
 
+### `latency_threads`, `latency_hits`, `latency_cores` (`measure::Settings`)
+**Used by:** Lat-L1/L2/L3/DRAM/DRAMFull-Read, Lat-L3-Read-Clean, Lat-DRAM-Read-Clean and Lat-DRAM-NTStore-SFence (TODO 119,
+`src/measure.rs`)
+
+Which of the run's threads measure a latency step; the rest sit it out (no test, no seal check, their memory untouched).
+`latency_threads` is `all` (every thread), `clean` (on an L3 test, the most threads a physical L3 whose estimated share of the
+chase in the L3, 1 - L2/block, reaches `latency_hits`, else one; on a DRAM test one thread over max(1 GiB, 32 L3s); on L1 and L2
+every eligible core) or a count (that many, one a core, in the run's order). `latency_cores` keeps the measurers to `performance`
+or `efficiency` cores as TMR types them, or takes the run's order (`ranked`). A measurer's block follows the measurers: an L1 or
+L2 step's is sized for the threads measuring on its core, a sibling that sits out not sharing it.
+
+- **Defaults:** the test's own: `all` for the plain reads; `clean` for the `-Clean` reads and Lat-DRAM-NTStore-SFence;
+  `latency_hits` 88%; `latency_cores` `ranked`
+- **JSON config fields:** `"latency_threads": "clean"`, `"latency_hits": "90%"`, `"latency_cores": "efficiency"`, over the
+  test's own. A config's latency test keeps its name's settings (a `-Clean` read stays clean) but takes its extent, chunk and
+  length from its entry or the config's defaults, as every latency test in a config does.
+- **Command line:** `latency-threads=`, `latency-hits=`, `latency-cores=`, over a config's entries and the built-in tests'
+- **Results:** each planned step's `run_config.tests[].measure` (who measured, the block, the estimated share, the target) and
+  each thread's `role`; `--compare-results` lists a change of measurers as a setting that differs
+
 ## SimpleTest patterns (pattern spec 2)
 
 | Where | Field | Meaning |
@@ -419,6 +439,8 @@ All parameters are validated before tests run (in `runner.rs`):
 - `load_pairs` is 1 to 50 and `load_window_ms` 10 to 60000, on the loaded latency tests alone; `load_levels` is 1 to 8 levels,
   each more than 0% and at most 100% or 1 to 1,000,000 MiB/s, on Lat-Turnaround-DRAM alone (the command line's `load-*=` the same);
   either refuses an entry's own `extent`, `chunk`, `cycles`, `duration_secs` and `min_duration_secs`
+- `latency_threads` is `all`, `clean` or a count from 1, `latency_hits` a share above 0 and below 100%, `latency_cores` `ranked`,
+  `performance` or `efficiency`, when the config is loaded; a test that takes no latency settings refuses all three
 - Tests panic with a clear error message if their required parameter is missing from `parameter_context`
 
 ## Sequencing and the seal (TODO 74)

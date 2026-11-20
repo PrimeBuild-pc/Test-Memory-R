@@ -493,6 +493,7 @@ impl PerfStep {
             cores: "ranked".to_string(),
             measurers,
             per_l3: measurers,
+            per_core: 1,
             block_bytes: Some(block_bytes),
             l2_bytes: l3_share.map(|_| 1014 << 10),
             l3_share_estimated: l3_share,

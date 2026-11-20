@@ -746,7 +746,19 @@ impl TestConfigSnapshot {
         // — including the resolved byte size for cache specs, which is where the SMT divisor becomes visible.
         use crate::reporting::formatters::ReportFormatter;
         let formatter = crate::reporting::formatters::DefaultFormatter::new();
-        let layout = crate::test_memory::resolve_layout(&def.config, def.actual_name, thread_memory_least);
+        // A planned latency step is recorded as a measurer runs it, over its plan's block, the smallest when the measurers' differ (the
+        // plan's `block_bytes`): its extent, chunks and overlap all that one config's (TODO 119)
+        let planned = def.config.measure.as_ref().and_then(|plan| {
+            let measurer = (0..plan.roles.len())
+                .filter_map(|t| match plan.role(t) {
+                    crate::measure::Role::Measures { extent } => Some((extent.unwrap_or(usize::MAX), t)),
+                    crate::measure::Role::SitsOut => None,
+                })
+                .min()?;
+            def.config.as_planned(measurer.1)
+        });
+        let config = planned.as_deref().unwrap_or(&def.config);
+        let layout = crate::test_memory::resolve_layout(config, def.actual_name, thread_memory_least);
         let (extent, spread) = layout.map_or((0, None), |(extent, spread)| (extent, Some(spread)));
         TestConfigSnapshot {
             // An `-Auto` test keeps the name it was given in `original_name`; any other has it as `actual_name`, an alias a config gave
@@ -758,8 +770,8 @@ impl TestConfigSnapshot {
             function: def.actual_name.to_string(),
             parameter: Some(crate::reporting::converters::format_parameter_context(&def.config.parameter_context)),
             access: def.config.parameter_context.as_ref().and_then(|c| c.access),
-            extent_mode: formatter.format_extent_mode_with_size(&def.config.extent_mode, cache_info, thread_count),
-            chunk_mode: formatter.format_chunk_mode_with_size(&def.config.chunk_mode, cache_info, thread_count),
+            extent_mode: formatter.format_extent_mode_with_size(&config.extent_mode, cache_info, thread_count),
+            chunk_mode: formatter.format_chunk_mode_with_size(&config.chunk_mode, cache_info, thread_count),
             verify_reps: def.config.verify_reps,
             test_reps: def.config.test_reps,
             write_read_cycles: def.config.write_read_cycles,
@@ -773,8 +785,7 @@ impl TestConfigSnapshot {
                 .map(|s| format!("{} (order {})", s.name(), s.order.name())),
             flush_before_verify: def.config.flush_before_verify,
             skip_init: def.config.skip_init,
-            // A planned latency step's measurers chase their plan's block, not the test's own extent (TODO 119)
-            extent_bytes: def.config.measure.as_ref().and_then(|plan| plan.record.block_bytes).unwrap_or(extent as u64),
+            extent_bytes: extent as u64,
             chunk_bytes: spread.as_ref().map_or(0, |s| s.chunk() as u64),
             // The page exchange's tiles sit apart, the last one shorter (TODO 28)
             chunks: spread
@@ -1251,6 +1262,12 @@ fn setting_changes(b: &TestConfigSnapshot, c: &TestConfigSnapshot) -> Vec<(&'sta
     } else if b.function != c.function {
         note("implementation", b.function.clone(), c.function.clone());
     }
+    // Who measured a latency step (TODO 119): its plan's threads, cores and block. No record is every thread, as in every run before
+    // the plans and in every step that took no setting
+    let measured = |t: &TestConfigSnapshot| t.measure.as_ref().map_or_else(|| "every thread".to_string(), crate::measure::Record::describe);
+    if measured(b) != measured(c) {
+        note("measurers", measured(b), measured(c));
+    }
     changes
 }
 
@@ -1563,6 +1580,40 @@ mod tests {
         ]);
     }
 
+    /// TODO 119: a planned latency step is recorded as its measurer runs it, the one over the smallest block: its extent, its chunk, their
+    /// count and the extent's description all from its plan's block, none from the step's own extent; a step without a plan as before
+    #[test]
+    fn a_planned_step_records_its_measurers_layout_whole() {
+        use crate::measure::{Plan, Record, Role};
+        const MIB: usize = 1 << 20;
+        let cache_info = crate::tests::get_cache_info();
+        let definitions = crate::runner::create_test_definitions(cache_info);
+        let mut clean = definitions.iter().find(|d| d.display_name == "Lat-DRAM-Read-Clean").expect("registered").clone();
+        let own = TestConfigSnapshot::capture(&clean, false, cache_info, 3, 64 * MIB);
+        assert_eq!(own.measure, None);
+        let record = Record {
+            threads: "clean".to_string(),
+            cores: "ranked".to_string(),
+            measurers: 2,
+            per_l3: 1,
+            per_core: 1,
+            block_bytes: Some(4 * MIB as u64),
+            l2_bytes: None,
+            l3_share_estimated: None,
+            target: None,
+            target_unmet: false,
+        };
+        let roles = vec![Role::SitsOut, Role::Measures { extent: Some(8 * MIB) }, Role::Measures { extent: Some(4 * MIB) }];
+        clean.config.measure = Some(std::sync::Arc::new(Plan { roles, record }));
+        let planned = TestConfigSnapshot::capture(&clean, false, cache_info, 3, 64 * MIB);
+        assert_eq!(
+            (planned.extent_bytes, planned.chunk_bytes, planned.chunks, planned.overlap_bytes),
+            (4 * MIB as u64, 4 * MIB as u64, 1, 0)
+        );
+        assert_eq!(planned.extent_mode, "4.00 MiB");
+        assert_eq!(planned.measure.map(|m| m.block_bytes), Some(Some(4 * MIB as u64)));
+    }
+
     /// TODO 72: each test records its parameter as its step's Config line shows it (`format_parameter_context`): a TM5 stride as the
     /// run's channels resolve it, so one plan on two channels and on four records two strides; a mirror; a native test's own; `-` for a
     /// test with none. Results written before it read back with none.
@@ -1617,6 +1668,48 @@ mod tests {
         assert_eq!(matched.iter().map(|m| m.settings_differ).collect::<Vec<_>>(), [false, true]);
         assert!(!compare_plans(&with_test(Some("-")), &with_test(Some("-"))).0.differ());
         assert!(!compare_plans(&with_test(None), &with_test(Some("Stride(3cl/192B)"))).0.differ());
+    }
+
+    /// TODO 119: a latency step measured by other threads, or over another block, isn't like for like; a step without a plan is every
+    /// thread's, so one with a plan differs from it, and two alike don't
+    #[test]
+    fn a_step_measured_by_other_threads_is_a_setting_that_differs() {
+        let record = |measurers: usize, cores: &str| crate::measure::Record {
+            threads: "clean".to_string(),
+            cores: cores.to_string(),
+            measurers,
+            per_l3: measurers,
+            per_core: 1,
+            block_bytes: Some(1 << 30),
+            l2_bytes: None,
+            l3_share_estimated: None,
+            target: None,
+            target_unmet: false,
+        };
+        let with = |measure: Option<crate::measure::Record>| {
+            plan_of([step("Lat-L1-Read"), TestConfigSnapshot { measure, ..step("Lat-DRAM-Read-Clean") }])
+        };
+        let differs = |a: Option<crate::measure::Record>, b: Option<crate::measure::Record>| {
+            let (changes, matched) = compare_plans(&with(a), &with(b));
+            let settings: Vec<_> =
+                changes.settings.iter().map(|s| (s.step, s.setting.clone(), s.baseline.clone(), s.current.clone())).collect();
+            (settings, matched.iter().map(|m| m.settings_differ).collect::<Vec<_>>())
+        };
+        let (settings, flagged) = differs(Some(record(1, "ranked")), Some(record(2, "ranked")));
+        assert_eq!(flagged, [false, true]);
+        assert_eq!(settings, [(
+            2,
+            "measurers".to_string(),
+            "1 thread (latency-threads=clean), 1 an L3, over 1.00 GiB".to_string(),
+            "2 threads (latency-threads=clean), 2 an L3, over 1.00 GiB".to_string()
+        )]);
+        assert_eq!(
+            differs(None, Some(record(1, "efficiency"))).0[0].3,
+            "1 thread (latency-threads=clean latency-cores=efficiency), 1 an L3, over 1.00 GiB"
+        );
+        assert_eq!(differs(None, Some(record(1, "ranked"))).0[0].2, "every thread");
+        assert!(differs(Some(record(1, "ranked")), Some(record(1, "ranked"))).0.is_empty());
+        assert!(differs(None, None).0.is_empty());
     }
 
     /// TODO 72: a config's two tests on one function without ids, each run once in file order, are two tests with their own settings: the

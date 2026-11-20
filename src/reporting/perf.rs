@@ -526,13 +526,13 @@ fn grid(result: &TestRunResult, steps: &Steps<'_>) -> Option<Grid> {
 fn l3_share(result: &TestRunResult, steps: &Steps<'_>) -> Option<L3Share> {
     let step = steps.named(Tier::L3.latency_test()).first().copied()?;
     let block_bytes = step.config.extent_bytes;
-    // A setting that had fewer threads measure it: its measurers, one a core (`measure::plan`)
-    let planned = step.config.measure.as_ref().map(|plan| plan.measurers);
+    // A setting that had fewer threads measure it: its measurers, and the most of them on one core (`measure::plan`)
+    let planned = step.config.measure.as_ref().map(|plan| (plan.measurers, plan.per_core));
     let calibrated = result.run_config.calibration.as_ref().and_then(|c| c.tiers.iter().find(|t| t.tier == "L2")).map(|t| t.optimal_size.0);
     let threads = &result.run_config.threads;
     Some(L3Share {
-        threads: planned.unwrap_or(threads.thread_count),
-        threads_per_core: if planned.is_some() { 1 } else { threads.active_threads_per_core },
+        threads: planned.map_or(threads.thread_count, |(measurers, _)| measurers),
+        threads_per_core: planned.map_or(threads.active_threads_per_core, |(_, per_core)| per_core),
         block_bytes,
         l2_bytes: calibrated.unwrap_or(result.identity.l2_cache_per_core.0),
     })

@@ -683,6 +683,16 @@ pub struct TestConfig {
     pub load_pairs: Option<u32>,
     #[serde(default)]
     pub load_window_ms: Option<u32>,
+    /// The tests that take latency settings (TODO 119, `measure::Settings`: Lat-L1/L2/L3/DRAM/DRAMFull-Read, the `-Clean` ones and
+    /// Lat-DRAM-NTStore-SFence): which threads measure, `"all"`, `"clean"` or a count; clean's target, a share (`"88%"`); which cores,
+    /// `"ranked"`, `"performance"` or `"efficiency"`. Unset is the test's own (every thread; clean for the `-Clean` tests and the write);
+    /// the command line's `latency-threads=`, `latency-hits=` and `latency-cores=` override them. Another test refuses them.
+    #[serde(default)]
+    pub latency_threads: Option<String>,
+    #[serde(default)]
+    pub latency_hits: Option<String>,
+    #[serde(default)]
+    pub latency_cores: Option<String>,
 
     // Per-chunk repetition: how long each chunk is worked (TODO 79 B2). Unset is the test's own default; loading a TM5 `.cfg` fills them
     // from `Time (%)`.
@@ -998,6 +1008,8 @@ pub struct ConfigTest<'a> {
     /// `seal: false` on the test.
     pub seal_opt_out: bool,
     pub tm5_pattern: Option<Tm5PatternSource>,
+    /// Its own latency settings (TODO 119), over its registration's (`runner::create_test_definitions_from_config`)
+    pub latency: crate::measure::Overrides,
 }
 
 /// What one cycle of a config runs (TODO 74).
@@ -1133,6 +1145,7 @@ impl ModernConfig {
                 id: test.id.as_deref(),
                 seal_opt_out: test.seal == Some(false),
                 tm5_pattern: test.tm5_pattern,
+                latency: Self::latency_settings(i, test)?,
             });
         }
         let Some(order) = &self.cycle_order else {
@@ -1152,6 +1165,26 @@ impl ModernConfig {
             }
         }
         Ok(CyclePlan { tests, steps, order: Some(listed) })
+    }
+
+    /// Entry `i`'s own latency settings (TODO 119), each parsed; refused on a test that takes none, where they would change nothing
+    fn latency_settings(i: usize, test: &TestConfig) -> Result<crate::measure::Overrides, String> {
+        let field = |e: String| Self::test_error(i, test, e);
+        let settings = crate::measure::Overrides {
+            threads: test.latency_threads.as_deref().map(crate::measure::LatencyThreads::parse).transpose().map_err(field)?,
+            hits: test.latency_hits.as_deref().map(crate::measure::parse_hits).transpose().map_err(field)?,
+            cores: test.latency_cores.as_deref().map(crate::measure::LatencyCores::parse).transpose().map_err(field)?,
+        };
+        if !settings.is_empty() && !crate::runner::takes_latency_settings(&test.function) {
+            return Err(Self::test_error(
+                i,
+                test,
+                "takes no \"latency_threads\", \"latency_hits\" or \"latency_cores\": the Lat-*-Read tests and \
+                 Lat-DRAM-NTStore-SFence do"
+                    .to_string(),
+            ));
+        }
+        Ok(settings)
     }
 
     /// One test's runtime config from its entry `i` in `test_sequence`.

@@ -331,6 +331,12 @@ fn apply_latency_overrides(defs: &mut [TestDefinition], overrides: crate::measur
     }
 }
 
+/// Whether the test registered as `name` takes latency settings (TODO 119): the latency read tests and memory's write latency, which a
+/// config entry's `latency_*` fields and the command line's `latency-*=` reach
+pub(crate) fn takes_latency_settings(name: &str) -> bool {
+    registered_tests(crate::tests::get_cache_info()).iter().any(|(test, _, config)| *test == name && config.latency.is_some())
+}
+
 /// Each latency step whose settings ask for fewer than all of the run's threads, its plan (TODO 119, `measure::plan`): from the run's
 /// threads (thread i on the CPU list's i-th CPU), their cores, core types and L3s as the topology has them, and their memory; blocks from
 /// the calibration, else CPUID's sizes. Why a setting fits no thread, naming its step, otherwise.
@@ -362,11 +368,18 @@ fn plan_latency_steps(
         .as_ref()
         .and_then(|c| c.tiers.get(&crate::calibration::CacheTier::L2))
         .map_or(cache_info.per_core_l2, |t| t.optimal_size);
-    let sizes = Sizes { l2, l3: cache_info.l3_cache };
+    let l2_smt = calibration.as_ref().and_then(|c| c.shared.as_ref()).and_then(|s| s.l2_smt);
+    let sizes = Sizes { l2, l2_smt, l3: cache_info.l3_cache };
     let reach = |k: usize| calibration.as_ref().and_then(|c| c.l3_reach(k)).unwrap_or(cache_info.l3_cache as f64 / k.max(1) as f64);
     for def in defs.iter_mut() {
         let Some(settings) = def.config.latency.filter(|s| s.constrains()) else { continue };
-        let plan = crate::measure::plan(&settings, Tier::of(&def.config.extent_mode), &slots, &sizes, &reach)
+        // An L1 or L2 step's block as its cache target sizes it with `n` of a core's threads measuring, not the run's threads a core
+        let target = match &def.config.extent_mode {
+            ExtentMode::Cache { target: target @ (CacheTarget::L1 { .. } | CacheTarget::L2 { .. }) } => Some(*target),
+            _ => None,
+        };
+        let private = |n: usize| target.map(|t| t.size_bytes_sharing(cache_info, slots.len(), n));
+        let plan = crate::measure::plan(&settings, Tier::of(&def.config.extent_mode), &slots, &sizes, &reach, &private)
             .map_err(|e| format!("{}: {e}", def.display_name))?;
         log::info!(
             "{}: {} of {} threads measure ({} an L3){}",
@@ -4699,6 +4712,14 @@ fn create_test_definitions_from_config(
             test.config.chunk_mode = registered.config.chunk_mode.clone();
             test.config.timing = registered.config.timing.clone();
         }
+        // A latency test's measuring settings are its registration's (every thread; clean for the `-Clean` tests and the write
+        // latency), the entry's own over them, and the command line's over both (`apply_latency_overrides`, TODO 119). Its extent,
+        // chunk and length stay the entry's or the config's defaults, as every latency test's in a config: the name fixes who measures.
+        if let Some(settings) =
+            built_in.iter().find(|d| d.actual_name == test_name || d.original_name == Some(test_name)).and_then(|d| d.config.latency)
+        {
+            test.config.latency = Some(test.latency.apply(settings));
+        }
         // Look up function by name: the aliases first, then the built-in suite
         let test_function = crate::tests::get_test_function_by_name(test_name)
             .or_else(|| {
@@ -5518,6 +5539,7 @@ pub mod test_support {
                 cores: "ranked".to_string(),
                 measurers: 1,
                 per_l3: 1,
+                per_core: 1,
                 block_bytes: Some(32 * KIB as u64),
                 l2_bytes: None,
                 l3_share_estimated: None,
@@ -6318,6 +6340,57 @@ mod tests {
         let (steps, _) = create_test_definitions_from_config(&config, cache_info).unwrap();
         assert_eq!(steps.len(), names.len());
         assert!(names.contains(&"Lat-L1-Copy") && names.contains(&"Spd-L1-Read-Auto"));
+    }
+
+    /// TODO 119: a config's latency tests take their registrations' latency settings (clean for the `-Clean` reads and the write, every
+    /// thread for a plain read), an entry's own over them and the command line's over both; an entry that gives them to a test that takes
+    /// none is refused, as is a value that doesn't parse
+    #[test]
+    fn a_configs_latency_tests_keep_their_settings_and_take_overrides() {
+        use crate::measure::{LatencyCores, LatencyThreads, Overrides, Settings};
+        let cache_info = crate::tests::get_cache_info();
+        let entry = |name: &str| crate::config::TestConfig { enabled: true, function: name.to_string(), ..Default::default() };
+        let mut config = crate::config::ModernConfig::create_demo_config();
+        config.test_sequence = vec![
+            entry("Lat-L3-Read-Clean"),
+            entry("Lat-DRAM-Read-Clean"),
+            entry("Lat-DRAM-NTStore-SFence"),
+            entry("Lat-L2-Read"),
+            crate::config::TestConfig {
+                latency_threads: Some("2".to_string()),
+                latency_cores: Some("efficiency".to_string()),
+                ..entry("Lat-DRAM-Read")
+            },
+            entry("Mem-StuckBit256"),
+        ];
+        let (mut steps, _) = create_test_definitions_from_config(&config, cache_info).unwrap();
+        let settings = |steps: &[TestDefinition]| steps.iter().map(|d| d.config.latency).collect::<Vec<_>>();
+        let two_efficiency = Settings { threads: LatencyThreads::Count(2), cores: LatencyCores::Efficiency, ..Settings::default() };
+        assert_eq!(settings(&steps), [
+            Some(Settings::CLEAN),
+            Some(Settings::CLEAN),
+            Some(Settings::CLEAN),
+            Some(Settings::default()),
+            Some(two_efficiency),
+            None
+        ]);
+        // The command line's over the entry's and the registration's, on every test that takes them
+        apply_latency_overrides(&mut steps, Overrides { threads: Some(LatencyThreads::Count(1)), ..Default::default() });
+        let one = |s: Settings| Some(Settings { threads: LatencyThreads::Count(1), ..s });
+        assert_eq!(settings(&steps), [
+            one(Settings::CLEAN),
+            one(Settings::CLEAN),
+            one(Settings::CLEAN),
+            one(Settings::default()),
+            one(two_efficiency),
+            None
+        ]);
+
+        config.test_sequence = vec![crate::config::TestConfig { latency_threads: Some("clean".to_string()), ..entry("Mem-StuckBit256") }];
+        let refused = create_test_definitions_from_config(&config, cache_info).err().unwrap();
+        assert!(refused.contains("test_sequence[0] ('Mem-StuckBit256'): takes no \"latency_threads\""), "{refused}");
+        config.test_sequence = vec![crate::config::TestConfig { latency_hits: Some("120%".to_string()), ..entry("Lat-L3-Read") }];
+        assert!(create_test_definitions_from_config(&config, cache_info).is_err());
     }
 
     /// TODO 117: a config's loaded latency tests take their registrations' extent (the chain's 32 L3s, 1 GiB at least), chunk and length
