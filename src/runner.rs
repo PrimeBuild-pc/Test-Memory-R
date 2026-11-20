@@ -3104,7 +3104,7 @@ pub(crate) fn registered_tests(cache_info: &CacheInfo) -> Vec<(&'static str, Tes
         // Memory's write latency (TODO 119): a whole line NT-stored then SFENCE, a line at a time, on one thread over the clean read's
         // block, the rest sitting out (`measure`); ns a 64 B line
         (
-            "Lat-DRAM-NTStore-SFence",
+            crate::latency_tests::WRITE_LATENCY_TEST,
             TestFunction::Latency(nt_store_sfence_multi),
             TestMemoryConfig::new(ExtentMode::Cache { target: CacheTarget::DRAM_DEFAULT }, ChunkMode::Whole)
                 .with_timing(TestTiming::duration_only(10))
@@ -6361,6 +6361,27 @@ mod tests {
         let (steps, _) = create_test_definitions_from_config(&config, cache_info).unwrap();
         assert_eq!(steps.len(), names.len());
         assert!(names.contains(&"Lat-L1-Copy") && names.contains(&"Spd-L1-Read-Auto"));
+    }
+
+    #[test]
+    fn a_configs_fenced_store_runs_with_inherited_and_explicit_chunks() {
+        let mut config = crate::config::ModernConfig::create_demo_config();
+        let region = Region::new(&[1024 * KIB]);
+        for chunk in [None, Some(serde_json::json!({"mode":"absolute","size":"64KiB"})), Some(serde_json::json!({"mode":"whole"}))] {
+            let mut entry = serde_json::json!({
+                "enabled": true, "function": "Lat-DRAM-NTStore-SFence", "extent": {"mode":"absolute","size":"1MiB"}
+            });
+            if let Some(chunk) = chunk {
+                entry["chunk"] = chunk;
+            }
+            config.test_sequence = vec![serde_json::from_value(entry).unwrap()];
+            let (mut steps, _) = create_test_definitions_from_config(&config, crate::tests::get_cache_info()).unwrap();
+            let step = &mut steps[0];
+            let TestFunction::Latency(run) = step.function else { panic!("expected the registered latency kernel") };
+            step.config.tsc_frequency_ghz = 2.0;
+            let stats = unsafe { run(&region.blocks, 0, ErrorMode::Log, &TestTiming::cycles_only(1), &step.config, None) };
+            assert!(stats.sample_count > 0 && region.guards_intact());
+        }
     }
 
     /// TODO 119: a config's latency tests take their registrations' latency settings (clean for the `-Clean` reads and the write, every

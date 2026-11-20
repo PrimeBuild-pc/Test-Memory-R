@@ -500,6 +500,8 @@ pub unsafe fn copy_latency_multi(
 /// Lines a write latency sample times: the read chase's 1000, a sample 60-180 us of fenced writes
 const NT_STORE_LINES: usize = 1000;
 
+pub(crate) const WRITE_LATENCY_TEST: &str = "Lat-DRAM-NTStore-SFence";
+
 /// Memory's write latency (TODO 119; TODO 117's probe, `../write-latency-test`, W-nt+sf): a whole line written with two 32 B NT
 /// stores, then SFENCE, a line at a time to random lines of the extent, so a line's stores can't become visible before the last
 /// line's are. A sample is the mean over `NT_STORE_LINES` lines between two RDTSCPs, the closing one after MFENCE: RDTSCP waits for
@@ -514,7 +516,7 @@ pub unsafe fn nt_store_sfence_multi(
 ) -> LatencyTestStats {
     use std::arch::x86_64::{__m256i, _mm_lfence, _mm_mfence, _mm_sfence, _mm256_set1_epi64x, _mm256_stream_si256};
 
-    let test_name = "NtStoreSfence";
+    let test_name = WRITE_LATENCY_TEST;
     let cpu_ghz = config.tsc_frequency_ghz;
     if cpu_ghz == 0.0 {
         panic!("TSC frequency not detected! Cannot run latency tests on non-x86_64 platforms.");

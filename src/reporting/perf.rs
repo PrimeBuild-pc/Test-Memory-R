@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::latency_tests::WRITE_LATENCY_TEST;
 use crate::loaded::{Load, LoadedSummary};
 use crate::results::{TestAverage, TestRunResult};
 use crate::run_context::TestConfigSnapshot;
@@ -71,8 +72,6 @@ pub const OPS: [&str; 3] = ["Read", "Write", "Copy"];
 const WIDTH_SUFFIXES: [&str; 4] = ["Auto", "512", "256", "128"];
 
 const TURNAROUND_TEST: &str = "Lat-Turnaround-DRAM";
-/// Memory's write latency (TODO 119): a whole line NT-stored, then SFENCE
-const WRITE_LATENCY_TEST: &str = "Lat-DRAM-NTStore-SFence";
 
 /// A cell's figure
 #[derive(Debug, Clone, Copy, PartialEq)]
