@@ -97,6 +97,18 @@ A re-run of a release run is safe: the upload replaces no asset, the crates-io j
 crates.io has, and Komac opens no second PR for a version (one in any state stops it, even a
 closed one: resubmit by hand, `--skip-pr-check`).
 
+## Releases
+
+- **0.1.1** (2026-11-06): tag `v0.1.1` at 0473f26, release.yml green. All four crates published on crates.io by hand from a fresh
+  clone of the tag (live at 0.1.1, 2026-11-12). winget PR microsoft/winget-pkgs#471507 opened, CLA signed, `winget install
+  --manifest` passed on Server 2025 and Windows 11's user scope; `ElevationRequirement` moved onto the machine installer (37f00ed;
+  the PR's 993350e).
+- **0.1.2** (2026-11-20): tag `v0.1.2` at 66a34db (TODO 119's grid, clean and write latency and DRAM sizing; TODO 126's access
+  geometry; nightly 2026-11-19 and a `cargo update`). Local `ci_local.py --release` and GitHub's CI green first; release.yml run
+  44693902052: build green, winget's notice (no token), crates-io skipped. The six assets' SHA-256s check against SHA256SUMS.txt;
+  tmr.build.json names 66a34db with a clean checkout. Left for the owner: the installer tried on a desktop, the crates by hand,
+  winget after 0.1.1's PR.
+
 ## Why
 
 - **crates.io** is for tracking and discovery, not installing: each page says where the app is (the
