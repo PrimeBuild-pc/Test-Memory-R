@@ -1,4 +1,4 @@
-# TODO 130: run a command when a run ends
+# TODO 130: a command and a sound when a run finds an error or ends
 
 Raised by the owner, 2026-11-21: call a script or command when a run finishes or stops, so it can, say, send a message to your
 phone while you're away from the desk.
@@ -14,6 +14,21 @@ phone while you're away from the desk.
   timeout.
 - Examples for the docs: ntfy (`curl -d "TMR %TMR_OUTCOME%, %TMR_ERRORS% errors" https://ntfy.sh/<topic>`), Pushover, a Telegram
   bot, a PowerShell script.
+
+## Sounds (the owner, 2026-11-22)
+
+- **On a run's first error**: test, seal or WHEA, the moment the run's count first leaves 0. One sound a run, not one an error:
+  a fault can count thousands a second. Optionally again when a step fails after a clean stretch.
+- **At a run's end**: one sound for passed, another for failed, halted or interrupted.
+- **Which sound**: a Windows system sound by default (`PlaySoundW` with an alias: `SystemHand` for an error, `SystemNotification`
+  or `SystemAsterisk` for the end; `MessageBeep` where no sound plays), or a `.wav` the user names. No sound files shipped.
+- **Where it is seen**: the monitor's timer, which already reads the error counts for the ticker and the window, every 250 ms.
+  Never the test loops: they stay free of anything but the test (`CLAUDE.md`, Priorities).
+- **The same event for the command**: the first error starts the command too (`TMR_EVENT=first_error`, the end's
+  `TMR_EVENT=end`), so a run that fails an hour in messages the phone then, not when it ends hours later.
+- **Settings**: `sound=off|error|end|both` (or two settings), and the window's Settings; per user, as with the command, never
+  from a test config. Open: on or off by default. A sound by default helps a newcomer away from the screen; off by default
+  surprises no one in an office or at night.
 
 ## What exists today
 
@@ -46,5 +61,6 @@ The setting matters for the window, which has no wrapper, and gives both one way
 
 ## Next
 
-The owner's calls on the open questions, then the build: the setting and its variables, the log line, the window's field, and
-the docs (the guide's "Reading a result", the README's Privacy).
+The owner's calls on the open questions, then the build: the settings (the command, the sounds) and the command's variables,
+the first-error event from the monitor, the log line, the window's fields, and the docs (the guide's "Reading a result", the
+README's Privacy).
