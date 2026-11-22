@@ -247,6 +247,8 @@ settings. There are deliberate differences:
   least 16 MB, in steps of 16 MB), as TM5 does, so the config's Reserved Memory for Windows is
   kept. TMR's own plans round up to whole GB, which can take part of the reserve. `blkround=` and
   `blkroundtarget=` override either.
+- **2 MB pages** are asked for 64 MB at a time (TMR's own plans: 128 MB), so when they run short
+  the threads end closer together. TM5 has no such setting; `largechunk=` overrides it.
 - **Test 0.** An enabled RefreshStable test 0 becomes the seal around the tests, even when 0 is
   absent from Test Sequence. A 0 in the sequence also adds an explicit Seal-Check step.
 - **Patterns.** SimpleTest modes 0, 1 and 2 become native pattern programs:

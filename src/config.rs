@@ -1687,6 +1687,11 @@ impl ModernConfig {
     }
 }
 
+/// The first size of an imported `.cfg`'s 2 MiB-page requests (`largechunk=`), half TMR's own default (`DEFAULT_LARGE_CHUNK`, 128 MiB):
+/// TMR's choice, not TM5's, which has no such setting (TODO 131, the owner). Threads end about one request apart when 2 MiB pages
+/// run out, and a TM5 setup's shares are often small (2.22 GiB on a 12-thread, 32 GiB box), so their 4 KiB tails come out more even.
+const IMPORT_LARGE_CHUNK: &str = "64MiB";
+
 impl LegacyConfig {
     pub fn load_from_file(path: &str) -> Result<Self, String> {
         let content = fs::read_to_string(path).map_err(|e| format!("Failed to read legacy config file: {}", e))?;
@@ -1983,11 +1988,17 @@ impl LegacyConfig {
     /// TMR's allocation settings, each thread's share rounded as TM5 rounds it (TODO 131): down to the `.cfg`'s Lock Memory Granularity
     /// (`MainThread.asm` ~153-262), never up into the reserve the `.cfg` asks for. As `blkround=down blkroundtarget=`, at least
     /// `largefloor` and a multiple of it, as the step must be: TM5's default 16 MiB is exactly that, an odd one goes up to the next.
+    /// And 2 MiB pages asked for `IMPORT_LARGE_CHUNK` at a time.
     fn memory_allocation(&self) -> MemoryAllocationConfig {
         let defaults = MemoryAllocationConfig::default();
         let floor_mib = parse_size_string(&defaults.large_floor).map_or(16, |b| b / BYTES_PER_MIB as usize);
         let step_mib = (self.memory_setup.lock_granularity_mb as usize).max(1).next_multiple_of(floor_mib);
-        MemoryAllocationConfig { share_round: RoundDirection::Down.to_string(), share_round_step: format!("{step_mib}MiB"), ..defaults }
+        MemoryAllocationConfig {
+            share_round: RoundDirection::Down.to_string(),
+            share_round_step: format!("{step_mib}MiB"),
+            large_chunk: Some(IMPORT_LARGE_CHUNK.to_string()),
+            ..defaults
+        }
     }
 
     /// TM5 `Test Block Size (Mb)` as a TMR chunk (TODO 79 B1), based on `mt_ini.asm:287-303` and `MainThread.asm:627-661`.
@@ -2219,7 +2230,8 @@ mod tests {
     }
 
     /// TODO 131: an import rounds each share down to the `.cfg`'s Lock Memory Granularity, as TM5 does, never up into the reserve; at
-    /// least `largefloor` (16 MiB) and a multiple of it, as the step must be. The rest of the allocation settings are TMR's own.
+    /// least `largefloor` (16 MiB) and a multiple of it, as the step must be. It asks for 2 MiB pages 64 MiB at a time, half TMR's own
+    /// default. The rest of the allocation settings are TMR's own.
     #[test]
     fn an_import_rounds_shares_down_to_its_lock_granularity() {
         let step = |lock_mb: u32| {
@@ -2233,7 +2245,9 @@ mod tests {
         };
         assert_eq!([step(16), step(1), step(20), step(32), step(512)], [16, 16, 32, 32, 512]);
         let alloc = legacy(100, Vec::new()).to_modern_config().unwrap().system.memory_allocation;
+        assert_eq!(alloc.block_sizing().unwrap().large_chunk, 64 * MIB, "half TMR's own 128 MiB");
         let defaults = MemoryAllocationConfig::default();
+        assert_eq!(defaults.block_sizing().unwrap().large_chunk, 128 * MIB);
         assert_eq!((alloc.min_page_size, alloc.max_page_size), (defaults.min_page_size, defaults.max_page_size));
     }
 
