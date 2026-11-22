@@ -45,14 +45,20 @@ TMR) fix it. `stitched.rs`'s `min_large_leaves_threads_short_but_not_empty` test
   (more stops the run, rule 1). 4 KiB pages need no unbroken runs, so the free memory large pages can't use serves them: here
   about 0.8 GiB. Its cost is on the tail alone, more TLB misses there (an estimate, not measured: a percent or two slower over
   it for the streaming tests, more for the random ones, well under 1% of a run).
-  - **Locked when it can be**: TMR raises its working-set minimum by the tail's size (`SetProcessWorkingSetSizeEx`) and locks it
-    (`VirtualLock`), so Windows can't page it out. That needs "Increase a process working set", which Windows gives every user
-    by default, not the large pages' "Lock pages in memory". (AWE, TM5's way, needs that privilege and can't sit in a stitched
-    placeholder span.)
-  - **Pageable otherwise**: if the minimum or the lock is refused, the tail stays pageable, with a warning; a page Windows trims
-    is read back from the page file, not tested in RAM.
+  - **Both forms, a setting (the owner, 2026-11-22):**
+    - **Locked**, the proposed default: TMR raises its working-set minimum by the tail's size (`SetProcessWorkingSetSizeEx`)
+      and locks it (`VirtualLock`), so Windows can't page it out. That needs "Increase a process working set", which Windows
+      gives every user by default, not the large pages' "Lock pages in memory". If the minimum or the lock is refused, the run
+      stops (rule 1: no silent gap; a page Windows trims is read back from the page file, not tested in RAM).
+    - **Pageable**, opted into: the tail as ordinary memory, with a warning, as TM5's runs without AWE are.
   - The threads table shows a thread's 4 KiB part, locked or pageable; `minpage=`/`maxpage=` keep their meaning (`minpage=large`
     given outright means no tail, so rule 1 stops a short run).
+  - **TM5's own locking**, for comparison (the owner asked, 2026-11-22): AWE is on by default (`tm5.inc`'s `bEnableAWE db 1`),
+    locked physical pages, and is turned off without admin rights (`mt_ini.asm` checks with `LsaOpenPolicy`), by the `.cfg`'s
+    `Capable` bits 1, 2 or 4, or when a thread's share comes out too small. Without AWE TM5 tests ordinary memory, at most one
+    Testing Window a thread, and calls `VirtualLock` only under `Capable` bit 8 (`Capable_UseVirtualLock`), not checking its
+    result (`function.asm`). The common `.cfg`s have `Capable=0x0`, so a TM5 run without admin is pageable and can page when
+    pushed: the owner's recollection. AWE also needs "Lock pages in memory", and its pages can't sit in a stitched span.
 - **Not taken:** TM5's bigger reserve when the page file is off (TM5 detects it from `GlobalMemoryStatusEx`'s commit limit
   against the RAM, and reserves up to 1 GB). The owner: the reserve is the user's and the config's to choose, not a heuristic's.
   The reporter had a page file (a 36.57 GiB commit limit on 31.57 GiB), so it wouldn't have applied here anyway.
