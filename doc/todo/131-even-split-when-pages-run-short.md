@@ -55,8 +55,8 @@ TMR) fix it. `stitched.rs`'s `min_large_leaves_threads_short_but_not_empty` test
     (`minpage=regular`, or no "Lock pages in memory" so everything is 4 KiB) stays pageable, as in 0.1.2, until phase 2: a
     live check that locking tens of GiB of 4 KiB pages (a working-set minimum that size) holds up on a desktop, then locked
     there too.
-  - The threads table shows a thread's 4 KiB part, locked or pageable; `minpage=`/`maxpage=` keep their meaning (`minpage=large`
-    given outright means no tail, so rule 1 stops a short run).
+  - The threads table shows a thread's 4 KiB part, locked or pageable. (Planned as "`minpage=large` given outright means no
+    tail", which can't work: `large` is the default. Built as `tail4k=off` instead; see "Built" below.)
   - **TM5's own locking**, for comparison (the owner asked, 2026-11-22): AWE is on by default (`tm5.inc`'s `bEnableAWE db 1`),
     locked physical pages, and is turned off without admin rights (`mt_ini.asm` checks with `LsaOpenPolicy`), by the `.cfg`'s
     `Capable` bits 1, 2 or 4, or when a thread's share comes out too small. Without AWE TM5 tests ordinary memory, at most one
@@ -98,3 +98,39 @@ MiB pages run short as on the reporter's desktop: 0.1.2 granted 51.67 of 56.75 G
 ran.
 
 Phase 2: the live check of locking an all-4 KiB run, then its lock.
+
+## Built: phase 1 (2026-11-22, c5f66b5)
+
+- **The setting**: `tail4k=locked|pageable|off` (JSON `regular_tail`), default `locked`; only with `minpage=` above 4 KiB. The
+  cap is `stitched::TAIL_PERCENT` (5%) of each thread's target; every short thread must be within it, else no tail is taken.
+- **Locking**: `VmOps` gained `raise_working_set`, `lower_working_set` and `lock`. The tail raises the working-set minimum
+  (and maximum) by the whole shortfall plus 16 MiB of slack, soft limits, after enabling `SeIncreaseWorkingSetPrivilege` (held
+  by every user, disabled by default, as `whoami /priv` shows on the dev box); each 4 KiB commit is then `VirtualLock`ed as it
+  is made. The arena lowers the minimum again on drop, since Windows charges it until then and the window runs sessions in one
+  process. Either refusal stops the run.
+- **The stop**: `stitched: 1 GiB and 2 MiB pages ran 5.53 GiB short of the 57.62 GiB asked for: 8 of 8 threads short, thread 2
+  the most (6.50 of 7.20 GiB, 9.8% short), more than the 4 KiB tail takes (5% of a thread's share). A run tests every thread's
+  whole share or stops here: free more memory, by a bigger reserve (...), fewer threads (cpus=) or a restart (...), or
+  minpage=regular ...`, exit 2.
+- **The report**: one footer line under the threads table (`4 KiB: the rest where the larger pages ran short, locked in RAM
+  (tail4k=locked).`). The Status column's fairness check also flags each tail thread 🟡 `4 KiB 64.00 MiB`, repeating the
+  column.
+- **The import**: `LegacyConfig::memory_allocation` sets `blkround=down` and `blkroundtarget=` to the Lock Memory Granularity,
+  at least `largefloor` and a multiple of it.
+
+## The A/B (dev box, 2026-11-22)
+
+`pressure256.cfg` (1usmus_v3 with Reserved 256 MiB, test 1 once), 8 threads; 0.1.2 (66a34db) and the build (c5f66b5) back to
+back under one fragmenter: AWE pages taken, one kept in each 2 MiB physical region they fell in, the rest freed, held while
+both ran (`scratch_119b/ab131/`, outside git). How far a fragmenter's pages spread varied run to run (2 GiB of them blocked
+3.5 to 18.2 GiB of 2 MiB room), so each level is one pair, not a sweep.
+
+| Fragmenter (2 MiB room blocked) | 0.1.2: asked, granted, reserve left | The build: asked, reserve left, outcome |
+|---|---|---|
+| none | 57.75, all, 201 MiB | 58.62, 338 MiB, ran full |
+| 512 MiB (1.0 GiB) | 59.75, 59.16 (8 threads, up to 96 MiB short), 35 MiB | 59.50, 268 MiB, 0.34 GiB short over 6 threads: a locked tail (6 locks, 1 working-set raise), ran full |
+| 1 GiB (9.0 GiB) | 57.75, 51.94, 195 MiB | 57.62, 297 MiB, stopped: 5.69 GiB short, thread 7 10.6% |
+| 2 + 6 GiB (10.9 GiB) | 57.75, 52.09 (threads 9-10% short), 74 MiB | 57.62, 288 MiB, stopped: 5.53 GiB short, thread 2 9.8% |
+
+0.1.2 ran every short case and passed, testing less than it planned. The tail run's test speed matched 0.1.2's (82,034 against
+81,998 MiB/s, one run each). Not checked: a standard (non-admin) account's raise; a tail of several GiB.
