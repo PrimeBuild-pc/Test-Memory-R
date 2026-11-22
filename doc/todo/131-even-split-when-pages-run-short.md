@@ -155,5 +155,11 @@ both ran (`scratch_119b/ab131/`, outside git). How far a fragmenter's pages spre
 | 1 GiB (9.0 GiB) | 57.75, 51.94, 195 MiB | 57.62, 297 MiB, stopped: 5.69 GiB short, thread 7 10.6% |
 | 2 + 6 GiB (10.9 GiB) | 57.75, 52.09 (threads 9-10% short), 74 MiB | 57.62, 288 MiB, stopped: 5.53 GiB short, thread 2 9.8% |
 
+The final build (5b8a924: `minpage=reg-lock` the default, imports at `largechunk=64MiB`; full CI passed), alone, under 64 to
+512 MiB fragmenters (by then each blocked 5.5 to 10.9 GiB of 2 MiB room): stopped, exit 2, at 2.98 to 6.62 GiB short (worst
+thread 5.5 to 11.9%); at 2.22 GiB short (128 MiB fragmenter, 5.5 GiB blocked) it took a locked tail and ran full: 57.25 GiB,
+256-288 MiB of locked 4 KiB pages a thread (32 MiB apart, against 64 at 128 MiB requests), 8 locks, 1 working-set raise, 1564
+calls in 2.64 s, the threads and nodes tables headed `4 KiB locked`, SimpleV2 at 82,401 MiB/s. 2.22 GiB is the most locked yet.
+
 0.1.2 ran every short case and passed, testing less than it planned. The tail run's test speed matched 0.1.2's (82,034 against
 81,998 MiB/s, one run each). Not checked: a standard (non-admin) account's raise; a tail of several GiB.
