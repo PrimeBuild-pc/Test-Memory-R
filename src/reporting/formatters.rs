@@ -1733,8 +1733,21 @@ impl ReportFormatter for DefaultFormatter {
             cells.push(self.thread_status(report, i));
             table = table.add_row(cells);
         }
+        // Whether a 4 KiB tail is locked in RAM, as the large pages are, or pageable (TODO 131)
+        use crate::memory::stitched::Tail;
+        let mut notes = Vec::new();
+        match report.tail {
+            Some(Tail::Locked) => notes.push("4 KiB: the rest where the larger pages ran short, locked in RAM (tail4k=locked)."),
+            Some(Tail::Pageable) => {
+                notes.push("4 KiB: the rest where the larger pages ran short, pageable: Windows may page it out (tail4k=pageable).")
+            }
+            Some(Tail::Off) | None => {}
+        }
         if multi && report.threads.iter().any(|t| t.regular_bytes > 0) {
-            table = table.with_footer("4 KiB pages only prefer the thread's node, and count as local.");
+            notes.push("4 KiB pages only prefer the thread's node, and count as local.");
+        }
+        if !notes.is_empty() {
+            table = table.with_footer(notes.join(" "));
         }
         table
     }

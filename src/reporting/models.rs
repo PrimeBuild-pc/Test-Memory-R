@@ -390,6 +390,9 @@ pub struct AllocationReport {
     pub commit_groups: Vec<CommitGroup>,
     /// One per dimension, in `FairnessDimension::ALL` order.
     pub fairness: Vec<DimensionFairness>,
+    /// The 4 KiB tail the threads took where the large pages ran short, locked or pageable (TODO 131); `None` without one, including a
+    /// run whose 4 KiB pages are its own smallest size (`minpage=regular`).
+    pub tail: Option<crate::memory::stitched::Tail>,
 }
 
 #[derive(Debug, Clone)]

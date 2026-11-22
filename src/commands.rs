@@ -205,6 +205,9 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     more(out, "  or huge (1GB); 2MB and 1GB pages need the large-page privilege")?;
     entry(out, "maxpage=large", "Largest page it asks for: regular, large or huge (the default)")?;
     more(out, "  (minpage=regular maxpage=regular: 4KB pages, without asking)")?;
+    entry(out, "tail4k=locked", "Where 2MB/1GB pages run short, the rest of a thread on 4KB pages, up to")?;
+    let cap = crate::memory::stitched::TAIL_PERCENT;
+    more(out, &format!("  {cap}% of it: locked in RAM (default), pageable, or off; short by more, the run stops"))?;
     entry(out, "channels=2", "Memory channels, for TM5 SimpleTest's stride (channels x Parameter - 1")?;
     more(out, "  lines); default: the config's, else 2")?;
     entry(out, "record=compact", "What the run keeps: full (every thread's rows, indented; the default), compact (the erring")?;

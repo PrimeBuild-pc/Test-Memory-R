@@ -1936,6 +1936,7 @@ mod tests {
             nodes: Vec::new(),
             commit_groups: Vec::new(),
             fairness: Vec::new(),
+            tail: None,
         };
         let plan = TestConfigurationReport {
             suite_timing: String::new(),

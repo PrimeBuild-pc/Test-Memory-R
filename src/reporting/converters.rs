@@ -496,6 +496,7 @@ pub fn create_allocation_report(
         nodes: nodes.into_values().collect(),
         commit_groups,
         threads,
+        tail: None,
     }
 }
 
@@ -766,7 +767,7 @@ pub fn create_overall_stats_summary_report(result: &crate::results::TestRunResul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::allocator::PageSizeLevel::{Huge, Large};
+    use crate::memory::allocator::PageSizeLevel::{Huge, Large, Regular};
     use crate::reporting::formatters::{DefaultFormatter, ReportFormatter};
     use crate::test_support::{allocation_report, allocation_report_one_node, allocation_report_two_nodes, repeat, span};
 
@@ -948,6 +949,24 @@ mod tests {
         assert_eq!(huge[4], "2-3 (-5.00 GiB)");
         let large = summary.rows.iter().find(|r| r[0] == "2 MiB").unwrap();
         assert_eq!((large[4].as_str(), large[5].as_str()), ("0-3 (±5.00 GiB)", "✅"));
+    }
+
+    /// TODO 131: the threads table says whether a 4 KiB tail is locked in RAM or pageable, and nothing without one
+    #[test]
+    fn the_threads_table_says_how_a_tail_is_held() {
+        use crate::memory::stitched::Tail;
+        let mut tail = repeat(3, GIB, Huge, 0);
+        tail.push((64 * MIB, Regular, 0, false));
+        let spans = vec![span(0, 0, 4 * GIB, &repeat(4, GIB, Huge, 0)), span(1, 0, 3 * GIB + 64 * MIB, &tail)];
+        let mut report = allocation_report(spans, 1);
+        let f = DefaultFormatter::new();
+        assert_eq!(f.prepare_allocation_threads_table(&report).footer, None);
+        report.tail = Some(Tail::Locked);
+        let footer = f.prepare_allocation_threads_table(&report).footer;
+        assert_eq!(footer.as_deref(), Some("4 KiB: the rest where the larger pages ran short, locked in RAM (tail4k=locked)."));
+        report.tail = Some(Tail::Pageable);
+        let footer = f.prepare_allocation_threads_table(&report).footer.unwrap();
+        assert!(footer.contains("pageable: Windows may page it out"), "{footer}");
     }
 
     /// A thread short of its target is ⚠️, and one fed in small pieces is 🟡 on Requests.

@@ -452,7 +452,8 @@ page pool) TMR splits into **three independent stages**.
 
 `create_layout` (`allocation_strategy.rs`) turns `memory=` into one share per thread, the same
 for every thread, rounded to a multiple of `blkroundtarget` (1 GiB by default) in the `blkround`
-direction (up by default, out of the reserve):
+direction (up by default, out of the reserve; a TM5 import rounds down to its Lock Memory
+Granularity, as TM5 does, TODO 131):
 
 ```
   per_thread_raw = (reference − reserve) / threads        reference: available for
@@ -480,7 +481,8 @@ a node draw from one page pool, and fairness is judged within it:
   │                                    on bigger pages, then the one served │
   │                                    longest ago; a refusal halves the    │
   │                                    node's request size                  │
-  │ 4 KiB    whatever is left, thread by thread, if minpage=regular         │
+  │ 4 KiB    whatever is left, thread by thread, if minpage=regular;        │
+  │          else a tail of up to 5% a thread, locked (tail4k=), or stop    │
   └─────────────────────────────────────────────────────────────────────────┘
 
   stitched (the only allocator since TODO 76) — one placeholder, one contiguous VA span per thread
@@ -617,6 +619,7 @@ CLI (`params.rs`), all overridable from JSON:
 |---|---|---|
 | `memory=20%` / `2GiB` / `2048MB` | 1 | Total reservation. `-from-available` (default, TM5-like), `-from-total`, `-target` |
 | `minpage=` / `maxpage=` (JSON `min_page_size` / `max_page_size`) | 1 | Gate `regular`/`large`/`huge`; feeds `is_page_size_allowed` |
+| `tail4k=locked` (JSON `regular_tail`) | 1 | With `minpage=` above 4 KiB: what the large pages leave a thread short goes on 4 KiB pages, up to 5% of its share (`stitched::TAIL_PERCENT`), `locked` in RAM (the working-set minimum raised, then `VirtualLock`; either refused stops the run), `pageable`, or `off`. Short by more, the run stops before testing (TODO 131) |
 | `blkroundtarget=1GiB`, `blkround=up` | 1 | Round each thread's share to a multiple of this: `up` (default), `down` or `nearest`. Never past the reference figure: a smaller step instead, down to `largefloor`. A multiple of `largefloor`, no bigger than `hugechunk` / `largechunk` |
 | `largefloor=16MiB` | 1 | Smallest 2 MiB-page request (16 MiB–1 GiB): a refusal this small means the node is out of 2 MiB pages |
 | `hugechunk=1GiB`, `largechunk=128MiB` | 1 | First size of each 1 GiB / 2 MiB-page request, halved on refusal. Bigger means fewer OS calls on large machines and a coarser split. The commits merge, so the smaller 2 MiB default only costs calls, and spreads a node's 2 MiB shortfall over all its threads |

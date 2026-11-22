@@ -100,6 +100,13 @@ The built-in plans leave 10% of available memory free by default and test the re
 changes that; a config can supply its own allocation settings. The first run on a machine also
 measures the cache calibration, which takes about two minutes before testing starts.
 
+A run tests every thread's whole share or none. When Windows can't find enough 1 GB and 2 MB pages
+(they fragment as Windows runs), TMR finishes each thread on 4 KB pages, up to 5% of its share,
+locked in RAM as the large pages are: `tail4k=pageable` leaves them pageable, `tail4k=off` takes
+none. A thread short by more stops the run before testing, saying by how much and what to change:
+a bigger reserve (`memory=`), fewer threads (`cpus=`), a restart, or `minpage=regular`, which
+finishes on 4 KB pages without the cap, pageable.
+
 - **Double-click TMR** (or its Start menu entry) for its window. Type any settings in its box, or
   pick a config with Load config, and press Start; once the run is over, Run again starts another.
   A finished step's row opens its report, and the final summary opens itself as the run ends. The
@@ -229,6 +236,10 @@ settings. There are deliberate differences:
 
 - **Memory coverage.** Every imported test covers the full allocation. TM5's Testing Window
   sizes chunks; it does not limit the amount of memory the test covers in TMR.
+- **Rounding.** Each thread's share rounds down to the config's Lock Memory Granularity (at
+  least 16 MB, in steps of 16 MB), as TM5 does, so the config's Reserved Memory for Windows is
+  kept. TMR's own plans round up to whole GB, which can take part of the reserve. `blkround=` and
+  `blkroundtarget=` override either.
 - **Test 0.** An enabled RefreshStable test 0 becomes the seal around the tests, even when 0 is
   absent from Test Sequence. A 0 in the sequence also adds an explicit Seal-Check step.
 - **Patterns.** SimpleTest modes 0, 1 and 2 become native pattern programs:

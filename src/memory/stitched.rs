@@ -67,15 +67,17 @@ use std::sync::Arc;
 
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::System::Memory::{
-    MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_EXTENDED_PARAMETER_TYPE, MEM_LARGE_PAGES, MEM_PRESERVE_PLACEHOLDER,
-    MEM_RELEASE, MEM_REPLACE_PLACEHOLDER, MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, MemExtendedParameterAddressRequirements,
-    MemExtendedParameterAttributeFlags, MemExtendedParameterNumaNode, PAGE_NOACCESS, PAGE_READWRITE, VIRTUAL_ALLOCATION_TYPE,
-    VIRTUAL_FREE_TYPE, VirtualAlloc2, VirtualFree,
+    GetProcessWorkingSetSizeEx, MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_EXTENDED_PARAMETER_TYPE, MEM_LARGE_PAGES,
+    MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER, MEM_RESERVE, MEM_RESERVE_PLACEHOLDER,
+    MemExtendedParameterAddressRequirements, MemExtendedParameterAttributeFlags, MemExtendedParameterNumaNode, PAGE_NOACCESS,
+    PAGE_READWRITE, QUOTA_LIMITS_HARDWS_MAX_DISABLE, QUOTA_LIMITS_HARDWS_MIN_DISABLE, SetProcessWorkingSetSizeEx, VIRTUAL_ALLOCATION_TYPE,
+    VIRTUAL_FREE_TYPE, VirtualAlloc2, VirtualFree, VirtualLock,
 };
 use windows::Win32::System::SystemServices::{
     MEM_COALESCE_PLACEHOLDERS, MEM_EXTENDED_PARAMETER_NONPAGED_HUGE, MEM_EXTENDED_PARAMETER_NONPAGED_LARGE,
     MEM_EXTENDED_PARAMETER_TYPE_BITS,
 };
+use windows::Win32::System::Threading::GetCurrentProcess;
 
 use crate::constants::{BYTES_PER_MIB_USIZE, HUGE_PAGE_SIZE_USIZE, LARGE_PAGE_SIZE_USIZE, bytes_to_gib_f64};
 use crate::memory::allocator::{AllocationConfig, BlockSizing, PageSizeLevel};
@@ -116,6 +118,59 @@ impl CommitMethod {
         }
     }
 }
+
+/// How a run whose smallest page size is above 4 KiB finishes the threads its large pages left short (`tail4k=`, TODO 131): on 4 KiB pages,
+/// up to [`TAIL_PERCENT`] of each thread's target, locked in RAM or pageable, or not at all. A thread short by more, or with no tail, stops
+/// the run before testing: a run tests every thread's whole share or none. A run that allows 4 KiB pages (`minpage=regular`) takes them
+/// for whatever is left, uncapped and pageable, and has no tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tail {
+    /// Locked in RAM, as the large pages are: the working-set minimum raised by the tail, then each commit `VirtualLock`ed. Either refused
+    /// stops the run.
+    Locked,
+    /// Ordinary memory, which Windows may page out under pressure, with a warning
+    Pageable,
+    /// None: a thread the large pages leave short stops the run
+    Off,
+}
+
+impl Tail {
+    /// Its value for `tail4k=` and the JSON's `regular_tail`
+    pub fn label(self) -> &'static str {
+        match self {
+            Tail::Locked => "locked",
+            Tail::Pageable => "pageable",
+            Tail::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for Tail {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "locked" => Ok(Tail::Locked),
+            "pageable" => Ok(Tail::Pageable),
+            "off" => Ok(Tail::Off),
+            _ => Err(format!("Invalid tail4k '{s}'. Valid: locked, pageable, off")),
+        }
+    }
+}
+
+/// The most of a thread's target its 4 KiB tail may cover, in percent: enough for a desktop whose 2 MiB pages come up a few hundred MiB
+/// short (TODO 131's report: 0.70 GiB over seven threads), little enough that the run stays on large pages.
+pub const TAIL_PERCENT: usize = 5;
+
+/// The most thread with `target` bytes may take as its 4 KiB tail: `TAIL_PERCENT` of it, in whole 4 KiB pages.
+pub fn tail_cap(target: usize) -> usize {
+    let page = crate::constants::PAGE_SIZE_4KB;
+    target / 100 * TAIL_PERCENT / page * page
+}
+
+/// Added to the working-set minimum beyond a locked tail: Windows locks at most the minimum less a small overhead of its own
+/// (`VirtualLock`'s documentation), and the process's own pages count in its working set too.
+const TAIL_SLACK: usize = 16 * BYTES_PER_MIB_USIZE;
 
 /// A Windows build Microsoft fixed the refused-replace bugcheck in (0x139, module docs): a server's or a client's, whose revisions run
 /// apart for one build (`WindowsVersion::server`), the build, and the first revision (UBR) with the fix.
@@ -233,6 +288,8 @@ pub struct StitchRequest {
     /// Every thread size is rounded down to a multiple of this and every LARGE commit is one, so no run is smaller. A power of two, 2 MiB
     /// ..= 1 GiB; the default 16 MiB is TMR's smallest planned block.
     pub run_quantum: usize,
+    /// The 4 KiB tail when `min_page` is above 4 KiB and the large pages run short ([`Tail`]); unused when `min_page` is 4 KiB.
+    pub tail: Tail,
 }
 
 impl StitchRequest {
@@ -249,6 +306,7 @@ impl StitchRequest {
             large_floor: 16 * BYTES_PER_MIB_USIZE,
             numa_nodes: 1,
             run_quantum: 16 * BYTES_PER_MIB_USIZE,
+            tail: Tail::Locked,
         }
     }
 }
@@ -394,8 +452,9 @@ impl ThreadSpan {
 // OS operations
 // ---------------------------------------------------------------------------------------------
 
-/// The six OS operations the arena is built from. [`Win32Vm`] is the real thing; the tests swap in a fake that models the placeholder
-/// rules, finite page pools and the refused-replace bug, so refusals can be driven without exhausting anything. Errors are raw Win32 codes.
+/// The OS operations the arena is built from: seven for the VA and its commits, three for a locked 4 KiB tail. [`Win32Vm`] is the real
+/// thing; the tests swap in a fake that models the placeholder rules, finite page pools, the lock budget and the refused-replace bug, so
+/// refusals can be driven without exhausting anything. Errors are raw Win32 codes.
 pub trait VmOps {
     /// Reserve `len` bytes of placeholder VA aligned to `align`, at or above `lowest`.
     fn reserve(&mut self, len: usize, align: usize, lowest: Option<usize>) -> Result<usize, u32>;
@@ -413,6 +472,13 @@ pub trait VmOps {
     fn allocate_at(&mut self, addr: usize, len: usize, page: PageSizeLevel, numa: Option<u32>) -> Result<(), u32>;
     /// Release the region (placeholder or allocation) based at `addr`; `len` is for the log.
     fn release(&mut self, addr: usize, len: usize) -> Result<(), u32>;
+    /// Raise the process's working-set minimum (and maximum) by `bytes`, so that much more can be locked (`SetProcessWorkingSetSizeEx`).
+    /// Windows charges the raise against the memory it can keep resident, and refuses it when that is short.
+    fn raise_working_set(&mut self, bytes: usize) -> Result<(), u32>;
+    /// Undo a [`Self::raise_working_set`] of `bytes`.
+    fn lower_working_set(&mut self, bytes: usize) -> Result<(), u32>;
+    /// Lock the committed 4 KiB pages `[addr, addr + len)` in RAM (`VirtualLock`): touched in, and never paged out while committed.
+    fn lock(&mut self, addr: usize, len: usize) -> Result<(), u32>;
 }
 
 /// How many of each operation an arena asked of the OS, refusals included: its finished line's figures (TODO 120)
@@ -432,12 +498,16 @@ pub struct VmCalls {
     pub refused: usize,
     /// Regions released (`release`)
     pub releases: usize,
+    /// 4 KiB commits locked (`lock`)
+    pub locks: usize,
+    /// Working-set minimum changes (`raise_working_set`, `lower_working_set`)
+    pub working_set: usize,
 }
 
 impl VmCalls {
     /// Every call made
     pub fn total(&self) -> usize {
-        self.reservations + self.re_reservations + self.splits + self.merges + self.commits + self.releases
+        self.reservations + self.re_reservations + self.splits + self.merges + self.commits + self.releases + self.locks + self.working_set
     }
 
     /// Each kind made, by its count, commits first: `64 commits (1 refused), 66 placeholder splits, 64 releases, 1 VA reservation`
@@ -450,6 +520,8 @@ impl VmCalls {
             kind(self.splits, "placeholder split", "placeholder splits"),
             kind(self.merges, "placeholder merge", "placeholder merges"),
             kind(self.releases, "release", "releases"),
+            kind(self.locks, "lock", "locks"),
+            kind(self.working_set, "working-set raise", "working-set changes"),
             kind(self.reservations, "VA reservation", "VA reservations"),
             kind(self.re_reservations, "re-reservation", "re-reservations"),
         ]
@@ -505,6 +577,18 @@ impl<V: VmOps> VmOps for Counted<V> {
     fn release(&mut self, addr: usize, len: usize) -> Result<(), u32> {
         self.calls.releases += 1;
         self.vm.release(addr, len)
+    }
+    fn raise_working_set(&mut self, bytes: usize) -> Result<(), u32> {
+        self.calls.working_set += 1;
+        self.vm.raise_working_set(bytes)
+    }
+    fn lower_working_set(&mut self, bytes: usize) -> Result<(), u32> {
+        self.calls.working_set += 1;
+        self.vm.lower_working_set(bytes)
+    }
+    fn lock(&mut self, addr: usize, len: usize) -> Result<(), u32> {
+        self.calls.locks += 1;
+        self.vm.lock(addr, len)
     }
 }
 
@@ -681,6 +765,60 @@ impl VmOps for Win32Vm {
     fn release(&mut self, addr: usize, len: usize) -> Result<(), u32> {
         os_call(format!("VirtualFree({addr:#x}, 0, MEM_RELEASE)  [{len:#x}]"), || Self::free(addr, 0, MEM_RELEASE))
     }
+
+    fn raise_working_set(&mut self, bytes: usize) -> Result<(), u32> {
+        // Raising the minimum needs "Increase a process working set", which every user holds but disabled. Not held, the raise below is
+        // refused, and that refusal is the error the run stops on.
+        if let Err(e) = crate::memory::privileges::enable_working_set_privilege() {
+            log::warn!("stitched: {e}");
+        }
+        Self::adjust_working_set(bytes, true)
+    }
+
+    fn lower_working_set(&mut self, bytes: usize) -> Result<(), u32> {
+        Self::adjust_working_set(bytes, false)
+    }
+
+    fn lock(&mut self, addr: usize, len: usize) -> Result<(), u32> {
+        os_call(format!("VirtualLock({addr:#x}, {len:#x})"), || {
+            // SAFETY: `[addr, addr + len)` is one 4 KiB commit the arena just made and owns; `VirtualLock` reads nothing of ours and only
+            // faults those pages in and pins them.
+            unsafe { VirtualLock(addr as *const c_void, len) }.map_err(|e| win32_code(&e))
+        })
+    }
+}
+
+impl Win32Vm {
+    /// The working-set minimum and maximum, both raised (`up`) or lowered by `bytes`, soft limits as Windows' default: the minimum is what
+    /// the process may lock, the maximum only has to stay above it.
+    fn adjust_working_set(bytes: usize, up: bool) -> Result<(), u32> {
+        // SAFETY: `GetCurrentProcess` is a pseudo-handle with every right, closed by nobody. The three out-params are locals passed
+        // directly, so no pointer outlives the call.
+        let (min, max) = unsafe {
+            let (mut min, mut max, mut flags) = (0usize, 0usize, 0u32);
+            if !GetProcessWorkingSetSizeEx(GetCurrentProcess(), &mut min, &mut max, &mut flags).as_bool() {
+                return Err(Self::last_error());
+            }
+            (min, max)
+        };
+        let (new_min, new_max) = if up {
+            (min.saturating_add(bytes), max.saturating_add(bytes))
+        } else {
+            (min.saturating_sub(bytes), max.saturating_sub(bytes).max(min.saturating_sub(bytes)))
+        };
+        os_call(format!("SetProcessWorkingSetSizeEx({new_min:#x}, {new_max:#x}) [was {min:#x}, {max:#x}]"), || {
+            // SAFETY: plain values on the current process's pseudo-handle; nothing of ours is dereferenced.
+            unsafe {
+                SetProcessWorkingSetSizeEx(
+                    GetCurrentProcess(),
+                    new_min,
+                    new_max,
+                    QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE,
+                )
+            }
+            .map_err(|e| win32_code(&e))
+        })
+    }
 }
 
 fn win32_code(e: &windows::core::Error) -> u32 {
@@ -705,6 +843,22 @@ fn finished_line(allocated: usize, target: usize, threads: usize, elapsed: std::
 
 fn gib(bytes: usize) -> f64 {
     bytes_to_gib_f64(bytes as u64)
+}
+
+/// The large page sizes a request allows, for a shortfall's line: `1 GiB and 2 MiB pages`, `2 MiB pages`, `1 GiB pages`
+fn large_pages_label(req: &StitchRequest) -> &'static str {
+    let allows = |page| req.min_page <= page && page <= req.max_page;
+    match (allows(PageSizeLevel::Huge), allows(PageSizeLevel::Large)) {
+        (true, true) => "1 GiB and 2 MiB pages",
+        (true, false) => "1 GiB pages",
+        _ => "2 MiB pages",
+    }
+}
+
+/// What a run short of memory can change, the end of its stop's message
+fn remedies() -> &'static str {
+    "free more memory, by a bigger reserve (memory=, or a TM5 .cfg's \"Reserved Memory for Windows (Mb)\"), fewer threads (cpus=) \
+     or a restart (Windows' 2 MiB pages fragment as it runs), or minpage=regular to finish on 4 KiB pages, uncapped and pageable"
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -807,6 +961,10 @@ pub struct StitchedArena<V: VmOps = Win32Vm> {
     slices: Vec<Slice>,
     /// The part of the reservation not yet carved into slices: set only while `build_with` carves, or if carving failed partway.
     uncarved: Option<(usize, usize)>,
+    /// The 4 KiB tail taken, if one was (TODO 131): while it is `Locked`, every 4 KiB commit is locked as it is made.
+    tail: Option<Tail>,
+    /// How far the working-set minimum was raised for a locked tail, lowered again as the arena drops.
+    working_set_raised: usize,
 }
 
 impl StitchedArena<Win32Vm> {
@@ -858,6 +1016,8 @@ impl<V: VmOps> StitchedArena<V> {
             commit_method: req.commit_method,
             slices: Vec::with_capacity(req.threads.len()),
             uncarved: Some((base, plan.reservation)),
+            tail: None,
+            working_set_raised: 0,
         };
         arena.carve(req, &plan)?;
 
@@ -865,13 +1025,7 @@ impl<V: VmOps> StitchedArena<V> {
         let sizing = BlockSizing { huge_chunk: req.huge_chunk, large_chunk: req.large_chunk, large_floor: req.large_floor };
         // No fairness question for 4 KiB pages: a refusal there is the commit limit, and that fails the build.
         if let Some((i, code)) = fill::fill_all(&mut arena, pages, &sizing, req.numa_nodes, WHO, started)? {
-            let slice = &arena.slices[i];
-            return Err(format!(
-                "stitched: committing {:.2} GiB of 4 KiB pages for thread {} was refused: {}",
-                gib(slice.remaining()),
-                slice.thread_id,
-                describe_error(code)
-            ));
+            return Err(arena.refused_regular(i, code));
         }
 
         if let Some(empty) = arena.slices.iter().find(|s| s.cursor == 0) {
@@ -880,15 +1034,18 @@ impl<V: VmOps> StitchedArena<V> {
                 empty.thread_id, req.min_page, req.max_page
             ));
         }
-        for short in arena.slices.iter().filter(|s| s.remaining() > 0) {
-            log::warn!(
-                "stitched: thread {} got {:.2} of {:.2} GiB: page sizes {:?}..={:?} ran out",
-                short.thread_id,
-                gib(short.cursor),
-                gib(short.target),
-                req.min_page,
-                req.max_page
-            );
+        // What the large pages left short goes on 4 KiB pages, when every short thread is within its cap (TODO 131). A run that allows 4
+        // KiB pages has had them already.
+        if req.min_page > PageSizeLevel::Regular
+            && req.tail != Tail::Off
+            && arena.short() > 0
+            && arena.slices.iter().all(|s| s.remaining() <= tail_cap(s.target))
+        {
+            arena.take_tail(req, started)?;
+        }
+        // A run tests every thread's whole share or stops before testing: a short thread would leave a gap a run never reports.
+        if arena.short() > 0 {
+            return Err(arena.short_message(req));
         }
         let allocated: usize = arena.slices.iter().map(|s| s.cursor).sum();
         log::info!(target: crate::logfile::SHOWN_TARGET, "{}", finished_line(allocated, target, req.threads.len(), started.elapsed(), &arena.vm.calls));
@@ -899,6 +1056,88 @@ impl<V: VmOps> StitchedArena<V> {
     #[cfg(test)]
     fn calls(&self) -> VmCalls {
         self.vm.calls
+    }
+
+    /// The 4 KiB tail taken, if one was: `Locked` or `Pageable`
+    pub fn tail(&self) -> Option<Tail> {
+        self.tail
+    }
+
+    /// Bytes the threads are still short of their targets, together
+    fn short(&self) -> usize {
+        self.slices.iter().map(Slice::remaining).sum()
+    }
+
+    /// A 4 KiB commit refused: the commit limit, the end of the build
+    fn refused_regular(&self, i: usize, code: u32) -> String {
+        let slice = &self.slices[i];
+        format!(
+            "stitched: committing {:.2} GiB of 4 KiB pages for thread {} was refused: {}",
+            gib(slice.remaining()),
+            slice.thread_id,
+            describe_error(code)
+        )
+    }
+
+    /// The 4 KiB tail (TODO 131): each short thread's rest on 4 KiB pages, its working-set room raised first when they're to be locked.
+    fn take_tail(&mut self, req: &StitchRequest, started: std::time::Instant) -> Result<(), String> {
+        let short = self.short();
+        let threads = self.slices.iter().filter(|s| s.remaining() > 0).count();
+        let ran_short = format!("{} ran {} short over {}", large_pages_label(req), fill::gib_label(short), fill::threads_label(threads));
+        if req.tail == Tail::Locked {
+            let raise = short + TAIL_SLACK;
+            self.vm.raise_working_set(raise).map_err(|code| {
+                format!(
+                    "stitched: {ran_short}, and locking that on 4 KiB pages was refused: raising the working-set minimum by {} failed: \
+                     {}. tail4k=pageable takes it unlocked, or {}",
+                    size_label(raise),
+                    describe_error(code),
+                    remedies()
+                )
+            })?;
+            self.working_set_raised = raise;
+            log::info!(target: crate::logfile::SHOWN_TARGET, "⏳ {WHO}: {ran_short}: the rest on 4 KiB pages, locked in RAM (tail4k=locked)");
+        } else {
+            log::warn!(
+                "⚠️ {WHO}: {ran_short}: the rest on pageable 4 KiB pages (tail4k=pageable), which Windows may page out under pressure, \
+                 slowing the test there; tail4k=locked keeps them in RAM"
+            );
+        }
+        self.tail = Some(req.tail);
+        if let Some((i, code)) = fill::fill_tail(self, WHO, started)? {
+            return Err(self.refused_regular(i, code));
+        }
+        Ok(())
+    }
+
+    /// Why the run stops when threads are still short after every page size it allows (TODO 131): by how much, and what to change.
+    fn short_message(&self, req: &StitchRequest) -> String {
+        let target: usize = self.slices.iter().map(|s| s.target).sum();
+        let short = self.slices.iter().filter(|s| s.remaining() > 0);
+        let worst = short.clone().max_by_key(|s| (s.remaining(), std::cmp::Reverse(s.thread_id)));
+        let worst = worst.map_or_else(String::new, |s| {
+            format!(
+                ", thread {} the most ({:.2} of {}, {:.1}% short)",
+                s.thread_id,
+                gib(s.cursor),
+                fill::gib_label(s.target),
+                100.0 * s.remaining() as f64 / s.target as f64
+            )
+        });
+        let tail = match req.tail {
+            Tail::Off => format!("and tail4k=off takes no 4 KiB tail (tail4k=locked takes up to {TAIL_PERCENT}% of a thread's share)"),
+            _ => format!("more than the 4 KiB tail takes ({TAIL_PERCENT}% of a thread's share)"),
+        };
+        format!(
+            "stitched: {} ran {} short of the {} asked for: {} of {} short{worst}, {tail}. A run tests every thread's whole share or \
+             stops here: {}",
+            large_pages_label(req),
+            fill::gib_label(self.short()),
+            fill::gib_label(target),
+            short.count(),
+            fill::threads_label(self.slices.len()),
+            remedies()
+        )
     }
 
     /// Cut the reservation into one placeholder per thread, bottom up. Each cut is a front split of what is left.
@@ -1127,9 +1366,22 @@ impl<V: VmOps> Fill for StitchedArena<V> {
     }
 
     fn request(&mut self, i: usize, len: usize, page: PageSizeLevel, node: Option<u32>) -> Result<Grant, String> {
+        let addr = self.slices[i].next_addr();
         let grant = self.commit(i, len, page, node)?;
         let refused = matches!(grant, Grant::Refused(_));
         self.slices[i].commits.push(Commit { len, page, numa_node: node, refused });
+        // A locked tail's commits, each as it's made (TODO 131): a refusal ends the build, and the arena's drop gives back what was taken
+        if !refused && page == PageSizeLevel::Regular && self.tail == Some(Tail::Locked) {
+            self.vm.lock(addr, len).map_err(|code| {
+                format!(
+                    "stitched: locking thread {}'s {} of 4 KiB pages in RAM failed: {}. tail4k=pageable takes the tail unlocked, or {}",
+                    self.slices[i].thread_id,
+                    size_label(len),
+                    describe_error(code),
+                    remedies()
+                )
+            })?;
+        }
         Ok(grant)
     }
 
@@ -1182,6 +1434,13 @@ impl<V: VmOps> Drop for StitchedArena<V> {
                     log::error!("stitched: teardown: releasing the uncarved {addr:#x}+{len:#x} failed: {}", describe_error(code));
                 }
             }
+        }
+        // A locked tail's room, once its pages are gone: Windows charges a raised minimum until it's lowered, and a window runs session
+        // after session in one process
+        if self.working_set_raised > 0
+            && let Err(code) = vm.lower_working_set(std::mem::take(&mut self.working_set_raised))
+        {
+            log::error!("stitched: teardown: lowering the working-set minimum failed: {}", describe_error(code));
         }
         if failed > 0 {
             log::error!("stitched: teardown released {released} regions, {failed} failed");
@@ -1245,6 +1504,8 @@ pub struct StitchedAllocation {
     pub elapsed: std::time::Duration,
     /// The machine's NUMA nodes.
     pub numa_nodes: u32,
+    /// The 4 KiB tail taken where the large pages ran short, locked or pageable, if one was (TODO 131)
+    pub tail: Option<Tail>,
 }
 
 /// Every thread's share as one span.
@@ -1266,6 +1527,7 @@ pub fn chunk_allocate_stitched(
     request.huge_chunk = sizing.huge_chunk;
     request.large_chunk = sizing.large_chunk;
     request.large_floor = sizing.large_floor;
+    request.tail = alloc.regular_tail.parse()?;
     let (method, why) = commit_method_for(crate::windows_version::WindowsVersion::detect());
     request.commit_method = method;
     match method {
@@ -1285,7 +1547,8 @@ pub fn chunk_allocate_stitched(
     let spans = arena.take_spans();
     arena.log_summary();
     fill::warn_remote(WHO, &arena.remote_memory());
-    Ok(StitchedAllocation { blocks: into_allocation_blocks(Arc::new(arena)), spans, elapsed, numa_nodes: request.numa_nodes })
+    let tail = arena.tail();
+    Ok(StitchedAllocation { blocks: into_allocation_blocks(Arc::new(arena)), spans, elapsed, numa_nodes: request.numa_nodes, tail })
 }
 
 #[cfg(test)]
@@ -1340,6 +1603,14 @@ mod tests {
         huge_error: Option<u32>,
         /// Every commit asked for, in order: (page size, node, granted).
         commits: Vec<(PageSizeLevel, Option<u32>, bool)>,
+        /// The most the working-set minimum may be raised by: the memory Windows can keep resident. Unlimited unless set.
+        working_set_room: Option<usize>,
+        /// How far the working-set minimum is raised now
+        working_set: usize,
+        /// The 4 KiB commits locked now, by base: their lengths
+        locked: HashMap<usize, usize>,
+        /// Every lock is refused with this code instead
+        lock_error: Option<u32>,
     }
 
     impl State {
@@ -1495,6 +1766,7 @@ mod tests {
                 Some(found) => found,
             };
             s.regions.remove(&addr);
+            s.locked.remove(&addr);
             if let Region::Committed(page, node) = region {
                 *s.pool(page, node) += State::units(page, len);
             }
@@ -1503,7 +1775,40 @@ mod tests {
             }
             Ok(())
         }
+
+        fn raise_working_set(&mut self, bytes: usize) -> Result<(), u32> {
+            let mut s = self.state();
+            if s.working_set_room.is_some_and(|room| s.working_set + bytes > room) {
+                return Err(ERROR_NO_SYSTEM_RESOURCES);
+            }
+            s.working_set += bytes;
+            Ok(())
+        }
+
+        fn lower_working_set(&mut self, bytes: usize) -> Result<(), u32> {
+            let mut s = self.state();
+            s.working_set = s.working_set.checked_sub(bytes).ok_or(ERROR_INVALID_PARAMETER)?;
+            Ok(())
+        }
+
+        /// Only a whole 4 KiB commit, and no more than the raised minimum holds: `ERROR_WORKING_SET_QUOTA` past it
+        fn lock(&mut self, addr: usize, len: usize) -> Result<(), u32> {
+            let mut s = self.state();
+            if let Some(code) = s.lock_error {
+                return Err(code);
+            }
+            if !matches!(s.regions.get(&addr), Some(&(l, Region::Committed(PageSizeLevel::Regular, _))) if l == len) {
+                return Err(ERROR_INVALID_ADDRESS);
+            }
+            if s.locked.values().sum::<usize>() + len > s.working_set {
+                return Err(ERROR_WORKING_SET_QUOTA);
+            }
+            s.locked.insert(addr, len);
+            Ok(())
+        }
     }
+
+    const ERROR_WORKING_SET_QUOTA: u32 = 1453;
 
     fn threads(sizes: &[usize], nodes: &[Option<u32>]) -> Vec<StitchThread> {
         sizes.iter().zip(nodes).enumerate().map(|(thread_id, (&bytes, &numa_node))| StitchThread { thread_id, bytes, numa_node }).collect()
@@ -1658,13 +1963,23 @@ mod tests {
             calls.total(),
             calls.reservations + calls.re_reservations + calls.splits + calls.merges + calls.commits + calls.releases
         );
+        assert_eq!((calls.locks, calls.working_set), (0, 0), "no tail: minpage is 4 KiB");
     }
 
     /// The finished line: what it got, in how long, every call by kind with the kinds it made none of left out; and a short allocation
     /// says of how much
     #[test]
     fn the_finished_line_counts_the_calls_by_kind() {
-        let calls = VmCalls { reservations: 1, re_reservations: 1, splits: 66, merges: 0, commits: 64, refused: 1, releases: 64 };
+        let calls = VmCalls {
+            reservations: 1,
+            re_reservations: 1,
+            splits: 66,
+            merges: 0,
+            commits: 64,
+            refused: 1,
+            releases: 64,
+            ..VmCalls::default()
+        };
         let took = std::time::Duration::from_millis(2_018);
         assert_eq!(
             finished_line(28 * GIB, 28 * GIB, 4, took, &calls),
@@ -1992,15 +2307,118 @@ mod tests {
     }
 
     #[test]
-    fn min_large_leaves_threads_short_but_not_empty() {
+    fn a_shortfall_past_the_tail_stops_the_run_and_cleans_up() {
         let vm = FakeVm::default();
         vm.state().huge_pages.insert(None, 0);
         vm.state().large_bytes.insert(None, 3 * GIB);
         let mut req = StitchRequest::new(threads(&[2 * GIB; 2], &[None; 2]));
         req.min_page = PageSizeLevel::Large;
-        let arena = StitchedArena::build_with(vm, &req).unwrap();
-        let lens: Vec<_> = arena.spans().iter().map(|s| s.len).collect();
-        assert_eq!(lens, vec![2 * GIB, GIB]);
+        let err = StitchedArena::build_with(vm.clone(), &req).unwrap_err();
+        assert_eq!(
+            err,
+            "stitched: 1 GiB and 2 MiB pages ran 1.00 GiB short of the 4.00 GiB asked for: 1 of 2 threads short, thread 1 the most \
+             (1.00 of 2.00 GiB, 50.0% short), more than the 4 KiB tail takes (5% of a thread's share). A run tests every thread's whole \
+             share or stops here: free more memory, by a bigger reserve (memory=, or a TM5 .cfg's \"Reserved Memory for Windows (Mb)\"), \
+             fewer threads (cpus=) or a restart (Windows' 2 MiB pages fragment as it runs), or minpage=regular to finish on 4 KiB pages, \
+             uncapped and pageable"
+        );
+        let s = vm.state();
+        assert!(s.regions.is_empty(), "{:?}", s.regions);
+        assert_eq!(s.large_bytes[&None], 3 * GIB);
+        assert!(!s.commits.iter().any(|c| c.0 == PageSizeLevel::Regular), "no tail asked for past the cap");
+        assert_eq!(s.working_set, 0);
+    }
+
+    /// TODO 131: a run on large pages whose 2 MiB pages come up short by less than the cap finishes each thread on 4 KiB pages, each
+    /// commit locked under a working-set minimum raised by the tail; the drop lowers it again
+    #[test]
+    fn a_small_shortfall_takes_a_locked_4k_tail() {
+        let vm = FakeVm::default();
+        vm.state().huge_pages.insert(None, 0);
+        vm.state().large_bytes.insert(None, 4 * GIB - 64 * MIB);
+        let mut req = StitchRequest::new(threads(&[2 * GIB; 2], &[None; 2]));
+        req.min_page = PageSizeLevel::Large;
+        let arena = StitchedArena::build_with(vm.clone(), &req).unwrap();
+        assert_well_formed(&arena);
+        assert_eq!(arena.tail(), Some(Tail::Locked));
+        let regular: Vec<usize> = arena.spans().iter().map(|s| s.bytes_at(PageSizeLevel::Regular)).collect();
+        assert_eq!(regular, vec![0, 64 * MIB], "the second thread's last 64 MiB");
+        assert!(arena.spans().iter().all(|s| s.len == s.target));
+        {
+            let s = vm.state();
+            assert_eq!(s.locked.values().sum::<usize>(), 64 * MIB, "every 4 KiB commit locked");
+            assert_eq!(s.working_set, 64 * MIB + TAIL_SLACK);
+        }
+        let calls = arena.calls();
+        assert_eq!((calls.locks, calls.working_set), (1, 1));
+        drop(arena);
+        let s = vm.state();
+        assert!(s.regions.is_empty() && s.locked.is_empty(), "{:?}", s.regions);
+        assert_eq!(s.working_set, 0, "lowered again");
+    }
+
+    /// A pageable tail fills the same way and locks nothing
+    #[test]
+    fn a_pageable_tail_locks_nothing() {
+        let vm = FakeVm::default();
+        vm.state().huge_pages.insert(None, 0);
+        vm.state().large_bytes.insert(None, 4 * GIB - 64 * MIB);
+        let mut req = StitchRequest::new(threads(&[2 * GIB; 2], &[None; 2]));
+        req.min_page = PageSizeLevel::Large;
+        req.tail = Tail::Pageable;
+        let arena = StitchedArena::build_with(vm.clone(), &req).unwrap();
+        assert_eq!(arena.tail(), Some(Tail::Pageable));
+        assert!(arena.spans().iter().all(|s| s.len == s.target));
+        assert_eq!(arena.spans()[1].bytes_at(PageSizeLevel::Regular), 64 * MIB);
+        let s = vm.state();
+        assert!(s.locked.is_empty());
+        assert_eq!(s.working_set, 0);
+    }
+
+    /// tail4k=off: the same shortfall stops the run, and says what would take it
+    #[test]
+    fn no_tail_stops_a_short_run() {
+        let vm = FakeVm::default();
+        vm.state().huge_pages.insert(None, 0);
+        vm.state().large_bytes.insert(None, 4 * GIB - 64 * MIB);
+        let mut req = StitchRequest::new(threads(&[2 * GIB; 2], &[None; 2]));
+        req.min_page = PageSizeLevel::Large;
+        req.tail = Tail::Off;
+        let err = StitchedArena::build_with(vm.clone(), &req).unwrap_err();
+        assert!(err.contains("ran 0.06 GiB short"), "{err}");
+        assert!(err.contains("tail4k=off takes no 4 KiB tail (tail4k=locked takes up to 5%"), "{err}");
+        assert!(vm.state().regions.is_empty());
+    }
+
+    /// Windows refusing the raised minimum (memory it can't keep resident) or a lock stops the run, everything given back
+    #[test]
+    fn a_refused_raise_or_lock_stops_the_run() {
+        for (room, lock_error, says) in [
+            (Some(0), None, "raising the working-set minimum by 80 MiB failed"),
+            (None, Some(ERROR_WORKING_SET_QUOTA), "locking thread 1's 64 MiB of 4 KiB pages in RAM failed"),
+        ] {
+            let vm = FakeVm::default();
+            vm.state().huge_pages.insert(None, 0);
+            vm.state().large_bytes.insert(None, 4 * GIB - 64 * MIB);
+            vm.state().working_set_room = room;
+            vm.state().lock_error = lock_error;
+            let mut req = StitchRequest::new(threads(&[2 * GIB; 2], &[None; 2]));
+            req.min_page = PageSizeLevel::Large;
+            let err = StitchedArena::build_with(vm.clone(), &req).unwrap_err();
+            assert!(err.contains(says) && err.contains("tail4k=pageable takes"), "{err}");
+            let s = vm.state();
+            assert!(s.regions.is_empty() && s.locked.is_empty(), "{:?}", s.regions);
+            assert_eq!(s.working_set, 0);
+        }
+    }
+
+    /// The cap: 5% of a thread's target, in whole 4 KiB pages; the setting's values
+    #[test]
+    fn the_tail_cap_is_five_percent_in_pages() {
+        assert_eq!(tail_cap(2 * GIB), 2 * GIB / 100 * 5 / 4096 * 4096);
+        assert_eq!(tail_cap(16 * MIB) % 4096, 0);
+        assert_eq!("Pageable".parse::<Tail>(), Ok(Tail::Pageable));
+        assert!("lock".parse::<Tail>().unwrap_err().contains("Valid: locked, pageable, off"));
     }
 
     #[test]

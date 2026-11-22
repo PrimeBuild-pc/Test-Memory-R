@@ -116,6 +116,33 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
     }
 }
 
+/// Enable "Increase a process working set" (`SeIncreaseWorkingSetPrivilege`) in this process's token, which raising the working-set
+/// minimum for a locked 4 KiB tail needs (TODO 131). Windows assigns it to every user but leaves it disabled. Not assigned (a policy that
+/// took it away) is an error; the raise is then refused, and that refusal is what stops the run.
+pub fn enable_working_set_privilege() -> Result<(), &'static str> {
+    // SAFETY: as `check_large_page_privilege`: `GetCurrentProcess` returns a pseudo-handle that needs no closing; `token` is used only
+    // where `OpenProcessToken` succeeded and is closed exactly once on every path after it; `luid` is initialised before
+    // `LookupPrivilegeValueW` writes it. The two helpers' contract is met by the `TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY` open.
+    unsafe {
+        let mut token: HANDLE = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token).is_err() {
+            return Err("Failed to open process token");
+        }
+        let mut luid = LUID::default();
+        if LookupPrivilegeValueW(None, windows::core::w!("SeIncreaseWorkingSetPrivilege"), &mut luid).is_err() {
+            let _ = CloseHandle(token);
+            return Err("Failed to look up SeIncreaseWorkingSetPrivilege");
+        }
+        let result = match check_privilege_in_token(token, luid) {
+            PrivilegeState::NotAssigned => Err("SeIncreaseWorkingSetPrivilege not assigned to current user"),
+            PrivilegeState::AssignedButDisabled => enable_privilege_in_token(token, luid),
+            PrivilegeState::AssignedAndEnabled => Ok(()),
+        };
+        let _ = CloseHandle(token);
+        result
+    }
+}
+
 /// # Safety
 ///
 /// `token` must be an open process-token handle with `TOKEN_QUERY` access, and must stay open for the duration of the call — this function

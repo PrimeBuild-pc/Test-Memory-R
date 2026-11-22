@@ -1166,7 +1166,7 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
         fe.event(Run::AllocationStarting { min, max }.into());
     }
 
-    let crate::memory::stitched::StitchedAllocation { blocks: mut allocated_blocks, spans, elapsed, numa_nodes } =
+    let crate::memory::stitched::StitchedAllocation { blocks: mut allocated_blocks, spans, elapsed, numa_nodes, tail } =
         match allocate_all_blocks_new(&thread_blocks, &runtime_config) {
             Ok(allocation) => allocation,
             Err(e) => {
@@ -1191,7 +1191,8 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
     });
 
     // The allocation report (TODO 81). The request record goes with it.
-    let report = crate::reporting::converters::create_allocation_report(spans, elapsed, numa_nodes);
+    let mut report = crate::reporting::converters::create_allocation_report(spans, elapsed, numa_nodes);
+    report.tail = tail;
     fe.event(Run::Allocated(Box::new(report)).into());
 
     // The cache calibration on the run's own memory, before anything sizes from it (TODO 22): the plan's extents, the steps'

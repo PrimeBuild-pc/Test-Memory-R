@@ -391,7 +391,7 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
                         log::debug!("CLI override: max_page_size = {}", page_str);
                     }
                 }
-                "hugechunk" | "largechunk" | "largefloor" | "blkroundtarget" | "blkround" => {
+                "hugechunk" | "largechunk" | "largefloor" | "blkroundtarget" | "blkround" | "tail4k" => {
                     if let params::ParamValue::String(v) = value {
                         alloc_config.set_block_param(key, v);
                         log::debug!("CLI override: {} = {}", key, v);

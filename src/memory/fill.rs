@@ -254,6 +254,14 @@ pub(crate) fn fill_all(
     Ok(None)
 }
 
+/// The 4 KiB tail (TODO 131), for a run whose smallest page size is above 4 KiB: what the large pages left each thread short, on 4 KiB
+/// pages, as `fill_regular` takes them. The caller has checked the shortfall against its cap and says what it's doing; this adds no pass
+/// line of its own. Returns the first refusal, as `fill_regular` does.
+pub(crate) fn fill_tail(fill: &mut impl Fill, who: &str, started: Instant) -> Result<Option<(usize, u32)>, String> {
+    let mut progress = Progress::new(fill, started);
+    fill_regular(fill, who, &mut progress)
+}
+
 /// Before a remote 1 GiB pass: a thread whose next address is off a 1 GiB boundary takes 2 MiB pages from that pass's node up to the
 /// boundary, as long as a 1 GiB page still fits after them, so the pass can give it 1 GiB pages too. (A stitched thread lands there when
 /// its own node's last 2 MiB pages came in odd-sized pieces; without the pad it would get no remote 1 GiB pages at all.) Nothing is freed:

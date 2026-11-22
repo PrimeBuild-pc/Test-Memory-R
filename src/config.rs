@@ -163,6 +163,10 @@ pub struct MemoryAllocationConfig {
     pub share_round_step: String, // `blkroundtarget`: round each thread's share to a multiple of this
     #[serde(default = "default_share_round")]
     pub share_round: String, // `blkround`: "up", "down", "nearest"
+
+    // The 4 KiB tail where the large pages run short (TODO 131, `stitched::Tail`)
+    #[serde(default = "default_regular_tail")]
+    pub regular_tail: String, // `tail4k`: "locked", "pageable", "off"
 }
 
 fn default_min_page_size() -> String {
@@ -183,6 +187,9 @@ fn default_share_round_step() -> String {
 fn default_share_round() -> String {
     "up".to_string()
 }
+fn default_regular_tail() -> String {
+    crate::memory::stitched::Tail::Locked.label().to_string()
+}
 
 impl Default for MemoryAllocationConfig {
     fn default() -> Self {
@@ -194,13 +201,14 @@ impl Default for MemoryAllocationConfig {
             large_floor: default_large_floor(),
             share_round_step: default_share_round_step(),
             share_round: default_share_round(),
+            regular_tail: default_regular_tail(),
         }
     }
 }
 
 impl MemoryAllocationConfig {
-    /// The command-line keys `set_block_param` takes.
-    pub const BLOCK_PARAMS: [&'static str; 5] = ["hugechunk", "largechunk", "largefloor", "blkroundtarget", "blkround"];
+    /// The command-line keys `set_block_param` takes: the block sizes, the share rounding and the 4 KiB tail.
+    pub const BLOCK_PARAMS: [&'static str; 6] = ["hugechunk", "largechunk", "largefloor", "blkroundtarget", "blkround", "tail4k"];
 
     /// Sets the field a `BLOCK_PARAMS` key names. Returns false for any other key.
     pub fn set_block_param(&mut self, key: &str, value: &str) -> bool {
@@ -213,6 +221,7 @@ impl MemoryAllocationConfig {
             "largefloor" => &mut self.large_floor,
             "blkroundtarget" => &mut self.share_round_step,
             "blkround" => &mut self.share_round,
+            "tail4k" => &mut self.regular_tail,
             _ => return false,
         };
         *field = value.to_string();
@@ -1033,6 +1042,7 @@ impl ModernConfig {
             ("cputype", "cpu_config.cpu_type", sys.cpu_config.cpu_type.as_str()),
             ("minpage", "memory_allocation.min_page_size", sys.memory_allocation.min_page_size.as_str()),
             ("maxpage", "memory_allocation.max_page_size", sys.memory_allocation.max_page_size.as_str()),
+            ("tail4k", "memory_allocation.regular_tail", sys.memory_allocation.regular_tail.as_str()),
             ("skip-cores", "cpu_pinning.skip_spec", sys.cpu_pinning.skip_spec.as_str()),
             ("cpu-stride", "cpu_pinning.stride_spec", sys.cpu_pinning.stride_spec.as_deref().unwrap_or("1")),
             ("seal", "seal", sys.seal.as_deref().unwrap_or("tmr")),
@@ -1958,7 +1968,7 @@ impl LegacyConfig {
                 // (`default_skip_spec`), not TM5's. Without this, Cores=0 would still leave out the weakest core, and a positive
                 // Cores at or above the machine's full count would be capped one short of it for no TM5 reason.
                 cpu_pinning: CpuPinningConfig { skip_spec: "0".to_string(), ..CpuPinningConfig::default() },
-                memory_allocation: MemoryAllocationConfig::default(),
+                memory_allocation: self.memory_allocation(),
                 channels: self.memory_setup.channels,
                 seal: Some(if sealed { "tmr" } else { "off" }.to_string()),
                 record: None,
@@ -1977,6 +1987,16 @@ impl LegacyConfig {
                 tm5_lock_mb: self.memory_setup.lock_granularity_mb.max(1),
             }),
         })
+    }
+
+    /// TMR's allocation settings, each thread's share rounded as TM5 rounds it (TODO 131): down to the `.cfg`'s Lock Memory Granularity
+    /// (`MainThread.asm` ~153-262), never up into the reserve the `.cfg` asks for. As `blkround=down blkroundtarget=`, at least
+    /// `largefloor` and a multiple of it, as the step must be: TM5's default 16 MiB is exactly that, an odd one goes up to the next.
+    fn memory_allocation(&self) -> MemoryAllocationConfig {
+        let defaults = MemoryAllocationConfig::default();
+        let floor_mib = parse_size_string(&defaults.large_floor).map_or(16, |b| b / BYTES_PER_MIB as usize);
+        let step_mib = (self.memory_setup.lock_granularity_mb as usize).max(1).next_multiple_of(floor_mib);
+        MemoryAllocationConfig { share_round: RoundDirection::Down.to_string(), share_round_step: format!("{step_mib}MiB"), ..defaults }
     }
 
     /// TM5 `Test Block Size (Mb)` as a TMR chunk (TODO 79 B1), based on `mt_ini.asm:287-303` and `MainThread.asm:627-661`.
@@ -2205,6 +2225,25 @@ mod tests {
         assert_eq!(modern.system.memory_strategy.default_extent.mode, "full_allocation");
         let meta = modern.legacy_metadata.as_ref().unwrap();
         assert_eq!((meta.tm5_window_mb, meta.tm5_lock_mb), (880, 16));
+    }
+
+    /// TODO 131: an import rounds each share down to the `.cfg`'s Lock Memory Granularity, as TM5 does, never up into the reserve; at
+    /// least `largefloor` (16 MiB) and a multiple of it, as the step must be. The rest of the allocation settings are TMR's own.
+    #[test]
+    fn an_import_rounds_shares_down_to_its_lock_granularity() {
+        let step = |lock_mb: u32| {
+            let mut cfg = legacy(100, vec![test(1, "SimpleTest", 100, 16)]);
+            cfg.memory_setup.lock_granularity_mb = lock_mb;
+            let alloc = cfg.to_modern_config().unwrap().system.memory_allocation;
+            assert_eq!(alloc.share_round, "down");
+            let rounding = alloc.share_rounding().unwrap();
+            assert_eq!(rounding.direction, RoundDirection::Down);
+            (rounding.step_bytes / BYTES_PER_MIB) as u32
+        };
+        assert_eq!([step(16), step(1), step(20), step(32), step(512)], [16, 16, 32, 32, 512]);
+        let alloc = legacy(100, Vec::new()).to_modern_config().unwrap().system.memory_allocation;
+        let defaults = MemoryAllocationConfig::default();
+        assert_eq!((alloc.min_page_size, alloc.regular_tail), (defaults.min_page_size, defaults.regular_tail));
     }
 
     /// Code 0 keeps the window size even when it is not a multiple of lock granularity (`Ollie.cfg`: 1236 MiB, lock 16 MiB).

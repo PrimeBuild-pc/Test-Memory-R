@@ -405,6 +405,16 @@ impl ParamRegistry {
             },
         });
 
+        // The 4 KiB tail where the large pages run short (TODO 131)
+        params.insert("tail4k", ParamDef {
+            key: "tail4k",
+            can_override_config: true,
+            parser: |v| {
+                v.parse::<crate::memory::stitched::Tail>()?;
+                Ok(ParamValue::String(v.to_lowercase()))
+            },
+        });
+
         // Config file parameter: a path, which `config::load_config` looks for. An empty one the session takes as no config at all.
         params.insert("config", ParamDef {
             key: "config",
