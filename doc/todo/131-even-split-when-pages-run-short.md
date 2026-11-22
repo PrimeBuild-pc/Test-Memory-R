@@ -1,4 +1,4 @@
-# TODO 131: allocation short of its target: stop before testing, and keep headroom for large pages
+# TODO 131: allocation short of its target: a 4 KiB tail, TM5's rounding for imports, else stop
 
 Raised by the owner, 2026-11-22, from a forum report: a TM5 import (anta777's DDR5 Ryzen3D config) on a 32 GiB Ryzen, 12
 threads, TMR 0.1.2. The run started and passed its checks, but the threads' memory came out uneven. The reporter's log is kept
@@ -32,15 +32,28 @@ Why: TMR already stops on the last tier's failure when that tier is 4 KiB (a ref
 last tier allowed was 2 MiB. One rule for both. Running short hides a config that asks too much; stopping makes the user (or
 TMR) fix it. `stitched.rs`'s `min_large_leaves_threads_short_but_not_empty` test becomes a test of the stop.
 
-**With it, headroom for large-page runs.** A TM5 `.cfg`'s reserve was chosen for TM5's 4 KiB AWE pages (`callDLL.asm`'s
-`MEM_LARGE_PAGES*0`, `awe.asm`'s `AllocateUserPhysicalPages`), which any free page can serve; TMR's 1 GiB and 2 MiB pages need
-unbroken physical runs, which the last few hundred MiB of a nearly full machine can't give. So:
-- a floor under the reserve when the run allows large pages (about 1-2% of what's free, or 512 MiB, whichever is larger), for a
-  `.cfg`'s reserve too, said in the plan's table when it raises one;
-- the share's rounding never takes the reserve below what was asked (round down, not up, when up would cut into it). Today
-  `ShareRounding::fit` stops at what's free (TODO 75 B's reasoning: "available" counts the standby list), so a reserve is soft.
+**Decided with it (the owner, 2026-11-22), in place of a general headroom floor:**
 
-Together they make the stop rare, and when it fires it points at a real problem.
+- **Imported `.cfg`s round down, as TM5 does.** TM5 (`MainThread.asm` ~153-262) takes what's free less the `.cfg`'s
+  "Reserved Memory for Windows (Mb)", divides by the threads and rounds each share down to "Lock Memory Granularity (Mb)" (16
+  MiB by default), never up, so the reserve asked is kept. A TMR import does the same; TMR's own `blkround=` stays as it is
+  for its own plans and configs. Here it would have asked 26.62 GiB and kept 326 MiB, 190 MiB back: on its own not enough for
+  this run (its 2 MiB pages came 0.70 GiB short), so with:
+- **A capped 4 KiB tail.** When the large-page tiers run short, each thread's rest on 4 KiB pages, up to about 5% of its target
+  (more stops the run, rule 1). 4 KiB pages need no unbroken runs, so the free memory large pages can't use serves them: here
+  about 0.8 GiB. Its cost is on the tail alone, more TLB misses there (an estimate, not measured: a percent or two slower over
+  it for the streaming tests, more for the random ones, well under 1% of a run).
+  - **Locked when it can be**: TMR raises its working-set minimum by the tail's size (`SetProcessWorkingSetSizeEx`) and locks it
+    (`VirtualLock`), so Windows can't page it out. That needs "Increase a process working set", which Windows gives every user
+    by default, not the large pages' "Lock pages in memory". (AWE, TM5's way, needs that privilege and can't sit in a stitched
+    placeholder span.)
+  - **Pageable otherwise**: if the minimum or the lock is refused, the tail stays pageable, with a warning; a page Windows trims
+    is read back from the page file, not tested in RAM.
+  - The threads table shows a thread's 4 KiB part, locked or pageable; `minpage=`/`maxpage=` keep their meaning (`minpage=large`
+    given outright means no tail, so rule 1 stops a short run).
+- **Not taken:** TM5's bigger reserve when the page file is off (TM5 detects it from `GlobalMemoryStatusEx`'s commit limit
+  against the RAM, and reserves up to 1 GB). The owner: the reserve is the user's and the config's to choose, not a heuristic's.
+  The reporter had a page file (a 36.57 GiB commit limit on 31.57 GiB), so it wouldn't have applied here anyway.
 
 **Dropped: the finer last round** (option 1 below). With a short run stopped, unevenness never reaches a test.
 
@@ -65,6 +78,6 @@ tests (`memory/fill.rs`'s ladder tests) with a pool that runs dry mid-round.
 
 ## Next
 
-The build: the stop and its message (stitched.rs's shortfall path), the headroom floor and the reserve-respecting rounding
-(allocation_strategy.rs), their tests (the fake VM's exhaustion paths), and the docs (the guide's memory settings,
-test_parameters.md).
+The build: the stop and its message (stitched.rs's shortfall path), the import's round-down (config.rs's `.cfg` conversion and
+allocation_strategy.rs), the capped 4 KiB tail with its locked and pageable forms (fill.rs, stitched.rs), their tests (the fake
+VM's exhaustion paths), and the docs (the guide's memory settings, test_parameters.md, the README's page-size notes).
