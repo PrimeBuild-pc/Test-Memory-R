@@ -130,6 +130,15 @@ The owner also asked whether a regular user can lock: Windows assigns "Increase 
 1453 on `VirtualLock` (`scratch_119b/ab131/ws_lock_probe.ps1`); a 1314 now says the right is missing. Not run under a real
 standard account.
 
+## The cap and the request size, kept (the owner, 2026-11-22)
+
+Raised after the A/B: threads' 2 MiB pages end about one request apart when the pool runs dry (64-96 MiB in the A/B at the
+default `largechunk=` 128 MiB, about 110 MiB on the reporter's box), and on small shares that is near the per-thread cap (5%
+of the reporter's 2.22 GiB is 113 MiB), so a run short by under 2% a thread on average could stop. Weighed: imports at
+`largechunk=64MiB` (TM5 has no such setting, so it would be TMR's own default, not TM5's behaviour; the 128 MiB default is
+TODO 75's decision, re-checked against 1 GiB on 2026-11-04, 64 MiB never tried), or the cap on the run's whole shortfall.
+The owner: leave both; memory pressure is the main lever, so a user leaves a bigger reserve or expects 4 KiB pages.
+
 ## The A/B (dev box, 2026-11-22)
 
 `pressure256.cfg` (1usmus_v3 with Reserved 256 MiB, test 1 once), 8 threads; 0.1.2 (66a34db) and the build (c5f66b5) back to
