@@ -215,7 +215,7 @@ pub enum BusBeat {
     /// LPDDR6: two 12-DQ subchannels a die, 32 B a 24-transfer burst (JESD209-6). A model: TMR hasn't verified the packet map or how a
     /// controller places a line in it, so the payload is taken to come first.
     Bits12,
-    /// LPDDR4 and LPDDR5: 16-bit channels.
+    /// LPDDR4, LPDDR5 and LPDDR5X: 16-bit channels.
     Bits16,
     /// DDR6 as drafted: four 24-bit subchannels, 64 B a burst assumed. A model: TMR has verified no DDR6 layout.
     Bits24,
@@ -232,7 +232,7 @@ impl BusBeat {
         match memory_type {
             0x12 | 0x13 | 0x18 | 0x1A => Some(BusBeat::Bits64), // DDR, DDR2, DDR3, DDR4
             0x1D | 0x22 => Some(BusBeat::Bits32),               // LPDDR3, DDR5
-            0x1E | 0x23 => Some(BusBeat::Bits16),               // LPDDR4, LPDDR5
+            0x1E | 0x23 => Some(BusBeat::Bits16),               // LPDDR4, LPDDR5 (and LPDDR5X, which reports LPDDR5's code)
             _ => None,
         }
     }

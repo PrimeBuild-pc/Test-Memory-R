@@ -100,13 +100,14 @@ fn system_shown(system: &SystemIdentity, hidden: bool) -> SystemIdentity {
     if hidden { SystemIdentity { uuid: String::new(), ..system.clone() } } else { system.clone() }
 }
 
-/// The SMBIOS memory type's name (Type 17 offset 0x12), for the ones a DDR5 tester meets
+/// The SMBIOS memory type's name (Type 17 offset 0x12), for the ones a DDR5 tester meets. SMBIOS has no LPDDR5X code (its table
+/// ends at 0x24, HBM3), so an LPDDR5X system reports LPDDR5's, and the name says it may be either (TODO 132).
 pub fn memory_type_name(code: u8) -> Option<&'static str> {
     match code {
         0x1A => Some("DDR4"),
         0x1E => Some("LPDDR4"),
         0x22 => Some("DDR5"),
-        0x23 => Some("LPDDR5"),
+        0x23 => Some("LPDDR5/5X"),
         _ => None,
     }
 }

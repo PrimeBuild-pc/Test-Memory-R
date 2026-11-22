@@ -252,7 +252,7 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     entry(out, "seed=0x1234", "The native patterns' run seed (default: from the clock, logged and")?;
     more(out, "  saved in the results), to replay a run's bytes")?;
     entry(out, "beat=32", "Transfer width the switch pattern flips at: auto (SMBIOS, the")?;
-    more(out, "  default), 16 (LPDDR4/5), 32 (DDR5), 64 (DDR4), or a memory")?;
+    more(out, "  default), 16 (LPDDR4/5/5X), 32 (DDR5), 64 (DDR4), or a memory")?;
     more(out, "  type (ddr4, ddr5, lpddr5, ...); 12 (lpddr6) and 24 (ddr6) are")?;
     more(out, "  models: TMR hasn't verified their packet maps")?;
     entry(out, "rescan=off", "A failed check isn't rescanned to name each bad word (default on;")?;

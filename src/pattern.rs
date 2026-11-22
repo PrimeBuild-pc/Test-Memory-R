@@ -733,13 +733,13 @@ pub fn parse_beat(s: &str) -> Result<Option<BusBeat>, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "auto" => Ok(None),
         "12" | "lpddr6" => Ok(Some(BusBeat::Bits12)),
-        "16" | "lpddr4" | "lpddr5" => Ok(Some(BusBeat::Bits16)),
+        "16" | "lpddr4" | "lpddr5" | "lpddr5x" => Ok(Some(BusBeat::Bits16)),
         "24" | "ddr6" => Ok(Some(BusBeat::Bits24)),
         "32" | "ddr5" | "lpddr3" => Ok(Some(BusBeat::Bits32)),
         "64" | "ddr3" | "ddr4" => Ok(Some(BusBeat::Bits64)),
         other => Err(format!(
             "beat '{other}': use auto, a width (12, 16, 24, 32, 64) or a memory type (ddr3, ddr4, \
-                              ddr5, ddr6, lpddr3, lpddr4, lpddr5, lpddr6)"
+                              ddr5, ddr6, lpddr3, lpddr4, lpddr5, lpddr5x, lpddr6)"
         )),
     }
 }
@@ -1545,6 +1545,8 @@ mod tests {
         assert_eq!(parse_beat("DDR6").unwrap(), Some(BusBeat::Bits24));
         assert_eq!(parse_beat("lpddr6").unwrap(), Some(BusBeat::Bits12));
         assert_eq!(parse_beat("lpddr5").unwrap(), Some(BusBeat::Bits16));
+        // TODO 132: LPDDR5X keeps LPDDR5's 16-bit channels
+        assert_eq!(parse_beat("LPDDR5X").unwrap(), Some(BusBeat::Bits16));
         assert_eq!(parse_beat("ddr4").unwrap(), Some(BusBeat::Bits64));
         assert!(parse_beat("20").is_err());
         assert!(parse_beat("ddr7").is_err());

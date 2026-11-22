@@ -164,7 +164,7 @@ bus width (see Key changes):
 | DDR4 (and DDR3L, on some 6th and 7th gen Core boards) | 64-bit per channel; multiple DIMMs can share a channel |
 | DDR5 | 32-bit: two subchannels per DIMM |
 | LPDDR3 | 32-bit |
-| LPDDR4, LPDDR5 | 16-bit |
+| LPDDR4, LPDDR5, LPDDR5X | 16-bit (SMBIOS reports LPDDR5X as LPDDR5, so TMR names it "LPDDR5/5X") |
 | DDR6, LPDDR6 | 24-bit and 12-bit, models of the drafts: not detected, chosen with `beat=ddr6` or `beat=lpddr6` |
 
 When SMBIOS reports no type TMR knows (a VM often reports none), TMR says so and the switching

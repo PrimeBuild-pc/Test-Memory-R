@@ -128,7 +128,7 @@ COMMAND LINE PARAMETERS:
   seed=0x1234                         # The native patterns' run seed (default: from the clock, logged and
                                       #   saved in the results), to replay a run's bytes
   beat=32                             # Transfer width the switch pattern flips at: auto (SMBIOS, the
-                                      #   default), 16 (LPDDR4/5), 32 (DDR5), 64 (DDR4), or a memory
+                                      #   default), 16 (LPDDR4/5/5X), 32 (DDR5), 64 (DDR4), or a memory
                                       #   type (ddr4, ddr5, lpddr5, ...); 12 (lpddr6) and 24 (ddr6) are
                                       #   models: TMR hasn't verified their packet maps
   rescan=off                          # A failed check isn't rescanned to name each bad word (default on;
