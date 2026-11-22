@@ -20,10 +20,6 @@ Reserve Rounding Diff     +0.00 B           -  Threads × per-thread rounding
 [33m⚠️  🧪 FAILURE MODE TESTING DETECTED - This configuration may intentionally cause allocation failures[0m
 [33m⚠️  Use only for development/testing purposes![0m
 
-[32m[<stamp> INFO tmr::layout][0m 🧵 Thread Memory Layout:
-[32m[<stamp> INFO tmr::layout][0m   Total threads: 4
-[32m[<stamp> INFO tmr::layout][0m   Allocation per thread: 0.00 GiB
-[32m[<stamp> INFO tmr::layout][0m   Total planned allocation: 0.02 GiB
 [32m[<stamp> INFO tmr::runner][0m Using the built-in suite, plan stability
 [32m[<stamp> INFO tmr::runner][0m SIMD width 256 bits (a test's width) for every test that picks its width at run time
 ⚙  Memory Channels: 2 (affects SimpleTest stride: [channels × param - 1] × 64B cache line)

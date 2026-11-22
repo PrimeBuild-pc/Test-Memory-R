@@ -64,7 +64,7 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
                 return Err("SeLockMemoryPrivilege not assigned to current user");
             }
             PrivilegeState::AssignedButDisabled => {
-                log::info!("SeLockMemoryPrivilege assigned but disabled, attempting to enable...");
+                log::debug!("SeLockMemoryPrivilege assigned but disabled, attempting to enable...");
 
                 // Try to enable it
                 if let Err(e) = enable_privilege_in_token(token, luid) {
@@ -75,7 +75,7 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
                 // Verify it's now enabled
                 match check_privilege_in_token(token, luid) {
                     PrivilegeState::AssignedAndEnabled => {
-                        log::info!("Successfully enabled SeLockMemoryPrivilege");
+                        log::debug!("Successfully enabled SeLockMemoryPrivilege");
                     }
                     _ => {
                         let _ = CloseHandle(token);
@@ -84,14 +84,14 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
                 }
             }
             PrivilegeState::AssignedAndEnabled => {
-                log::info!("SeLockMemoryPrivilege already enabled");
+                log::debug!("SeLockMemoryPrivilege already enabled");
             }
         }
 
         let _ = CloseHandle(token);
 
         // Test with actual allocation (2MB - one large page)
-        log::info!("Testing large page allocation with 2MB test allocation...");
+        log::debug!("Testing large page allocation with 2MB test allocation...");
         let test_size = 2 * 1024 * 1024;
         let ptr = VirtualAlloc(Some(null_mut()), test_size, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
 
@@ -110,7 +110,7 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
         } else {
             // Clean up test allocation
             let _ = VirtualFree(ptr, 0, MEM_RELEASE);
-            log::info!("Large page test allocation successful");
+            log::debug!("Large page test allocation successful");
             Ok(())
         }
     }
@@ -313,7 +313,7 @@ pub fn enable_large_page_privilege_enhanced() -> Result<(), String> {
 
         match last_error.0 {
             0 => {
-                log::info!("Successfully enabled SeLockMemoryPrivilege");
+                log::debug!("Successfully enabled SeLockMemoryPrivilege");
                 Ok(())
             }
             1300 => Err("Some privileges were not assigned (ERROR_NOT_ALL_ASSIGNED)".to_string()),

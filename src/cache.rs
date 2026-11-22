@@ -135,37 +135,38 @@ impl CacheInfo {
         self.total_cache = self.l1_data_cache + self.l1_instruction_cache + self.l2_cache + self.l3_cache;
     }
 
+    /// The caches and the TSC, at debug level: a run's System Information tables show them, and the log file has those (TODO 29)
     pub fn print_info(&self) {
-        log::info!("Cache Architecture Detected ({})", self.detection_method);
-        log::info!("  Cores: {} physical", self.core_count);
-        log::info!(
+        log::debug!("Cache Architecture Detected ({})", self.detection_method);
+        log::debug!("  Cores: {} physical", self.core_count);
+        log::debug!(
             "  L1 Data Cache: {:.1} KB total ({:.1} KB × {} cores)",
             self.l1_data_cache as f64 / KB_F64,
             self.per_core_l1d as f64 / KB_F64,
             self.core_count
         );
-        log::info!(
+        log::debug!(
             "  L1 Instruction Cache: {:.1} KB total ({:.1} KB × {} cores)",
             self.l1_instruction_cache as f64 / KB_F64,
             self.per_core_l1i as f64 / KB_F64,
             self.core_count
         );
-        log::info!(
+        log::debug!(
             "  L2 Cache: {:.1} KB total ({:.1} KB × {} cores)",
             self.l2_cache as f64 / KB_F64,
             self.per_core_l2 as f64 / KB_F64,
             self.core_count
         );
-        log::info!("  L3 Cache: {:.1} MB (shared)", self.l3_cache as f64 / MB_F64);
-        log::info!("  Total Cache: {:.1} MB", self.total_cache as f64 / MB_F64);
-        log::info!("  Cache Line Size: {} bytes", self.cache_line_size);
+        log::debug!("  L3 Cache: {:.1} MB (shared)", self.l3_cache as f64 / MB_F64);
+        log::debug!("  Total Cache: {:.1} MB", self.total_cache as f64 / MB_F64);
+        log::debug!("  Cache Line Size: {} bytes", self.cache_line_size);
         // TSC details
-        log::info!("  TSC Frequency: {:.3} GHz ({})", self.tsc_info.frequency_ghz, self.tsc_info.detection_method);
+        log::debug!("  TSC Frequency: {:.3} GHz ({})", self.tsc_info.frequency_ghz, self.tsc_info.detection_method);
         if self.tsc_info.is_invariant {
-            log::info!("  TSC Type: Invariant (constant rate)");
+            log::debug!("  TSC Type: Invariant (constant rate)");
         }
         if let Some(secondary) = self.tsc_info.secondary_frequency_ghz {
-            log::info!("  TSC Validation: {:.3} GHz (secondary), confidence {:.0}%", secondary, self.tsc_info.confidence * 100.0);
+            log::debug!("  TSC Validation: {:.3} GHz (secondary), confidence {:.0}%", secondary, self.tsc_info.confidence * 100.0);
         }
     }
 }
@@ -202,11 +203,12 @@ impl SystemInfo {
         Self { cpu_vendor, cpu_brand, cpu_family, cpu_model, cpu_stepping, physical_cores, logical_cores, has_hyperthreading, cache_info }
     }
 
+    /// The CPU and its caches, at debug level, as `CacheInfo::print_info`
     pub fn print_system_info(&self) {
-        log::info!("System Information:");
-        log::info!("  CPU: {} ({})", self.cpu_brand, self.cpu_vendor);
-        log::info!("  Family: {}, Model: {}, Stepping: {}", self.cpu_family, self.cpu_model, self.cpu_stepping);
-        log::info!(
+        log::debug!("System Information:");
+        log::debug!("  CPU: {} ({})", self.cpu_brand, self.cpu_vendor);
+        log::debug!("  Family: {}, Model: {}, Stepping: {}", self.cpu_family, self.cpu_model, self.cpu_stepping);
+        log::debug!(
             "  Cores: {} physical, {} logical{}",
             self.physical_cores,
             self.logical_cores,

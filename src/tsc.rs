@@ -133,12 +133,12 @@ impl TscInfo {
     /// Detect TSC frequency using multiple methods with validation
     #[cfg(target_arch = "x86_64")]
     pub fn detect() -> Self {
-        log::info!("Detecting TSC frequency...");
+        log::debug!("Detecting TSC frequency...");
 
         // Check if TSC is invariant (important for reliable timing)
         let is_invariant = check_tsc_invariant();
         if is_invariant {
-            log::info!("  TSC: Invariant TSC detected (constant rate)");
+            log::debug!("  TSC: Invariant TSC detected (constant rate)");
         } else {
             log::warn!("  TSC: Non-invariant TSC - frequency may vary with power state");
         }
@@ -150,14 +150,14 @@ impl TscInfo {
 
         // Log all results
         if let Some((freq, _)) = cpuid_15_result {
-            log::info!("  TSC: CPUID 0x15 reports {:.3} GHz", freq);
+            log::debug!("  TSC: CPUID 0x15 reports {:.3} GHz", freq);
         }
         if let Some((freq, _)) = cpuid_16_result {
-            log::info!("  TSC: CPUID 0x16 reports {:.3} GHz", freq);
+            log::debug!("  TSC: CPUID 0x16 reports {:.3} GHz", freq);
         }
 
         let convergence_str = if timing_stats.converged { "converged" } else { "completed" };
-        log::info!(
+        log::debug!(
             "  TSC: Calibration {} at {:.6} GHz ({} samples in {}ms, σ={:.6} GHz)",
             convergence_str,
             timing_freq,
@@ -175,7 +175,7 @@ impl TscInfo {
         // stores noisy floats that differ on every boot, falsely invalidating calibration.
         let frequency_ghz = snap_to_nearest_mhz(raw_frequency_ghz);
 
-        log::info!("  TSC: Selected {:.3} GHz via {} (confidence: {:.0}%)", frequency_ghz, detection_method, confidence * 100.0);
+        log::debug!("  TSC: Selected {:.3} GHz via {} (confidence: {:.0}%)", frequency_ghz, detection_method, confidence * 100.0);
 
         TscInfo {
             frequency_ghz,
@@ -420,7 +420,7 @@ fn validate_and_select(
     if let (Some((freq_15, _)), Some((freq_16, _))) = (cpuid_15.clone(), cpuid_16.clone())
         && frequencies_match(freq_15, freq_16)
     {
-        log::info!("TSC: CPUID 0x15 and 0x16 agree, using hardware value");
+        log::debug!("TSC: CPUID 0x15 and 0x16 agree, using hardware value");
         return (freq_15, TscDetectionMethod::CpuidLeaf15, 0.92, Some(timing));
     }
 

@@ -451,7 +451,7 @@ fn parse_smbios(raw: &[u8]) -> SmbiosData {
         let total_gb = data.total_memory_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
         format!("{} module(s), {:.1} GB total", data.memory_modules.len(), total_gb)
     };
-    log::info!("SMBIOS: BIOS={}, System={}, UUID={}, Memory={}", bios_str, sys_str, uuid_str, mem_str);
+    log::debug!("SMBIOS: BIOS={}, System={}, UUID={}, Memory={}", bios_str, sys_str, uuid_str, mem_str);
 
     data
 }

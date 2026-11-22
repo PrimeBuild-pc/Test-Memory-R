@@ -1692,6 +1692,27 @@ impl ModernConfig {
 /// run out, and a TM5 setup's shares are often small (2.22 GiB on a 12-thread, 32 GiB box), so their 4 KiB tails come out more even.
 const IMPORT_LARGE_CHUNK: &str = "64MiB";
 
+/// Test numbers, sorted, runs of three or more written as a range: `1, 3-15`
+fn id_ranges(mut ids: Vec<u32>) -> String {
+    ids.sort_unstable();
+    ids.dedup();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < ids.len() {
+        let mut j = i;
+        while j + 1 < ids.len() && ids[j + 1] == ids[j] + 1 {
+            j += 1;
+        }
+        match j - i {
+            0 => parts.push(ids[i].to_string()),
+            1 => parts.extend([ids[i].to_string(), ids[j].to_string()]),
+            _ => parts.push(format!("{}-{}", ids[i], ids[j])),
+        }
+        i = j + 1;
+    }
+    parts.join(", ")
+}
+
 impl LegacyConfig {
     pub fn load_from_file(path: &str) -> Result<Self, String> {
         let content = fs::read_to_string(path).map_err(|e| format!("Failed to read legacy config file: {}", e))?;
@@ -1925,6 +1946,7 @@ impl LegacyConfig {
             cycle_order.push(n.to_string());
         }
 
+        self.log_repetition();
         Ok(ModernConfig {
             config_format_version: CONFIG_VERSION.to_string(),
             application_name: format!("{} ({})", APP_NAME, APP_SHORT_NAME),
@@ -2086,22 +2108,42 @@ impl LegacyConfig {
     /// default.
     fn repetition(&self, test: &LegacyTest) -> (Option<u32>, Option<u32>, Option<u32>) {
         let n = (test.time_percent as u64 * self.main_section.time_percent as u64 / 2000).max(1) as u32;
-        let reps = match test.function.as_str() {
+        match test.function.as_str() {
             "SimpleTest" => (Some(n), Some(4), None),
             "MirrorMove" | "MirrorMove128" => (None, None, Some(n)),
             _ => (None, None, None),
-        };
-        if n != 5 && reps != (None, None, None) {
-            log::info!(
-                "TM5 Test{} ({}): Time (%) {} x global {} = {} passes per chunk (TM5's default is 5)",
-                test.id,
-                test.function,
-                test.time_percent,
-                self.main_section.time_percent,
-                n
-            );
         }
-        reps
+    }
+
+    /// `repetition`'s passes per chunk where they aren't TM5's default 5, in one line for the import, the tests grouped by their figure:
+    /// `TM5 Time (%) x global 50 = passes per chunk (TM5's default is 5): Tests 1, 3-15 at 100% = 2; Test 2 at 255% = 6`
+    fn log_repetition(&self) {
+        let mut groups: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+        for test in self.tests.iter().filter(|t| t.id != 0 && Self::map_legacy_function(&t.function).is_ok()) {
+            let n = (test.time_percent as u64 * self.main_section.time_percent as u64 / 2000).max(1) as u32;
+            if n == 5 || !matches!(test.function.as_str(), "SimpleTest" | "MirrorMove" | "MirrorMove128") {
+                continue;
+            }
+            match groups.iter_mut().find(|(percent, passes, _)| (*percent, *passes) == (test.time_percent, n)) {
+                Some((_, _, ids)) => ids.push(test.id),
+                None => groups.push((test.time_percent, n, vec![test.id])),
+            }
+        }
+        if groups.is_empty() {
+            return;
+        }
+        let parts: Vec<String> = groups
+            .into_iter()
+            .map(|(percent, passes, ids)| {
+                let noun = if ids.len() == 1 { "Test" } else { "Tests" };
+                format!("{noun} {} at {percent}% = {passes}", id_ranges(ids))
+            })
+            .collect();
+        log::info!(
+            "TM5 Time (%) x global {} = passes per chunk (TM5's default is 5): {}",
+            self.main_section.time_percent,
+            parts.join("; ")
+        );
     }
 
     // Map legacy function names to modern equivalents
@@ -2227,6 +2269,14 @@ mod tests {
         assert_eq!(modern.system.memory_strategy.default_extent.mode, "full_allocation");
         let meta = modern.legacy_metadata.as_ref().unwrap();
         assert_eq!((meta.tm5_window_mb, meta.tm5_lock_mb), (880, 16));
+    }
+
+    /// The import's one Time (%) line lists its tests as ranges: sorted, runs of three or more joined
+    #[test]
+    fn test_numbers_read_as_ranges() {
+        assert_eq!(id_ranges(vec![15, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]), "1, 3-15");
+        assert_eq!(id_ranges(vec![2]), "2");
+        assert_eq!(id_ranges(vec![7, 6, 9]), "6, 7, 9");
     }
 
     /// TODO 131: an import rounds each share down to the `.cfg`'s Lock Memory Granularity, as TM5 does, never up into the reserve; at

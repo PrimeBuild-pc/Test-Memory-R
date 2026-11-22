@@ -849,16 +849,16 @@ fn resolve_transfer() -> Option<BusBeat> {
     let (beat, source) = (|| -> (Option<BusBeat>, String) {
         if let Some(beat) = *lock(&BEAT_OVERRIDE) {
             if beat.modelled() {
-                log::info!("Transfer width: {} bits (beat=), {}", beat.bits(), model_note(beat));
+                log::debug!("Transfer width: {} bits (beat=), {}", beat.bits(), model_note(beat));
                 return (Some(beat), format!("beat=, {}", model_note(beat)));
             }
-            log::info!("Transfer width: {} bits (beat=)", beat.bits());
+            log::debug!("Transfer width: {} bits (beat=)", beat.bits());
             return (Some(beat), "beat=".to_string());
         }
         let types: Vec<u8> = crate::smbios::get_smbios().memory_modules.iter().map(|m| m.memory_type).collect();
         match types.iter().find_map(|&t| BusBeat::from_smbios_type(t).map(|b| (b, t))) {
             Some((beat, t)) => {
-                log::info!("Transfer width: {} bits, from SMBIOS memory type {t:#04x}", beat.bits());
+                log::debug!("Transfer width: {} bits, from SMBIOS memory type {t:#04x}", beat.bits());
                 (Some(beat), format!("SMBIOS memory type {t:#04x}"))
             }
             None => {

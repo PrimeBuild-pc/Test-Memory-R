@@ -1364,7 +1364,8 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
 
     // The native patterns' seed and transfer width, once: with the seed (and the same layout) a run writes the same bytes again
     let (seed, beat, beat_source) = (crate::pattern::run_seed(), crate::pattern::transfer_beat(), crate::pattern::transfer_source());
-    log::info!(
+    // Debug: the 🎲 line (`Run::SuiteStarted`) says the same, and the log file has it
+    log::debug!(
         "Pattern seed {seed:#018x} ({}); transfer width {} ({beat_source}); rescan {}",
         if crate::pattern::seed_given() { "seed=" } else { "from the clock" },
         beat.map_or("unknown".to_string(), |b| format!("{} bits", b.bits())),
@@ -4811,7 +4812,7 @@ pub fn detect_runtime_capabilities(alloc_config: &MemoryAllocationConfig) -> Run
 
     let large_pages_available = crate::memory::privileges::check_large_page_privilege().is_ok();
 
-    log::info!("Runtime capabilities detected: backend={:?}, large_pages_available={}", memory_backend, large_pages_available);
+    log::debug!("Runtime capabilities detected: backend={:?}, large_pages_available={}", memory_backend, large_pages_available);
 
     RuntimeConfig {
         memory_backend,

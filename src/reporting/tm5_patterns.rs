@@ -116,9 +116,20 @@ pub(crate) fn notes(defs: &[TestDefinition]) -> Vec<String> {
     notes
 }
 
-/// Detailed provenance goes to the log once with the plan, not to the default console/window view or the hot loop.
+/// Detailed provenance goes to the log once with the plan, not to the default console/window view or the hot loop: a line a distinct
+/// conversion, its tests listed (a `1usmus_v3.cfg` import's 13 SimpleTests share one). The results file keeps each test's.
 pub(crate) fn log_details(defs: &[TestDefinition]) {
+    let mut groups: Vec<(Conversion, String, Vec<String>)> = Vec::new();
     for (def, conversion) in selected(defs) {
-        log::info!(target: crate::logfile::FILE_ONLY_TARGET, "{}", conversion.detail(&def.step_label(true), &effective_name(def)));
+        let effective = effective_name(def);
+        let label = def.id.clone().unwrap_or_else(|| def.display_name.clone());
+        match groups.iter_mut().find(|(c, e, _)| *c == conversion && *e == effective) {
+            Some((_, _, labels)) => labels.push(label),
+            None => groups.push((conversion, effective, vec![label])),
+        }
+    }
+    for (conversion, effective, labels) in groups {
+        let noun = if labels.len() == 1 { "Test" } else { "Tests" };
+        log::info!(target: crate::logfile::FILE_ONLY_TARGET, "{}", conversion.detail(&format!("{noun} {}", labels.join(", ")), &effective));
     }
 }

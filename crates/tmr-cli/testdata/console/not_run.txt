@@ -21,10 +21,6 @@ Reserve Rounding Diff     +0.00 B           -  Threads × per-thread rounding
 [33m⚠️  🧪 FAILURE MODE TESTING DETECTED - This configuration may intentionally cause allocation failures[0m
 [33m⚠️  Use only for development/testing purposes![0m
 
-[32m[<stamp> INFO tmr::layout][0m 🧵 Thread Memory Layout:
-[32m[<stamp> INFO tmr::layout][0m   Total threads: 4
-[32m[<stamp> INFO tmr::layout][0m   Allocation per thread: 0.00 GiB
-[32m[<stamp> INFO tmr::layout][0m   Total planned allocation: 0.02 GiB
 [32m[<stamp> INFO tmr::runner][0m Using the built-in suite, plan stability
 ❌ No test of plan stability matches filter 'Nope-*'. Its tests (plan=all for every test):
   - Mem-StuckBitAuto
@@ -63,10 +59,6 @@ Reserve Rounding Diff     +0.00 B           -  Threads × per-thread rounding
 [33m⚠️  🧪 FAILURE MODE TESTING DETECTED - This configuration may intentionally cause allocation failures[0m
 [33m⚠️  Use only for development/testing purposes![0m
 
-[32m[<stamp> INFO tmr::layout][0m 🧵 Thread Memory Layout:
-[32m[<stamp> INFO tmr::layout][0m   Total threads: 4
-[32m[<stamp> INFO tmr::layout][0m   Allocation per thread: 0.00 GiB
-[32m[<stamp> INFO tmr::layout][0m   Total planned allocation: 0.02 GiB
 [32m[<stamp> INFO tmr::runner][0m Using the built-in suite, plan all
 ❌ No tests match filter 'Nope-*'. Available tests:
   - Mem-StuckBit128
@@ -372,10 +364,6 @@ Reserve Rounding Diff     +0.00 B           -  Threads × per-thread rounding
 [33m⚠️  🧪 FAILURE MODE TESTING DETECTED - This configuration may intentionally cause allocation failures[0m
 [33m⚠️  Use only for development/testing purposes![0m
 
-[32m[<stamp> INFO tmr::layout][0m 🧵 Thread Memory Layout:
-[32m[<stamp> INFO tmr::layout][0m   Total threads: 4
-[32m[<stamp> INFO tmr::layout][0m   Allocation per thread: 0.00 GiB
-[32m[<stamp> INFO tmr::layout][0m   Total planned allocation: 0.02 GiB
 [32m[<stamp> INFO tmr::runner][0m Using the built-in suite, plan stability
 ❌ Config error: sequence=W 2Q: '2Q': a step is W, R or RW, with a count and an @order, not 'Q'
 ## a verify of the fill alone in a mode the cycle keys
@@ -401,10 +389,6 @@ Reserve Rounding Diff     +0.00 B           -  Threads × per-thread rounding
 [33m⚠️  🧪 FAILURE MODE TESTING DETECTED - This configuration may intentionally cause allocation failures[0m
 [33m⚠️  Use only for development/testing purposes![0m
 
-[32m[<stamp> INFO tmr::layout][0m 🧵 Thread Memory Layout:
-[32m[<stamp> INFO tmr::layout][0m   Total threads: 4
-[32m[<stamp> INFO tmr::layout][0m   Allocation per thread: 0.00 GiB
-[32m[<stamp> INFO tmr::layout][0m   Total planned allocation: 0.02 GiB
 [32m[<stamp> INFO tmr::runner][0m Using the built-in suite, plan stability
 [32m[<stamp> INFO tmr::runner][0m Applying CLI pattern-mode override: 0
 [32m[<stamp> INFO tmr::runner][0m pattern-mode=0 is a numbered mode, and Mem-PageExchange runs native patterns only: it keeps its program
@@ -435,9 +419,5 @@ Reserve Rounding Diff     +0.00 B           -  Threads × per-thread rounding
 [33m⚠️  🧪 FAILURE MODE TESTING DETECTED - This configuration may intentionally cause allocation failures[0m
 [33m⚠️  Use only for development/testing purposes![0m
 
-[32m[<stamp> INFO tmr::layout][0m 🧵 Thread Memory Layout:
-[32m[<stamp> INFO tmr::layout][0m   Total threads: 4
-[32m[<stamp> INFO tmr::layout][0m   Allocation per thread: 0.00 GiB
-[32m[<stamp> INFO tmr::layout][0m   Total planned allocation: 0.02 GiB
 [32m[<stamp> INFO tmr::runner][0m Using the built-in suite, plan stability
 ❌ Config error: seal 'bogus': use tmr, tm5 or off

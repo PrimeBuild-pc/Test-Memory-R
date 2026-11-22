@@ -180,13 +180,13 @@ pub fn get_cpu_topology() -> &'static Vec<CpuTopologyInfo> {
     let topology: &'static Vec<CpuTopologyInfo> = Box::leak(Box::new({
         let method = typing.0;
 
-        log::info!("Detecting CPU topology using method: {:?}", method);
+        log::debug!("Detecting CPU topology using method: {:?}", method);
         let start = std::time::Instant::now();
 
         let topology = detect_cpu_topology_with(method);
 
         let elapsed = start.elapsed();
-        log::info!("CPU topology detection completed in {:?}", elapsed);
+        log::debug!("CPU topology detection completed in {:?}", elapsed);
 
         // Log summary
         let physical_cores = topology.iter().map(|cpu| cpu.physical_core_id).collect::<std::collections::HashSet<_>>().len();
@@ -203,7 +203,7 @@ pub fn get_cpu_topology() -> &'static Vec<CpuTopologyInfo> {
             .collect::<std::collections::HashSet<_>>()
             .len();
 
-        log::info!(
+        log::debug!(
             "Topology: {} physical cores ({} P-cores, {} E-cores, {} Unknown)",
             physical_cores,
             p_cores,
@@ -662,7 +662,7 @@ pub fn detect_cpu_topology() -> Vec<CpuTopologyInfo> {
 
     // Log summary of efficiency classes found
     let efficiency_classes: std::collections::HashSet<_> = topology.iter().map(|cpu| cpu.efficiency_class).collect();
-    log::info!("Detected efficiency classes: {:?}", efficiency_classes);
+    log::debug!("Detected efficiency classes: {:?}", efficiency_classes);
 
     topology
 }
