@@ -29,7 +29,7 @@ Description: |-
   - Threads are pinned to physical cores and take memory from their own NUMA node, and checks can
     bypass the caches (non-temporal stores, CLFLUSHOPT) so they read DRAM.
   - Switching patterns aimed at the memory bus's width (DDR4's 64-bit channel, DDR5's 32-bit
-    subchannels, LPDDR4/5's 16-bit), alongside TM5's.
+    subchannels, LPDDR4/5/5X's 16-bit), alongside TM5's.
   - Built-in test plans, results saved as JSON during the run, and a console and a window in one
     tmr.exe.
 

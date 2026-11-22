@@ -91,7 +91,8 @@ The built-in program is `random, header, random, switch, random, quiet`:
 
 - **random** mixes the bits, so every data line sees every short run of bits.
 - **switch** flips every data line on every transfer, at the memory's transfer width: 32 bits for
-  DDR5, 64 for DDR4, from the memory type the BIOS reports, or `beat=`.
+  DDR5, 64 for DDR4, 16 for LPDDR4, LPDDR5 and LPDDR5X, from the memory type the BIOS reports, or
+  `beat=`.
 - **quiet** holds one data line steady while every other switches.
 - **header** is switch with words unique to their place, so a misplaced half-line shows.
 

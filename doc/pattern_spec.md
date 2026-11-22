@@ -192,9 +192,9 @@ codes:   ident 0x1D, random 0x2A, switch 0x3C, lines 0x4B, linepair 0x5E, quiet 
 **The transfer width** for `switch`, resolved once, in this order:
 1. `beat=`: a width (`12`, `16`, `24`, `32`, `64`) or a memory type (`ddr4`, `ddr5`, `ddr6`,
    `lpddr4`, `lpddr5`, `lpddr5x`, `lpddr6`; `ddr3` and `lpddr3` too).
-2. The DIMMs' SMBIOS memory type: DDR-DDR4 64, LPDDR3 and DDR5 32, LPDDR4/5 16 (LPDDR5X reports LPDDR5's code, and keeps its
-   16-bit channels). TMR knows no
-   SMBIOS code for DDR6 or LPDDR6 yet: on those, set `beat=`.
+2. The DIMMs' SMBIOS memory type: DDR-DDR4 64, LPDDR3 and DDR5 32, LPDDR4/5 16 (LPDDR5X
+   reports LPDDR5's code, and keeps its 16-bit channels). TMR knows no SMBIOS code for DDR6 or
+   LPDDR6 yet: on those, set `beat=`.
 3. Unknown: successive `switch` pairs alternate 64 and 32, and the run logs a warning. Pair
    `pair`'s ordinal among the `switch` pairs is `n = (pair / len) * s + s_before`, with `s` the
    program's `switch` entries and `s_before` those before position `pair mod len`; it takes 64

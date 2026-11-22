@@ -106,7 +106,7 @@ and how to leave identifiers out before you post one.
 - **Patterns aimed at the memory bus**, alongside TM5's. A switching family inverts each beat of a
   burst at the bus's own width, so every data line toggles on every transfer, the most switching
   noise the data can make: 64-bit for DDR4, 32-bit for DDR5's subchannels, 16-bit for
-  LPDDR4/5, picked from the memory type SMBIOS reports, and models of LPDDR6's 12-bit and DDR6's
+  LPDDR4/5/5X, picked from the memory type SMBIOS reports, and models of LPDDR6's 12-bit and DDR6's
   24-bit, chosen with `beat=`. A random family feeds every line every short bit sequence, which DDR5's receive
   equalisers react to. Both aim to make a marginal overclock fail sooner.
 - **Built-in test plans** (`plan=`; `stability` by default), **results as JSON** saved during the
