@@ -51,6 +51,10 @@ TMR) fix it. `stitched.rs`'s `min_large_leaves_threads_short_but_not_empty` test
       gives every user by default, not the large pages' "Lock pages in memory". If the minimum or the lock is refused, the run
       stops (rule 1: no silent gap; a page Windows trims is read back from the page file, not tested in RAM).
     - **Pageable**, opted into: the tail as ordinary memory, with a warning, as TM5's runs without AWE are.
+  - **Phased (the owner, 2026-11-22):** phase 1 locks the capped tail only. A run whose 4 KiB part isn't a tail
+    (`minpage=regular`, or no "Lock pages in memory" so everything is 4 KiB) stays pageable, as in 0.1.2, until phase 2: a
+    live check that locking tens of GiB of 4 KiB pages (a working-set minimum that size) holds up on a desktop, then locked
+    there too.
   - The threads table shows a thread's 4 KiB part, locked or pageable; `minpage=`/`maxpage=` keep their meaning (`minpage=large`
     given outright means no tail, so rule 1 stops a short run).
   - **TM5's own locking**, for comparison (the owner asked, 2026-11-22): AWE is on by default (`tm5.inc`'s `bEnableAWE db 1`),
@@ -86,6 +90,11 @@ tests (`memory/fill.rs`'s ladder tests) with a pool that runs dry mid-round.
 
 ## Next
 
-The build: the stop and its message (stitched.rs's shortfall path), the import's round-down (config.rs's `.cfg` conversion and
-allocation_strategy.rs), the capped 4 KiB tail with its locked and pageable forms (fill.rs, stitched.rs), their tests (the fake
-VM's exhaustion paths), and the docs (the guide's memory settings, test_parameters.md, the README's page-size notes).
+Phase 1, the build: the stop and its message (stitched.rs's shortfall path), the import's round-down (config.rs's `.cfg`
+conversion and allocation_strategy.rs), the capped 4 KiB tail with its locked and pageable forms (fill.rs, stitched.rs), their
+tests (the fake VM's exhaustion paths), and the docs (the guide's memory settings, test_parameters.md, the README's page-size
+notes). Then an A/B on the dev box against 0.1.2, with physical memory fragmented (AWE pages held one per 2 MiB region) so 2
+MiB pages run short as on the reporter's desktop: 0.1.2 granted 51.67 of 56.75 GiB there, threads 6.38-6.50 of 7.09 GiB, and
+ran.
+
+Phase 2: the live check of locking an all-4 KiB run, then its lock.
