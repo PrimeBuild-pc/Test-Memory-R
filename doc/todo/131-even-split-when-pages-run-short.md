@@ -137,7 +137,9 @@ default `largechunk=` 128 MiB, about 110 MiB on the reporter's box), and on smal
 of the reporter's 2.22 GiB is 113 MiB), so a run short by under 2% a thread on average could stop. Weighed: imports at
 `largechunk=64MiB` (TM5 has no such setting, so it would be TMR's own default, not TM5's behaviour; the 128 MiB default is
 TODO 75's decision, re-checked against 1 GiB on 2026-11-04, 64 MiB never tried), or the cap on the run's whole shortfall.
-The owner: leave both; memory pressure is the main lever, so a user leaves a bigger reserve or expects 4 KiB pages.
+The owner: keep the cap per thread; memory pressure is the main lever, so a user leaves a bigger reserve or expects 4 KiB
+pages. Then, for imports only, `largechunk=64MiB` (a9900fd, `config::IMPORT_LARGE_CHUNK`) to smooth the threads' ends; TMR's own
+default stays 128 MiB, exposed in its configs and tunable.
 
 ## The A/B (dev box, 2026-11-22)
 
