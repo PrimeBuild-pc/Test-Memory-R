@@ -118,6 +118,18 @@ Phase 2: the live check of locking an all-4 KiB run, then its lock.
 - **The import**: `LegacyConfig::memory_allocation` sets `blkround=down` and `blkroundtarget=` to the Lock Memory Granularity,
   at least `largefloor` and a multiple of it.
 
+## The setting reshaped (the owner, 2026-11-22, 25e51f4)
+
+`tail4k=` became a `minpage=` value, one 4 KiB kind a run: `reg-lock` (the default: the capped, locked tail), `reg-page`
+(pageable, uncapped: the old `regular`), `large` or `huge` (no 4 KiB pages: the old `tail4k=off`). `regular` and `4kb` were
+renamed out; `2mb` and `1gb` stay. Both ends at 4 KiB must name one kind; every page 4 KiB and locked waits for phase 2. The
+threads and nodes tables head the 4 KiB column `4 KiB locked` or `4 KiB pageable` when a run has some, in place of the footer.
+A mixed kind (locked, then pageable past the cap) was not built: the A/B showed no sign pageable 4 KiB pages come more easily.
+The owner also asked whether a regular user can lock: Windows assigns "Increase a process working set" to BUILTIN\Users
+(this box's policy export), the raise works with it held but disabled, and a token stripped of it gets 1314 on the raise and
+1453 on `VirtualLock` (`scratch_119b/ab131/ws_lock_probe.ps1`); a 1314 now says the right is missing. Not run under a real
+standard account.
+
 ## The A/B (dev box, 2026-11-22)
 
 `pressure256.cfg` (1usmus_v3 with Reserved 256 MiB, test 1 once), 8 threads; 0.1.2 (66a34db) and the build (c5f66b5) back to
