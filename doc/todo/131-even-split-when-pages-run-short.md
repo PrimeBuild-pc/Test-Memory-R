@@ -36,8 +36,10 @@ TMR) fix it. `stitched.rs`'s `min_large_leaves_threads_short_but_not_empty` test
 
 - **Imported `.cfg`s round down, as TM5 does.** TM5 (`MainThread.asm` ~153-262) takes what's free less the `.cfg`'s
   "Reserved Memory for Windows (Mb)", divides by the threads and rounds each share down to "Lock Memory Granularity (Mb)" (16
-  MiB by default), never up, so the reserve asked is kept. A TMR import does the same; TMR's own `blkround=` stays as it is
-  for its own plans and configs. Here it would have asked 26.62 GiB and kept 326 MiB, 190 MiB back: on its own not enough for
+  MiB by default), never up, so the reserve asked is kept. A TMR import does the same with the settings TMR already has: the
+  conversion sets `blkround=down` and `blkroundtarget=` to the granularity (at least 16 MiB, `largefloor`, which the step must
+  be a multiple of). TMR's own plans and configs keep `blkround=up` at 1 GiB. Until it's built, a user can give the same on
+  the command line: `blkround=down blkroundtarget=16MiB` (and `minpage=regular` for a 4 KiB tail, pageable in 0.1.2). Here it would have asked 26.62 GiB and kept 326 MiB, 190 MiB back: on its own not enough for
   this run (its 2 MiB pages came 0.70 GiB short), so with:
 - **A capped 4 KiB tail.** When the large-page tiers run short, each thread's rest on 4 KiB pages, up to about 5% of its target
   (more stops the run, rule 1). 4 KiB pages need no unbroken runs, so the free memory large pages can't use serves them: here
