@@ -27,9 +27,9 @@ Every CPU at once (12 sharing each L3): L3 2.5 MB a thread at 13.4ns
 L3 a thread: 14.5 MB alone, 2.5 MB with 12 sharing; a run's L3 tests size from the curve through them
 ℹ️  DRAM and FullDRAM show similar latency (84.6ns vs 91.3ns).
     This is expected with large pages (2MB+) which minimize TLB pressure.
-    Use maxpage=regular to test with 4KB pages for TLB comparison.
+    Use maxpage=reg-page to test with 4KB pages for TLB comparison.
 ℹ️  Calibration used 2MB large pages.
-    Use maxpage=regular with --calibrate-cache to test with 4KB pages for TLB comparison.
+    Use maxpage=reg-page with --calibrate-cache to test with 4KB pages for TLB comparison.
 
 Seal calibration: this machine's, measured 2026-11-03 14:31 UTC: seal-width=auto runs its 128 bits
 
@@ -61,9 +61,9 @@ FullDRAM        64.0 MB     256.0 MB     400%       91.3ns       1.11x     ✅ S
 Measured 2026-11-03 14:22 UTC on 2MB large pages
 ℹ️  DRAM and FullDRAM show similar latency (84.6ns vs 91.3ns).
     This is expected with large pages (2MB+) which minimize TLB pressure.
-    Use maxpage=regular to test with 4KB pages for TLB comparison.
+    Use maxpage=reg-page to test with 4KB pages for TLB comparison.
 ℹ️  Calibration used 2MB large pages.
-    Use maxpage=regular with --calibrate-cache to test with 4KB pages for TLB comparison.
+    Use maxpage=reg-page with --calibrate-cache to test with 4KB pages for TLB comparison.
 
 Seal calibration: none stored: seal-width=auto runs the rule's width (256 bits with AVX2, else 128) until tmr.exe --calibrate-seal measures one (--calibrate-all measures both)
 ## another machine's
@@ -88,9 +88,9 @@ Every CPU at once (12 sharing each L3): L3 2.5 MB a thread at 13.4ns
 L3 a thread: 14.5 MB alone, 2.5 MB with 12 sharing; a run's L3 tests size from the curve through them
 ℹ️  DRAM and FullDRAM show similar latency (84.6ns vs 91.3ns).
     This is expected with large pages (2MB+) which minimize TLB pressure.
-    Use maxpage=regular to test with 4KB pages for TLB comparison.
+    Use maxpage=reg-page to test with 4KB pages for TLB comparison.
 ℹ️  Calibration used 2MB large pages.
-    Use maxpage=regular with --calibrate-cache to test with 4KB pages for TLB comparison.
+    Use maxpage=reg-page with --calibrate-cache to test with 4KB pages for TLB comparison.
 
 Seal calibration: not this machine's: measured 2026-11-03 14:31 UTC on hardware that has changed since, so seal-width=auto runs the rule's width (256 bits with AVX2, else 128) until tmr.exe --calibrate-seal measures it again
 

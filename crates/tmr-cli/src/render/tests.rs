@@ -435,7 +435,7 @@ fn setup_events_print_as_their_golden() {
         (
             "every parameter note",
             Setup::ParamNotes(vec![
-                ParamNote::MinPage("regular".to_string()),
+                ParamNote::MinPage("reg-page".to_string()),
                 ParamNote::MaxPage("large".to_string()),
                 ParamNote::Block("hugechunk", "2GiB".to_string()),
                 ParamNote::Block("blkround", "down".to_string()),
@@ -482,7 +482,7 @@ fn setup_events_print_as_their_golden() {
         }),
         ("large pages usable", large_pages(true, "large", true)),
         ("large pages not usable, and minpage needs them", large_pages(false, "large", true)),
-        ("large pages not usable, and minpage doesn't need them", large_pages(false, "regular", false)),
+        ("large pages not usable, and minpage doesn't need them", large_pages(false, "reg-page", false)),
         ("the cache calibration", Setup::CacheCalibration(CacheCalibrationState::Loaded { at: at(20) })),
         ("no cache calibration", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::NoneStored))),
         ("another machine's cache calibration", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::OtherHardware))),

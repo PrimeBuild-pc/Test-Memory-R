@@ -201,13 +201,14 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     entry(out, "largefloor=16MiB", "Smallest 2MB-page request (16MiB-1GiB)")?;
     entry(out, "blkroundtarget=1GiB", "Round each thread's share to a multiple of this (of largefloor)")?;
     entry(out, "blkround=up", "...up (default; a smaller step rather than pass available), down, or nearest")?;
-    entry(out, "minpage=regular", "Smallest page the run takes: regular (4KB), large (2MB, the default)")?;
-    more(out, "  or huge (1GB); 2MB and 1GB pages need the large-page privilege")?;
-    entry(out, "maxpage=large", "Largest page it asks for: regular, large or huge (the default)")?;
-    more(out, "  (minpage=regular maxpage=regular: 4KB pages, without asking)")?;
-    entry(out, "tail4k=locked", "Where 2MB/1GB pages run short, the rest of a thread on 4KB pages, up to")?;
     let cap = crate::memory::stitched::TAIL_PERCENT;
-    more(out, &format!("  {cap}% of it: locked in RAM (default), pageable, or off; short by more, the run stops"))?;
+    entry(out, "minpage=large", "Smallest page the run takes: huge (1GB), large (2MB; a thread short")?;
+    more(out, "  of them stops the run), reg-lock (the default: 4KB pages where the larger run short,")?;
+    more(out, &format!("  locked in RAM, up to {cap}% of a thread; short by more, the run stops) or reg-page"))?;
+    more(out, "  (4KB pages, pageable, for whatever the larger leave); 2MB and 1GB pages need the")?;
+    more(out, "  large-page privilege")?;
+    entry(out, "maxpage=large", "Largest page it asks for: reg-page, large or huge (the default)")?;
+    more(out, "  (minpage=reg-page maxpage=reg-page: 4KB pages, without asking)")?;
     entry(out, "channels=2", "Memory channels, for TM5 SimpleTest's stride (channels x Parameter - 1")?;
     more(out, "  lines); default: the config's, else 2")?;
     entry(out, "record=compact", "What the run keeps: full (every thread's rows, indented; the default), compact (the erring")?;
@@ -1346,7 +1347,7 @@ mod tests {
         let line = ["tmr.exe", "--remove-large-pages", r"User:.\alex"];
         assert!(matches!(parse(&line), Some(Command::RemoveLargePages(given)) if given == args(&line)));
         assert!(crate::logfile::wanted(&args(&line)), "--remove-large-pages keeps a log file");
-        let line = ["tmr.exe", "--calibrate-all", "maxpage=regular"];
+        let line = ["tmr.exe", "--calibrate-all", "maxpage=reg-page"];
         assert!(matches!(parse(&line), Some(Command::Calibrate(given)) if given == args(&line)));
         let line = ["tmr.exe", "--show-calibration", "--no-serials"];
         assert!(matches!(parse(&line), Some(Command::ShowCalibration(given)) if given == args(&line)));
@@ -1374,7 +1375,7 @@ mod tests {
         let choice = |line: &[&str]| SaveChoice::of(&args(line));
         assert_eq!(choice(&["tmr.exe", "--calibrate-seal"]), Ok(SaveChoice::Ask));
         assert_eq!(choice(&["tmr.exe", "--calibrate-seal", "--yes"]), Ok(SaveChoice::Save));
-        assert_eq!(choice(&["tmr.exe", "--calibrate-all", "maxpage=regular", "--no-save"]), Ok(SaveChoice::Keep));
+        assert_eq!(choice(&["tmr.exe", "--calibrate-all", "maxpage=reg-page", "--no-save"]), Ok(SaveChoice::Keep));
         assert!(choice(&["tmr.exe", "--calibrate-cache", "--yes", "--no-save"]).is_err());
         // Whether it checks tmr-cfg.json can be written before measuring: not for --no-save, nor for the curve check, which saves nothing
         assert!(!checks_the_save("--calibrate-curve", SaveChoice::Ask));

@@ -83,7 +83,7 @@ pub enum LargePageAnswer {
     /// `Grant`'s yes: grant the right to `candidates[i]`, then end the session for the sign-in it takes (`Setup::LargePageGrant`); a
     /// grant that fails ends it too, before allocating (`session::Stopped::NeedsLargePages`)
     Grant(usize),
-    /// Any question's "4 KiB pages this time": the session sets `minpage=regular maxpage=regular` for this run, and changes nothing
+    /// Any question's "4 KiB pages this time": the session sets `minpage=reg-page maxpage=reg-page` for this run, and changes nothing
     Regular,
     /// Any question's quit, and no answer's: end the session before allocating, granting nothing (`session::Stopped::NeedsLargePages`);
     /// `NeedsAdministrator`'s yes, to start TMR as administrator

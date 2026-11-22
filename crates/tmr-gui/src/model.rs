@@ -1011,7 +1011,7 @@ impl Model {
             (LargePageAnswer::Grant(_), _) => "Granting the large-page right".to_string(),
             (LargePageAnswer::Quit, _) => "Stopping before allocating: nothing granted, nothing run".to_string(),
             (LargePageAnswer::Regular, _) => {
-                self.errors.push(format!("{regular}: this run takes 4 KiB pages (minpage=regular maxpage=regular)"));
+                self.errors.push(format!("{regular}: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)"));
                 "Setting up, on 4 KiB pages".to_string()
             }
         };
@@ -1369,7 +1369,7 @@ fn stopped(why: &Stopped) -> String {
         Stopped::Invalid(e) => e.trim_start_matches("❌ ").lines().next().unwrap_or_default().to_string(),
         Stopped::CpuSelection(e) => format!("CPU selection error: {e}"),
         Stopped::NeedsLargePages => "This sign-in lacks the right large pages need, and TMR runs nothing on 4 KiB pages unasked \
-                                     (minpage=regular maxpage=regular runs on them without asking)"
+                                     (minpage=reg-page maxpage=reg-page runs on them without asking)"
             .to_string(),
     }
 }
@@ -1936,7 +1936,7 @@ mod tests {
             nodes: Vec::new(),
             commit_groups: Vec::new(),
             fairness: Vec::new(),
-            tail: None,
+            regular: None,
         };
         let plan = TestConfigurationReport {
             suite_timing: String::new(),
@@ -2065,7 +2065,7 @@ mod tests {
         m.answer_large_pages(DialogButton::Secondary);
         assert_eq!(answer.try_recv(), Ok(LargePageAnswer::Regular));
         for setup in [
-            Setup::LargePageStatus { usable: false, min_page: "regular".to_string(), min_needs_large: false },
+            Setup::LargePageStatus { usable: false, min_page: "reg-page".to_string(), min_needs_large: false },
             Setup::MemoryStatus(Some(status)),
             Setup::MemoryStatus(None),
             Setup::SystemInfo {
@@ -2097,7 +2097,7 @@ mod tests {
         m.choose_dimm("DIMM_B2 · 16 GiB");
         assert_eq!(chosen(&m).as_deref(), Some("DIMM_B2 · 16 GiB"), "the one chosen");
         assert_eq!(m.errors, [
-            "Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=regular maxpage=regular)",
+            "Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)",
             "priority=realtime with a worker on every logical CPU: the window can freeze until the run ends"
         ]);
 
@@ -2146,8 +2146,8 @@ mod tests {
             end(Ok(SessionEnd::Stopped(Stopped::NeedsLargePages))),
             (
                 "Stopped before testing".to_string(),
-                "This sign-in lacks the right large pages need, and TMR runs nothing on 4 KiB pages unasked (minpage=regular \
-                 maxpage=regular runs on them without asking)"
+                "This sign-in lacks the right large pages need, and TMR runs nothing on 4 KiB pages unasked (minpage=reg-page \
+                 maxpage=reg-page runs on them without asking)"
                     .to_string()
             )
         );
@@ -2252,7 +2252,9 @@ mod tests {
         }
         m.answer_large_pages(DialogButton::Secondary);
         assert_eq!(m.position, "Setting up, on 4 KiB pages");
-        assert_eq!(m.errors, ["Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=regular maxpage=regular)"]);
+        assert_eq!(m.errors, [
+            "Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)"
+        ]);
     }
 
     /// TODO 113: the grant's dialog lists the candidates, the account first and chosen, the broad ones warned of; the choice mirrors the
@@ -2374,7 +2376,7 @@ mod tests {
         m.answer_large_pages(DialogButton::Secondary);
         assert_eq!(answer.try_recv(), Ok(LargePageAnswer::Regular));
         assert_eq!(m.errors, [
-            "Large pages need the 'Lock pages in memory' right, not granted: this run takes 4 KiB pages (minpage=regular maxpage=regular)"
+            "Large pages need the 'Lock pages in memory' right, not granted: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)"
         ]);
         let mut m = model();
         let (reply, _answer) = std::sync::mpsc::sync_channel(1);

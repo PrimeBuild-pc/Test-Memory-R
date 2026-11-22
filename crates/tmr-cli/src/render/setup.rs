@@ -138,7 +138,7 @@ pub(super) fn text(setup: &Setup) -> String {
                 // Without the privilege, a large minpage (the default) refuses the run at allocation
                 let _ = writeln!(text, "⚠️  Large Pages: Not available, and minpage={} needs them, so the run will stop", min_page);
                 let _ = writeln!(text, "   before allocating. Set them up (tmr.exe --setup-large-pages, elevated), or rerun");
-                let _ = writeln!(text, "   with minpage=regular to test on standard 4KB pages: every test still runs, but");
+                let _ = writeln!(text, "   with minpage=reg-page to test on standard 4KB pages: every test still runs, but");
                 let _ = writeln!(text, "   slower memory traffic is less stress, so marginal errors that only appear at");
                 let _ = writeln!(text, "   full bandwidth may go undetected");
             } else {
@@ -439,7 +439,7 @@ fn end_text(end: &SessionEnd, program: &str) -> String {
             let _ = writeln!(text);
             let _ = writeln!(text, "================================================================================");
             let _ = writeln!(text, "❌ Stopped before allocating: this sign-in lacks the right large pages need, and TMR runs nothing");
-            let _ = writeln!(text, "   on 4KB pages unasked (minpage=regular maxpage=regular runs on them without asking)");
+            let _ = writeln!(text, "   on 4KB pages unasked (minpage=reg-page maxpage=reg-page runs on them without asking)");
         }
         // Said already: the sign-out by the prompt
         SessionEnd::SignOutChosen | SessionEnd::Command(_) => {}

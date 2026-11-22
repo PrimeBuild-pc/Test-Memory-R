@@ -34,7 +34,7 @@ const FOUR_KIB_PAGES: [&str; 4] = [
 /// B: this run on 4 KiB pages, what that means, and `tip`; `nothing` says nothing was granted when a grant was offered
 fn continuing(out: &mut dyn Write, nothing: &str, tip: &str) -> io::Result<LargePageAnswer> {
     writeln!(out)?;
-    writeln!(out, "⚠️  Continuing with standard 4KB pages (minpage=regular maxpage=regular for this run){nothing}.")?;
+    writeln!(out, "⚠️  Continuing with standard 4KB pages (minpage=reg-page maxpage=reg-page for this run){nothing}.")?;
     for line in FOUR_KIB_PAGES {
         writeln!(out, "{line}")?;
     }
@@ -49,7 +49,7 @@ fn invalid(out: &mut dyn Write, granting: bool) -> io::Result<LargePageAnswer> {
     writeln!(out)?;
     let nothing = if granting { ", granting nothing," } else { "" };
     writeln!(out, "❌ Invalid choice. TMR will exit{nothing} rather than run slower unasked.")?;
-    writeln!(out, "   minpage=regular maxpage=regular runs on standard 4KB pages without asking.")?;
+    writeln!(out, "   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.")?;
     writeln!(out)?;
     Ok(LargePageAnswer::Quit)
 }

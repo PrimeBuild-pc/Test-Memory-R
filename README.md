@@ -211,10 +211,10 @@ winget install --id Microsoft.WindowsAppRuntime.2 --exact --source winget
   back in (a privilege reaches your programs at your next sign-in). From then on TMR has it in every
   run, run as administrator or not. `tmr.exe --remove-large-pages` takes it away again.
   Without it TMR warns, and asks before running on regular 4 KB pages, which are slower: it runs
-  on them only when you say so, or with `minpage=regular maxpage=regular`, and no answer quits.
+  on them only when you say so, or with `minpage=reg-page maxpage=reg-page`, and no answer quits.
   Where the large pages run short (they fragment as Windows runs), each thread finishes on 4 KB
-  pages locked in RAM, up to 5% of its share (`tail4k=`); short by more, the run stops before
-  testing and says what to change.
+  pages locked in RAM, up to 5% of its share (`minpage=reg-lock`, the default); short by more, the
+  run stops before testing and says what to change.
 
 ## Building from source
 

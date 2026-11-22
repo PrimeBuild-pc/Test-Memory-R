@@ -496,7 +496,7 @@ pub fn create_allocation_report(
         nodes: nodes.into_values().collect(),
         commit_groups,
         threads,
-        tail: None,
+        regular: None,
     }
 }
 
@@ -951,22 +951,24 @@ mod tests {
         assert_eq!((large[4].as_str(), large[5].as_str()), ("0-3 (±5.00 GiB)", "✅"));
     }
 
-    /// TODO 131: the threads table says whether a 4 KiB tail is locked in RAM or pageable, and nothing without one
+    /// TODO 131: the 4 KiB column's header says how the run's 4 KiB pages are held, in the threads and the nodes tables
     #[test]
-    fn the_threads_table_says_how_a_tail_is_held() {
-        use crate::memory::stitched::Tail;
+    fn the_4k_column_says_how_its_pages_are_held() {
+        use crate::memory::allocator::RegularPages;
         let mut tail = repeat(3, GIB, Huge, 0);
         tail.push((64 * MIB, Regular, 0, false));
         let spans = vec![span(0, 0, 4 * GIB, &repeat(4, GIB, Huge, 0)), span(1, 0, 3 * GIB + 64 * MIB, &tail)];
         let mut report = allocation_report(spans, 1);
         let f = DefaultFormatter::new();
+        let header = |table: &TableData| table.headers.iter().map(|h| h.text.clone()).find(|h| h.starts_with("4 KiB")).unwrap();
+        assert_eq!(header(&f.prepare_allocation_threads_table(&report)), "4 KiB");
+        report.regular = Some(RegularPages::Locked);
+        assert_eq!(header(&f.prepare_allocation_threads_table(&report)), "4 KiB locked");
+        assert_eq!(header(&f.prepare_allocation_nodes_table(&report)), "4 KiB locked");
+        assert_eq!(cell(&f.prepare_allocation_threads_table(&report), 1, "4 KiB locked"), "64.00 MiB");
+        report.regular = Some(RegularPages::Pageable);
+        assert_eq!(header(&f.prepare_allocation_threads_table(&report)), "4 KiB pageable");
         assert_eq!(f.prepare_allocation_threads_table(&report).footer, None);
-        report.tail = Some(Tail::Locked);
-        let footer = f.prepare_allocation_threads_table(&report).footer;
-        assert_eq!(footer.as_deref(), Some("4 KiB: the rest where the larger pages ran short, locked in RAM (tail4k=locked)."));
-        report.tail = Some(Tail::Pageable);
-        let footer = f.prepare_allocation_threads_table(&report).footer.unwrap();
-        assert!(footer.contains("pageable: Windows may page it out"), "{footer}");
     }
 
     /// A thread short of its target is ⚠️, and one fed in small pieces is 🟡 on Requests.

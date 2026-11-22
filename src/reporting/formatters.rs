@@ -224,6 +224,16 @@ impl DefaultFormatter {
     }
 }
 
+/// The 4 KiB column's header: how the run's 4 KiB pages are held, when it has any (TODO 131; one kind a run, `minpage=`)
+fn regular_header(report: &AllocationReport) -> &'static str {
+    use crate::memory::allocator::RegularPages;
+    match report.regular {
+        Some(RegularPages::Locked) => "4 KiB locked",
+        Some(RegularPages::Pageable) => "4 KiB pageable",
+        None => "4 KiB",
+    }
+}
+
 fn count_or_dash(count: usize) -> String {
     if count == 0 { "-".to_string() } else { count.to_string() }
 }
@@ -1616,7 +1626,7 @@ impl ReportFormatter for DefaultFormatter {
             .add_header("Allocated", ColumnAlignment::Right)
             .add_header("1 GiB", ColumnAlignment::Right)
             .add_header("2 MiB", ColumnAlignment::Right)
-            .add_header("4 KiB", ColumnAlignment::Right);
+            .add_header(regular_header(report), ColumnAlignment::Right);
         if multi {
             table = table.add_header("Local", ColumnAlignment::Right).add_header("Remote", ColumnAlignment::Right);
         }
@@ -1709,7 +1719,7 @@ impl ReportFormatter for DefaultFormatter {
             .add_header("Allocated", ColumnAlignment::Right)
             .add_header("1 GiB", ColumnAlignment::Right)
             .add_header("2 MiB", ColumnAlignment::Right)
-            .add_header("4 KiB", ColumnAlignment::Right);
+            .add_header(regular_header(report), ColumnAlignment::Right);
         if multi {
             table = table.add_header("Local", ColumnAlignment::Right).add_header("Remote", ColumnAlignment::Right);
         }
@@ -1733,21 +1743,8 @@ impl ReportFormatter for DefaultFormatter {
             cells.push(self.thread_status(report, i));
             table = table.add_row(cells);
         }
-        // Whether a 4 KiB tail is locked in RAM, as the large pages are, or pageable (TODO 131)
-        use crate::memory::stitched::Tail;
-        let mut notes = Vec::new();
-        match report.tail {
-            Some(Tail::Locked) => notes.push("4 KiB: the rest where the larger pages ran short, locked in RAM (tail4k=locked)."),
-            Some(Tail::Pageable) => {
-                notes.push("4 KiB: the rest where the larger pages ran short, pageable: Windows may page it out (tail4k=pageable).")
-            }
-            Some(Tail::Off) | None => {}
-        }
         if multi && report.threads.iter().any(|t| t.regular_bytes > 0) {
-            notes.push("4 KiB pages only prefer the thread's node, and count as local.");
-        }
-        if !notes.is_empty() {
-            table = table.with_footer(notes.join(" "));
+            table = table.with_footer("4 KiB pages only prefer the thread's node, and count as local.");
         }
         table
     }

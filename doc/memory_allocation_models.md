@@ -481,8 +481,8 @@ a node draw from one page pool, and fairness is judged within it:
   │                                    on bigger pages, then the one served │
   │                                    longest ago; a refusal halves the    │
   │                                    node's request size                  │
-  │ 4 KiB    whatever is left, thread by thread, if minpage=regular;        │
-  │          else a tail of up to 5% a thread, locked (tail4k=), or stop    │
+  │ 4 KiB    minpage=reg-lock: a locked tail, up to 5% a thread, or stop;   │
+  │          reg-page: whatever is left, pageable; large: none, or stop     │
   └─────────────────────────────────────────────────────────────────────────┘
 
   stitched (the only allocator since TODO 76) — one placeholder, one contiguous VA span per thread
@@ -618,8 +618,7 @@ CLI (`params.rs`), all overridable from JSON:
 | Parameter | Stage | Controls |
 |---|---|---|
 | `memory=20%` / `2GiB` / `2048MB` | 1 | Total reservation. `-from-available` (default, TM5-like), `-from-total`, `-target` |
-| `minpage=` / `maxpage=` (JSON `min_page_size` / `max_page_size`) | 1 | Gate `regular`/`large`/`huge`; feeds `is_page_size_allowed` |
-| `tail4k=locked` (JSON `regular_tail`) | 1 | With `minpage=` above 4 KiB: what the large pages leave a thread short goes on 4 KiB pages, up to 5% of its share (`stitched::TAIL_PERCENT`), `locked` in RAM (the working-set minimum raised, then `VirtualLock`; either refused stops the run), `pageable`, or `off`. Short by more, the run stops before testing (TODO 131) |
+| `minpage=` / `maxpage=` (JSON `min_page_size` / `max_page_size`) | 1 | `huge`, `large`, `reg-lock`, `reg-page` (`allocator::PAGE_SETTINGS`). `minpage=` names the 4 KiB kind (TODO 131): `reg-lock`, the default, takes 4 KiB pages only where the large pages leave a thread short, up to 5% of its share (`stitched::TAIL_PERCENT`), locked (the working-set minimum raised, then `VirtualLock`; either refused stops the run); `reg-page` takes whatever is left, pageable and uncapped; `large` or `huge` take none. A thread still short stops the run before testing. Every page 4 KiB and locked waits for phase 2 |
 | `blkroundtarget=1GiB`, `blkround=up` | 1 | Round each thread's share to a multiple of this: `up` (default), `down` or `nearest`. Never past the reference figure: a smaller step instead, down to `largefloor`. A multiple of `largefloor`, no bigger than `hugechunk` / `largechunk` |
 | `largefloor=16MiB` | 1 | Smallest 2 MiB-page request (16 MiB–1 GiB): a refusal this small means the node is out of 2 MiB pages |
 | `hugechunk=1GiB`, `largechunk=128MiB` | 1 | First size of each 1 GiB / 2 MiB-page request, halved on refusal. Bigger means fewer OS calls on large machines and a coarser split. The commits merge, so the smaller 2 MiB default only costs calls, and spreads a node's 2 MiB shortfall over all its threads |

@@ -93,7 +93,8 @@ pub struct CalibrationConfig {
     pub max_probe_time_ms: u64,
     /// Minimum samplesbefore checking convergence (default: 50)
     pub min_samples: u32,
-    /// Page size for calibration allocation: "regular"/"4kb", "large"/"2mb", "huge"/"1gb"
+    /// Page size for calibration allocation, as `maxpage=` names it ("reg-page"/"reg-lock", "large"/"2mb", "huge"/"1gb"); a stored
+    /// calibration names 4 KiB "regular" (`page_size_str`)
     pub page_size: String,
 }
 
@@ -451,11 +452,11 @@ use crate::memory::backend::BackendType;
 use crate::memory::buffer::MemoryType;
 use crate::memory::{MemoryAllocator, MemoryBuffer};
 
-/// The page size a calibration asks for, from its `page_size` (`maxpage=`): "regular"/"4kb", "huge"/"1gb", else 2 MiB ("large"/"2mb", the
-/// default).
+/// The page size a calibration asks for, from its `page_size` (`maxpage=`): "reg-page"/"reg-lock" (TODO 131; a calibration's buffer isn't
+/// locked either way), "huge"/"1gb", else 2 MiB ("large"/"2mb", the default). A stored calibration's "regular"/"4kb" reads as 4 KiB.
 fn calibration_page_size(page_size_str: &str) -> PageSizeLevel {
     match page_size_str.to_lowercase().as_str() {
-        "regular" | "4kb" => PageSizeLevel::Regular,
+        "reg-page" | "reg-lock" | "regular" | "4kb" => PageSizeLevel::Regular,
         "huge" | "1gb" => PageSizeLevel::Huge,
         _ => PageSizeLevel::Large,
     }
@@ -579,7 +580,7 @@ impl ProbeEngine {
     }
 
     /// Initialize with a specific page size preference, on NUMA node `node` (`allocate_calibration_buffer`)
-    /// page_size_str: "regular"/"4kb", "large"/"2mb", "huge"/"1gb"
+    /// page_size_str: as `CalibrationConfig::page_size`
     pub fn initialize_with_page_size(&mut self, max_size: usize, page_size_str: &str, node: u32) -> Result<(), String> {
         if self.initialized {
             return Ok(());
@@ -2089,14 +2090,14 @@ impl CalibrationTest {
         // Check if DRAM and FullDRAM have similar latencies
         let dram_lat = results.tiers.get(&CacheTier::Dram).map(|r| r.median_latency_ns);
         let full_lat = results.tiers.get(&CacheTier::FullDram).map(|r| r.median_latency_ns);
-        let is_large_pages = results.page_size != "regular" && results.page_size != "4kb";
+        let is_large_pages = calibration_page_size(&results.page_size) != PageSizeLevel::Regular;
         if let (Some(d), Some(f)) = (dram_lat, full_lat) {
             let ratio = if d > 0.0 { (f - d).abs() / d } else { 0.0 };
             if ratio < 0.10 {
                 if is_large_pages {
                     writeln!(out, "ℹ️  DRAM and FullDRAM show similar latency ({:.1}ns vs {:.1}ns).", d, f)?;
                     writeln!(out, "    This is expected with large pages (2MB+) which minimize TLB pressure.")?;
-                    writeln!(out, "    Use maxpage=regular to test with 4KB pages for TLB comparison.")?;
+                    writeln!(out, "    Use maxpage=reg-page to test with 4KB pages for TLB comparison.")?;
                 } else {
                     writeln!(out, "ℹ️  DRAM and FullDRAM show similar latency ({:.1}ns vs {:.1}ns) even with 4KB pages.", d, f)?;
                     writeln!(out, "    This may indicate the working set sizes are too similar to differentiate.")?;
@@ -2104,8 +2105,8 @@ impl CalibrationTest {
             }
         }
         writeln!(out, "ℹ️  Calibration used {} pages.", page_size_name(&results.page_size))?;
-        if results.page_size != "regular" && results.page_size != "4kb" {
-            writeln!(out, "    Use maxpage=regular with --calibrate-cache to test with 4KB pages for TLB comparison.")?;
+        if is_large_pages {
+            writeln!(out, "    Use maxpage=reg-page with --calibrate-cache to test with 4KB pages for TLB comparison.")?;
         }
         writeln!(out)?;
         Ok(())
@@ -2115,7 +2116,7 @@ impl CalibrationTest {
 /// A calibration's `page_size` as its report names it.
 fn page_size_name(page_size: &str) -> &'static str {
     match page_size {
-        "regular" | "4kb" => "4KB regular",
+        "regular" | "4kb" | "reg-page" | "reg-lock" => "4KB regular",
         "huge" | "1gb" => "1GB huge",
         _ => "2MB large",
     }
@@ -2596,9 +2597,17 @@ mod tests {
 
         // Named as the report names them, and as maxpage= asks for them (2 MiB by default)
         assert_eq!([Regular, Large, Huge].map(|p| page_size_name(page_size_str(p))), ["4KB regular", "2MB large", "1GB huge"]);
-        for (maxpage, page) in
-            [("regular", Regular), ("4KB", Regular), ("large", Large), ("2mb", Large), ("huge", Huge), ("1gb", Huge), ("unknown", Large)]
-        {
+        for (maxpage, page) in [
+            ("reg-page", Regular),
+            ("reg-lock", Regular),
+            ("regular", Regular),
+            ("4KB", Regular),
+            ("large", Large),
+            ("2mb", Large),
+            ("huge", Huge),
+            ("1gb", Huge),
+            ("unknown", Large),
+        ] {
             assert_eq!(calibration_page_size(maxpage), page, "{maxpage}");
         }
         for page in [Regular, Large, Huge] {

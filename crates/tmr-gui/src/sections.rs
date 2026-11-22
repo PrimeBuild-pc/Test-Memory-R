@@ -80,7 +80,7 @@ impl Sections {
             } else if *min_needs_large {
                 Block::Warning(format!(
                     "Large pages: not available, and minpage={min_page} needs them, so the run stops before allocating: \
-                     tmr.exe --setup-large-pages (elevated), or minpage=regular for 4 KiB pages"
+                     tmr.exe --setup-large-pages (elevated), or minpage=reg-page for 4 KiB pages"
                 ))
             } else {
                 Block::Warning("Large pages: not available, so the run takes 4 KiB pages: less stress, about 5-10% slower".to_string())

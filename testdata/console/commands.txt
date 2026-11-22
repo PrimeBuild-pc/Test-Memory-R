@@ -78,12 +78,13 @@ COMMAND LINE PARAMETERS:
   largefloor=16MiB                    # Smallest 2MB-page request (16MiB-1GiB)
   blkroundtarget=1GiB                 # Round each thread's share to a multiple of this (of largefloor)
   blkround=up                         # ...up (default; a smaller step rather than pass available), down, or nearest
-  minpage=regular                     # Smallest page the run takes: regular (4KB), large (2MB, the default)
-                                      #   or huge (1GB); 2MB and 1GB pages need the large-page privilege
-  maxpage=large                       # Largest page it asks for: regular, large or huge (the default)
-                                      #   (minpage=regular maxpage=regular: 4KB pages, without asking)
-  tail4k=locked                       # Where 2MB/1GB pages run short, the rest of a thread on 4KB pages, up to
-                                      #   5% of it: locked in RAM (default), pageable, or off; short by more, the run stops
+  minpage=large                       # Smallest page the run takes: huge (1GB), large (2MB; a thread short
+                                      #   of them stops the run), reg-lock (the default: 4KB pages where the larger run short,
+                                      #   locked in RAM, up to 5% of a thread; short by more, the run stops) or reg-page
+                                      #   (4KB pages, pageable, for whatever the larger leave); 2MB and 1GB pages need the
+                                      #   large-page privilege
+  maxpage=large                       # Largest page it asks for: reg-page, large or huge (the default)
+                                      #   (minpage=reg-page maxpage=reg-page: 4KB pages, without asking)
   channels=2                          # Memory channels, for TM5 SimpleTest's stride (channels x Parameter - 1
                                       #   lines); default: the config's, else 2
   record=compact                      # What the run keeps: full (every thread's rows, indented; the default), compact (the erring

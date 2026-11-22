@@ -81,7 +81,7 @@ privilege replaces one granted on the PC.
 
 Without it TMR warns and asks first, whenever `maxpage=` allows large pages (as it does unless you
 change it): it runs on regular 4 KB pages, which are slower, only when you say so this time, or
-when you give `minpage=regular maxpage=regular`, which asks nothing. Not run as administrator, it
+when you give `minpage=reg-page maxpage=reg-page`, which asks nothing. Not run as administrator, it
 asks whether to run on them this time or quit, to be started as administrator. No answer (an
 empty line, or the window's question closed) quits, running nothing. `tmr --remove-large-pages`
 takes the privilege away again (from you, or from the `Group:` or `User:` named).
@@ -102,10 +102,17 @@ measures the cache calibration, which takes about two minutes before testing sta
 
 A run tests every thread's whole share or none. When Windows can't find enough 1 GB and 2 MB pages
 (they fragment as Windows runs), TMR finishes each thread on 4 KB pages, up to 5% of its share,
-locked in RAM as the large pages are: `tail4k=pageable` leaves them pageable, `tail4k=off` takes
-none. A thread short by more stops the run before testing, saying by how much and what to change:
-a bigger reserve (`memory=`), fewer threads (`cpus=`), a restart, or `minpage=regular`, which
-finishes on 4 KB pages without the cap, pageable.
+locked in RAM as the large pages are. A thread short by more stops the run before testing, saying
+by how much and what to change: a bigger reserve (`memory=`), fewer threads (`cpus=`), a restart,
+or another `minpage=`:
+
+| `minpage=` | 4 KB pages |
+|---|---|
+| `reg-lock` (the default) | where the large pages run short, locked in RAM, up to 5% of a thread's share |
+| `reg-page` | whatever the large pages leave, pageable: Windows may page them out under pressure |
+| `large` | none: a thread the large pages leave short stops the run |
+
+The Memory report's 4 KB column says which kind a run took.
 
 - **Double-click TMR** (or its Start menu entry) for its window. Type any settings in its box, or
   pick a config with Load config, and press Start; once the run is over, Run again starts another.

@@ -391,7 +391,7 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
                         log::debug!("CLI override: max_page_size = {}", page_str);
                     }
                 }
-                "hugechunk" | "largechunk" | "largefloor" | "blkroundtarget" | "blkround" | "tail4k" => {
+                "hugechunk" | "largechunk" | "largefloor" | "blkroundtarget" | "blkround" => {
                     if let params::ParamValue::String(v) = value {
                         alloc_config.set_block_param(key, v);
                         log::debug!("CLI override: {} = {}", key, v);
@@ -543,24 +543,29 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     fe.event(Setup::LargePageCheck.into());
 
     // Without the privilege, a run whose maxpage= allows large pages (the default) is asked first (TODO 113, the owner's rule): it takes
-    // 4 KiB pages only when told to, or with minpage=regular maxpage=regular, which asks nothing
+    // 4 KiB pages only when told to, or with minpage=reg-page maxpage=reg-page, which asks nothing
     use crate::memory::allocator::PageSizeLevel;
     let wants_large = PageSizeLevel::from_config_str(&alloc_config.max_page_size) > PageSizeLevel::Regular;
     match settle_large_pages(&*fe, crate::memory::large_page_question(wants_large), crate::memory::grant_large_pages) {
         LargePages::Unasked => fe.event(Setup::LargePageDiagnostic { report: crate::memory::diagnose_large_pages() }.into()),
         LargePages::SignOut => return Ok(SessionEnd::SignOutChosen),
-        // 4 KiB pages this time, both ends of the range (decision 5a): the default minpage needs large pages (TODO 88)
+        // 4 KiB pages this time, both ends of the range (decision 5a), pageable: the default minpage needs large pages (TODO 88; its
+        // locked 4 KiB pages are only a tail where they run short, TODO 131)
         LargePages::Regular => {
-            alloc_config.min_page_size = "regular".to_string();
-            alloc_config.max_page_size = "regular".to_string();
+            let pageable = crate::memory::allocator::RegularPages::Pageable.label();
+            alloc_config.min_page_size = pageable.to_string();
+            alloc_config.max_page_size = pageable.to_string();
         }
         // Before anything is allocated: the question's answer, or the grant's failure, said why
         LargePages::Quit => return Ok(SessionEnd::Stopped(Stopped::NeedsLargePages)),
     }
 
     let usable = crate::check_large_page_privilege().is_ok();
-    // Without the privilege, a large minpage refuses the run at allocation
-    let min_needs_large = PageSizeLevel::from_config_str(&alloc_config.min_page_size) > PageSizeLevel::Regular;
+    // Without the privilege, a large minpage refuses the run at allocation, and so does reg-lock, the default: its 4 KiB pages are only
+    // a tail where the large pages run short (TODO 131)
+    let min_needs_large = PageSizeLevel::from_config_str(&alloc_config.min_page_size) > PageSizeLevel::Regular
+        || crate::memory::allocator::RegularPages::from_config_str(&alloc_config.min_page_size)
+            == crate::memory::allocator::RegularPages::Locked;
     fe.event(Setup::LargePageStatus { usable, min_page: alloc_config.min_page_size.clone(), min_needs_large }.into());
 
     // Serials out of what the run shows and keeps (`--no-serials`), before SMBIOS is first read and logged (TODO 105)

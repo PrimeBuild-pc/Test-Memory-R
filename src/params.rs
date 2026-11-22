@@ -372,19 +372,13 @@ impl ParamRegistry {
         params.insert("minpage", ParamDef {
             key: "minpage",
             can_override_config: true,
-            parser: |v| match v.to_lowercase().as_str() {
-                "regular" | "4kb" | "large" | "2mb" | "huge" | "1gb" => Ok(ParamValue::String(v.to_lowercase())),
-                _ => Err(format!("Invalid page size '{}'. Valid: regular/4kb, large/2mb, huge/1gb", v)),
-            },
+            parser: |v| crate::memory::allocator::check_page_setting(v).map(ParamValue::String),
         });
 
         params.insert("maxpage", ParamDef {
             key: "maxpage",
             can_override_config: true,
-            parser: |v| match v.to_lowercase().as_str() {
-                "regular" | "4kb" | "large" | "2mb" | "huge" | "1gb" => Ok(ParamValue::String(v.to_lowercase())),
-                _ => Err(format!("Invalid page size '{}'. Valid: regular/4kb, large/2mb, huge/1gb", v)),
-            },
+            parser: |v| crate::memory::allocator::check_page_setting(v).map(ParamValue::String),
         });
 
         // Block sizes and share rounding. Each parses here; how they fit together is checked by MemoryAllocationConfig::share_rounding.
@@ -401,16 +395,6 @@ impl ParamRegistry {
             can_override_config: true,
             parser: |v| {
                 v.parse::<crate::memory::allocation_strategy::RoundDirection>()?;
-                Ok(ParamValue::String(v.to_lowercase()))
-            },
-        });
-
-        // The 4 KiB tail where the large pages run short (TODO 131)
-        params.insert("tail4k", ParamDef {
-            key: "tail4k",
-            can_override_config: true,
-            parser: |v| {
-                v.parse::<crate::memory::stitched::Tail>()?;
                 Ok(ParamValue::String(v.to_lowercase()))
             },
         });

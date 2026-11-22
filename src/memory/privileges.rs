@@ -520,7 +520,7 @@ pub(crate) fn account_of(token: &Token) -> String {
 /// What a session asks about large pages before its run (`Frontend::ask_large_pages`), when this token lacks the right they need,
 /// SeLockMemoryPrivilege ('Lock pages in memory'), and the run's page range allows them (maxpage= large or huge). A right reaches a
 /// program at its account's next sign-in: no restart is needed. The owner's rule (2026-11-03): a run takes 4 KiB pages only when the
-/// user says so (`LargePageAnswer::Regular`) or gave `minpage=regular maxpage=regular` (then nothing is asked); no answer quits.
+/// user says so (`LargePageAnswer::Regular`) or gave `minpage=reg-page maxpage=reg-page` (then nothing is asked); no answer quits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LargePageQuestion {
     /// The policy gives it to `account`, the account TMR runs as, or to `via`, a group it is in, but this sign-in began before it did. A
@@ -953,7 +953,7 @@ mod tests {
         assert_eq!(held(&["S-1-1-0", "S-1-5-32-544"]), Some(Holder::Group(r"BUILTIN\Administrators".to_string())), "the first offered");
     }
 
-    /// TODO 113: the question, from stand-ins (decision 5a): none with the right in the token, or with maxpage=regular (4 KiB pages the
+    /// TODO 113: the question, from stand-ins (decision 5a): none with the right in the token, or with maxpage=reg-page (4 KiB pages the
     /// most the run takes), nothing read; the sign-in when the account or a group holds it, run as administrator or not (2026-11-04: an
     /// administrator keeps the right unelevated); else, run as administrator, the grant, the account first, also when the policy can't
     /// be read, and not, 4 KiB pages or quit whatever minpage is; `uac` and `domain` carried. No test reads or changes the policy.
@@ -999,8 +999,8 @@ mod tests {
         let needs = Some(LargePageQuestion::NeedsAdministrator { account: r"PC\owner".to_string(), uac: true });
         assert_eq!(ask(true, true, true, Ok(vec![])), (None, false, false), "the right in the token");
         assert_eq!(ask(true, true, false, Ok(vec![])), (None, false, false), "the right in the token, not elevated");
-        assert_eq!(ask(false, false, false, Ok(vec![])), (None, false, false), "maxpage=regular, not an administrator: no question");
-        assert_eq!(ask(false, false, true, Ok(vec![])), (None, false, false), "maxpage=regular, an administrator: no question");
+        assert_eq!(ask(false, false, false, Ok(vec![])), (None, false, false), "maxpage=reg-page, not an administrator: no question");
+        assert_eq!(ask(false, false, true, Ok(vec![])), (None, false, false), "maxpage=reg-page, an administrator: no question");
         assert_eq!(ask(false, true, false, Ok(vec![])), (needs.clone(), true, true), "not an administrator, held by nobody: 4 KiB or quit");
         let unreadable = || Err("LsaOpenPolicy: Access is denied.".to_string());
         assert_eq!(ask(false, true, false, unreadable()), (needs, true, true), "not an administrator, the policy unreadable");

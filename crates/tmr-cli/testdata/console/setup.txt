@@ -10,7 +10,7 @@
   CLI overrides supported
 
 ## every parameter note
-  Minimum Page Size: regular
+  Minimum Page Size: reg-page
   Maximum Page Size: large
   hugechunk: 2GiB
   blkround: down
@@ -103,7 +103,7 @@ TMR will exit now.
 ## large pages not usable, and minpage needs them
 ⚠️  Large Pages: Not available, and minpage=large needs them, so the run will stop
    before allocating. Set them up (tmr.exe --setup-large-pages, elevated), or rerun
-   with minpage=regular to test on standard 4KB pages: every test still runs, but
+   with minpage=reg-page to test on standard 4KB pages: every test still runs, but
    slower memory traffic is less stress, so marginal errors that only appear at
    full bandwidth may go undetected
 
