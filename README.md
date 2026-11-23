@@ -233,9 +233,11 @@ two short hashes TMR computes to recognise the machine later: `machine_id` (from
 `memory_id` (from the memory modules, including their serial numbers). `--serials` (the window's
 Settings has the same toggle, off by default) keeps all four of those in the console, the log and the
 results file. The module manufacturer and part number are always recorded. Neither hash is a strong
-cryptographic hash, so don't treat a file that has them, from a run with `--serials` or from TMR 0.1.2
-or earlier, which kept them by default, as anonymous. Without the hashes, `--compare-results` tells
-two runs' machines apart by the CPU, the BIOS and the memory modules' part numbers and speeds.
+cryptographic hash, so don't treat a file that has them, from a run with `--serials` or from the 0.1.2
+release or earlier, which kept them by default, as anonymous; a file that left them out has
+`(left out: --serials keeps it)` for its `machine_id` and `memory_id`. Without the hashes,
+`--compare-results` tells two runs' machines apart by the CPU, the BIOS and the memory modules' part
+numbers and speeds.
 
 **No results, no log.** `record=off` keeps a run from writing a results file or a log file at all; the
 console still shows the run. It doesn't reach the local calibration cache (below); add `calibrate=off`
@@ -249,15 +251,19 @@ sent anywhere.
 
 **Sharing a log or results file.** Both describe your system as above. A run's files have no DIMM
 serial numbers, system UUID or fingerprint hashes unless it was given `--serials`, but the log names
-the Windows account TMR ran as (`PC\name`), and paths in either file can have your user folder in them
-(`C:\Users\<name>\...`). `tmr --sanitize <results file or log>` (the window's `•••` menu has it as
-Sanitize a results file and its log) writes copies of the pair beside them, `<name>.sanitized.json`
-and `<name>.sanitized.log`, with each of those replaced by `<removed>`: the DIMM serials, the system
-UUID, both hashes, the user folders, account, PC and user names, and the machine's SIDs. Either file
-names the pair; the other must be beside it (in TMR's `results\` and `logs\`, or in the same folder) and
-carry the same run ID, or nothing is written. The originals stay as they were. It can't know a name
-TMR didn't write, such as a config's name or a folder outside `C:\Users\`, so read the copies before
-you post them.
+the Windows account TMR ran as (`PC\name`) and, when that account lacks the right large pages need,
+every account and group the security policy gives it to, with their SIDs (other people's accounts on
+the PC among them). A hardware error's Windows event, which the log records when Windows has no
+message for it (and always at `RUST_LOG=debug`), names the PC by its full name, DNS domain included.
+Paths in either file can have your user folder in them (`C:\Users\<name>\...`).
+`tmr --sanitize <results file or log>` (the window's `•••` menu has it as Sanitize a results file and
+its log) writes copies of the pair beside them, `<name>.sanitized.json` and `<name>.sanitized.log`,
+with each of those replaced by `<removed>`: the DIMM serials, the system UUID, both hashes, the user
+folders, the accounts, the PC's and the users' names, and the machine's SIDs. Either file names the
+pair; the other must be beside it (in TMR's `results\` and `logs\`, or in the same folder) and carry
+the same run ID, or nothing is written. The originals stay as they were. It can't know a name TMR
+didn't write, such as a config's name or a folder outside `C:\Users\`, so read the copies before you
+post them.
 
 ## License
 

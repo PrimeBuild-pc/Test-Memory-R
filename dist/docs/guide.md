@@ -308,8 +308,9 @@ A results file describes the system it came from, so runs can be told apart: the
 and the memory modules' part numbers and speeds. A run leaves out the DIMMs' serial numbers, the
 motherboard's system UUID and the two fingerprints TMR makes of the machine and its memory, unless
 it is given `--serials` (`tmr plan=stability --serials`), which keeps them in the output, log and
-results; in the window, Settings has the same switch, off by default. Files from TMR 0.1.2 or
-earlier have them: it kept them by default.
+results; in the window, Settings has the same switch, off by default. Files from the 0.1.2 release
+or earlier have them: it kept them by default. A file that left them out has
+`(left out: --serials keeps it)` for its `machine_id` and `memory_id`.
 
 To share a run's files, `tmr --sanitize <results file or log>` (in the window, Sanitize a results
 file and its log, in the `•••` menu) writes copies of both beside them, `<name>.sanitized.json` and

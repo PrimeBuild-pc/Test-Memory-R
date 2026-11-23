@@ -1178,9 +1178,15 @@ mod tests {
         // And every flag a session takes, and the frontends' (`--gui` and `--cli`, tmr-app's launch.rs; `--start`, the window's), each named
         // on a line, but --help itself and the short forms of it and of --version
         let words: Vec<&str> = text.split(|c: char| c.is_whitespace() || ",;:()".contains(c)).collect();
-        let flags = crate::session::KNOWN_FLAGS.into_iter().chain(["--gui", "--cli", "--start"]);
-        for flag in flags.filter(|flag| !["--help", "-h", "-?", "-v"].contains(flag)) {
-            assert!(words.contains(&flag), "--help names no {flag}");
+        let flags: Vec<&str> = crate::session::KNOWN_FLAGS.into_iter().chain(["--gui", "--cli", "--start"]).collect();
+        for flag in flags.iter().filter(|flag| !["--help", "-h", "-?", "-v"].contains(flag)) {
+            assert!(words.contains(flag), "--help names no {flag}");
+        }
+        // And the other way round: a flag it names is one a session or a frontend takes (it named --sanitize, which the session refused)
+        for word in words.iter().filter(|word| word.starts_with("--")) {
+            // The flag, without what follows it in a sentence (`--calibrate-seal's`)
+            let flag = word.split(|c: char| !(c.is_ascii_lowercase() || c == '-')).next().unwrap_or_default();
+            assert!(flags.contains(&flag), "--help names {flag}, which no session takes");
         }
     }
 

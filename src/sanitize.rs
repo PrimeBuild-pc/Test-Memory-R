@@ -16,15 +16,19 @@
 //! - accounts as the large-page check names them (`👤 User: PC\name`, and beside a SID: a grant's, the security policy's holders), but
 //!   the built-in ones (`BUILTIN\Administrators`), and every SID of a machine or a domain (`S-1-5-21-…`, Entra ID's `S-1-12-1-…`; the
 //!   well-known ones, `S-1-5-32-544`, stay);
-//! - then those accounts' PC (or domain) and user names, and the user folders' names, wherever else either file has them as words, but
-//!   a name that identifies no one (`Administrator`, `tmr`: `NO_ONES_NAMES`) and one shorter than 3 letters, which are replaced only
-//!   where the rules above find them.
+//! - the PC's name in a Windows event's XML (`<Computer>`, a WHEA event's, which the log has at debug and where Windows gives no message
+//!   for the event): its full DNS name, which no account has (a NetBIOS name stops at 15 characters, and a run whose large-page question
+//!   was answered, or an Entra ID account, names no PC);
+//! - then those accounts' PC (or domain) and user names, the events' PC names, their hosts and DNS domains, and the user folders' names,
+//!   wherever else either file has them as words, but a name that identifies no one (`Administrator`, `tmr`: `NO_ONES_NAMES`), one
+//!   shorter than 3 letters, and one that is a word of the machine's description (a PC named `RYZEN` on a Ryzen), which are replaced
+//!   only where the rules above find them.
 //!
 //! The results file stays JSON that TMR reads (`--show-results`, `--compare-results`, the window's Compare tab): only its strings change,
 //! each a whole value, its layout as it was, and the copy is read back before anything is written. What it can't know stays: a name in a
 //! folder outside `\Users\`, a config's own name, the time zone in the timestamps, the hardware itself.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::results::TestRunResult;
@@ -66,6 +70,9 @@ const PLACEHOLDERS: [&str; 9] = [
 /// The calibration identity checks' lines, whose `stored=` and `current=` values tmr-cfg.json recorded (`MachineFingerprint::matches`)
 const RECORDED_LINES: [&str; 3] = ["machine ID mismatch", "system UUID mismatch", "memory configuration changed"];
 
+/// The results file's keys whose values `Scrubber` replaces: a module's serial, and the identity's UUID and fingerprints
+const VALUE_KEYS: [&str; 4] = ["serial_number", "system_uuid", "machine_id", "memory_id"];
+
 /// What a replacement removed, for its count
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -81,7 +88,7 @@ pub enum Kind {
     OneDrive,
     Account,
     Sid,
-    /// A PC's, a domain's or a user's name, where neither an account nor a path has it
+    /// A PC's, a domain's or a user's name, where neither an account nor a path has it: an event's `<Computer>` among them
     Name,
 }
 
@@ -213,15 +220,18 @@ fn copy_of(original: &Path) -> PathBuf {
     original.with_file_name(format!("{stem}{SANITIZED}.{extension}"))
 }
 
-/// Writes `text` to `path`, a new file only: never one there already, a link among them
+/// Writes `text` to `path`, a new file only: never one there already, a link among them. A file it made but couldn't fill (a disk full,
+/// a share gone) it removes, as nothing written says, rather than leave a part of a copy to be posted, which a sanitize again refuses.
 fn write_new(path: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .map_err(|e| format!("{}: {e}", path.display()))
+    let failed = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(failed)?;
+    if let Err(e) = file.write_all(text.as_bytes()).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(failed(e));
+    }
+    Ok(())
 }
 
 /// What both files' scrubbing replaces besides its rules: the results file's values, and the names both files give
@@ -256,13 +266,20 @@ impl Scrubber {
                 learn_account(account, &mut accounts, &mut names);
             }
             names.extend(user_folders(text).into_iter().map(|(start, end)| text[start..end].to_string()));
+            for (start, end) in event_computers(text) {
+                learn_computer(&text[start..end], &mut names);
+            }
         }
         for list in [&mut accounts, &mut names] {
             list.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())));
             list.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         }
         let no_ones = |name: &str| NO_ONES_NAMES.iter().chain(&SHARED_PROFILES).any(|no_one| name.eq_ignore_ascii_case(no_one));
-        names.retain(|name| name.chars().count() >= 3 && !no_ones(name));
+        // A name that is a word of the machine's own description (a PC named RYZEN, on a Ryzen) tells no more than the parts do, and
+        // replaced as a word it takes the CPU's name with it, in both files: a copy compared by its parts (`compare_identity`, as one
+        // without fingerprints is) would read as another machine's. It goes only where an account, a path or an event names it.
+        let parts = part_words(identity);
+        names.retain(|name| name.chars().count() >= 3 && !no_ones(name) && !parts.contains(&name.to_ascii_lowercase()));
         Scrubber { values, accounts, names }
     }
 
@@ -294,7 +311,7 @@ impl Scrubber {
         text
     }
 
-    /// `text` without its accounts, its paths' user folders and OneDrive organisations, its SIDs, then the names
+    /// `text` without its accounts, its paths' user folders and OneDrive organisations, its SIDs, its events' PC names, then the names
     fn rest(&self, text: &str, counts: &mut BTreeMap<Kind, usize>) -> String {
         let mut text = text.to_string();
         for account in &self.accounts {
@@ -308,6 +325,8 @@ impl Scrubber {
         text = replace_spans(&text, &spans, Kind::OneDrive, counts);
         let spans = machine_sids(&text);
         text = replace_spans(&text, &spans, Kind::Sid, counts);
+        let spans = event_computers(&text);
+        text = replace_spans(&text, &spans, Kind::Name, counts);
         for name in &self.names {
             if let Some(scrubbed) = replace_words(&text, name, Kind::Name, counts) {
                 text = scrubbed;
@@ -365,6 +384,40 @@ fn learn_account(account: &str, accounts: &mut Vec<String>, names: &mut Vec<Stri
         }
         None => names.push(account.to_string()),
     }
+}
+
+/// `computer`, an event's PC name (`event_computers`), into the names to replace: as Windows gives it, its full DNS name, then its host
+/// and its DNS domain (`corp.contoso.com`), but a domain of one label (`local`, `lan`), a word TMR's own lines have
+fn learn_computer(computer: &str, names: &mut Vec<String>) {
+    let computer = computer.trim();
+    names.push(computer.to_string());
+    if let Some((host, domain)) = computer.split_once('.') {
+        names.push(host.to_string());
+        if domain.contains('.') {
+            names.push(domain.to_string());
+        }
+    }
+}
+
+/// The words of the machine's description in `identity`, a results file's, in lower case: those of every string it has, the CPU's,
+/// the BIOS', the board's and the modules' names among them, but the values `Scrubber` replaces (`VALUE_KEYS`)
+fn part_words(identity: &serde_json::Value) -> BTreeSet<String> {
+    fn walk(value: &serde_json::Value, words: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                let apart = |c: char| c.is_ascii() && !word_byte(c as u8);
+                words.extend(text.split(apart).filter(|word| !word.is_empty()).map(str::to_ascii_lowercase));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, words)),
+            serde_json::Value::Object(fields) => {
+                fields.iter().filter(|(key, _)| !VALUE_KEYS.contains(&key.as_str())).for_each(|(_, value)| walk(value, words));
+            }
+            _ => {}
+        }
+    }
+    let mut words = BTreeSet::new();
+    walk(identity, &mut words);
+    words
 }
 
 /// `text` with `scrub` applied to each of its lines, their ends kept
@@ -570,6 +623,24 @@ fn machine_sids(text: &str) -> Vec<(usize, usize)> {
             }
             None => from = start + 4,
         }
+    }
+    spans
+}
+
+/// The PC names in `text`'s Windows events, as byte ranges: each `<Computer>` element's text, which a WHEA event's XML has (the log gives
+/// it at debug, and where Windows has no message for the event: `whea::read_record`), but one already replaced
+fn event_computers(text: &str) -> Vec<(usize, usize)> {
+    const OPEN: &str = "<Computer>";
+    const CLOSE: &str = "</Computer>";
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(start) = text[from..].find(OPEN).map(|at| from + at + OPEN.len()) {
+        // Within the line, up to the element's end; `REMOVED` starts with `<`, so a name replaced already is none
+        let Some(end) = text[start..].find(['<', '\n']).map(|at| start + at) else { break };
+        if text[end..].starts_with(CLOSE) && !text[start..end].trim().is_empty() {
+            spans.push((start, end));
+        }
+        from = end;
     }
     spans
 }
@@ -903,5 +974,63 @@ mod tests {
             scrubber.log(log, &mut BTreeMap::new()),
             "👤 User: <removed>\n[2026-11-23 10:00:00.001 INFO tmr::session] C:\\Users\\<removed>\\x.cfg on <removed>\n"
         );
+    }
+
+    /// A WHEA event's XML names the PC by its full DNS name (`<Computer>`), which goes whatever the log's account says: with none (a
+    /// run whose large-page question was answered), with an Entra ID one, which names no PC, and with a NetBIOS name, cut at 15
+    /// characters; its host and its DNS domain go wherever else the log has them, but a domain of one label
+    #[test]
+    fn an_events_pc_name_goes_whatever_account_the_log_names() {
+        let event = |computer: &str| {
+            format!(
+                "[2026-11-23 10:00:01.000 WARN tmr::whea] WHEA raw event XML (no formatted message available): <Event xmlns='http://\
+                 schemas.microsoft.com/win/2004/08/events/event'><System><EventID Qualifiers='0'>47</EventID><Channel>System</Channel>\
+                 <Computer>{computer}</Computer><Security/></System></Event>\n"
+            )
+        };
+        for (user, computer) in [
+            ("", "Daddy-Petz"),
+            ("👤 User: AzureAD\\JamieDoe\n", "Daddy-Petz"),
+            ("👤 User: JAMIES-GAMING-R\\jamie\n", "JAMIES-GAMING-RIG-2024"),
+            ("", "Daddy-Petz.corp.contoso.com"),
+        ] {
+            let log = format!("{user}{}", event(computer));
+            let scrubbed = Scrubber::new(&serde_json::Value::Null, &[&log]).log(&log, &mut BTreeMap::new());
+            assert!(scrubbed.contains("<Computer><removed></Computer>"), "{scrubbed}");
+            let lower = scrubbed.to_ascii_lowercase();
+            assert!(!lower.contains("petz") && !lower.contains("jamie"), "{scrubbed}");
+        }
+        let log = format!("{}A config from \\\\Daddy-Petz\\share and files.corp.contoso.com\n", event("Daddy-Petz.corp.contoso.com"));
+        let scrubbed = Scrubber::new(&serde_json::Value::Null, &[&log]).log(&log, &mut BTreeMap::new());
+        assert!(scrubbed.ends_with("A config from \\\\<removed>\\share and files.<removed>\n"), "{scrubbed}");
+        let log = format!("{}Each thread's memory is local to its node\n", event("Daddy-Petz.local"));
+        let scrubbed = Scrubber::new(&serde_json::Value::Null, &[&log]).log(&log, &mut BTreeMap::new());
+        assert!(
+            scrubbed.ends_with("<Computer><removed></Computer><Security/></System></Event>\nEach thread's memory is local to its node\n")
+        );
+    }
+
+    /// A PC named for a word of the machine's description (`RYZEN`, on a Ryzen) goes as the account and in its path, not as a word: the
+    /// CPU's name stays in both files, and the copy, without its fingerprints, compares with the original by its parts as the same machine
+    #[test]
+    fn a_name_the_hardware_has_stays_in_the_hardwares_names() {
+        let brand = "AMD Ryzen 7 5700X 8-Core Processor";
+        let mut result = TestRunResult::new(Default::default());
+        result.identity.machine_id = MACHINE.to_string();
+        result.identity.memory_id = MEMORY.to_string();
+        result.identity.machine.cpu_brand = brand.to_string();
+        result.run_config.command_line = vec!["tmr.exe".to_string(), r"config=D:\ryzen\x.cfg".to_string()];
+        let text = serde_json::to_string_pretty(&result).unwrap();
+        let log = format!("👤 User: RYZEN\\jamie\nCPU: {brand}, the run's config C:\\Users\\jamie\\x.cfg\n");
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let scrubber = Scrubber::new(&json, &[&text, &log]);
+        let mut counts = BTreeMap::new();
+        let (copy, log) = (scrubber.json(&text, &mut counts).unwrap(), scrubber.log(&log, &mut counts));
+        assert_eq!(log, format!("👤 User: <removed>\nCPU: {brand}, the run's config C:\\Users\\<removed>\\x.cfg\n"));
+        let copy: TestRunResult = serde_json::from_str(&copy).unwrap();
+        assert_eq!((copy.identity.machine.cpu_brand.as_str(), copy.identity.machine_id.as_str()), (brand, REMOVED));
+        assert_eq!(copy.run_config.command_line[1], r"config=D:\ryzen\x.cfg", "a word the hardware has, not a path's user folder");
+        let differences = crate::run_context::compare_identity(&result.identity, &copy.identity);
+        assert!(differences.is_empty(), "{:?}", differences.iter().map(|d| &d.field).collect::<Vec<_>>());
     }
 }

@@ -31,9 +31,9 @@ pub(crate) const CACHE_LATENCY_FILTER: &str =
 /// The flags that pick a mode's defaults, which `run` takes out before it looks for a one-shot command (`logfile::wanted` too)
 pub(crate) const MODE_FLAGS: [&str; 3] = ["--ram-latency", "--cache-latency", "--quick-test"];
 /// Every flag a session takes, exactly: any other is refused before anything runs (`Stopped::UnknownFlags`); `--help` names each
-pub(crate) const KNOWN_FLAGS: [&str; 26] = [
+pub(crate) const KNOWN_FLAGS: [&str; 27] = [
     "--ram-latency", "--cache-latency", "--quick-test", "--calibrate-cache", "--calibrate-curve", "--calibrate-seal", "--calibrate-all",
-    "--show-calibration", "--output", "--yes", "--no-save", "--create-demo-configs", "--compare-results", "--show-results",
+    "--show-calibration", "--output", "--yes", "--no-save", "--create-demo-configs", "--compare-results", "--show-results", "--sanitize",
     "--debug-topology", "--show-topology", "--setup-large-pages", "--remove-large-pages", "--startup-debug", "--disable-pinning",
     "--serials", "--help", "-h", "-?", "--version", "-v",
 ];
@@ -1110,6 +1110,8 @@ mod tests {
         let line = ["tmr", "--calibrate-cache", "--calibration-file", "my.json"];
         assert!(matches!(session(&line), SessionEnd::Stopped(Stopped::UnknownFlags(f)) if f == ["--calibration-file"]));
         assert!(matches!(session(&["tmr", "--calibrate-cache", "--output", "x.json"]), SessionEnd::Command(Command::Calibrate(_))));
+        // A command is a flag the session takes: --sanitize wasn't one, and the console refused it as unknown before it was parsed
+        assert!(matches!(session(&["tmr", "--sanitize", "x.json"]), SessionEnd::Command(Command::Sanitize(_))));
     }
 
     /// The workers' priority is `priority=`'s, else the config's, else High, and the window's is `window-priority=`'s, else the workers'

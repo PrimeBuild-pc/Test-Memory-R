@@ -886,13 +886,16 @@ fn module_parts(modules: &[MemoryModule]) -> String {
         .join(", ")
 }
 
-/// The modules' speeds as `compare_identity` shows them: each one's `speed_label`, neighbours that read the same once, `not recorded`
-/// where none has one
+/// What `module_speeds` gives where no module has a speed, as a result from before 5c4bdfa records none
+const SPEEDS_NOT_RECORDED: &str = "not recorded";
+
+/// The modules' speeds as `compare_identity` shows them: each one's `speed_label`, neighbours that read the same once,
+/// `SPEEDS_NOT_RECORDED` where none has one
 fn module_speeds(modules: &[MemoryModule]) -> String {
     let mut speeds: Vec<String> = modules.iter().map(MemoryModule::speed_label).collect();
     speeds.dedup();
     if speeds.iter().all(String::is_empty) {
-        return "not recorded".to_string();
+        return SPEEDS_NOT_RECORDED.to_string();
     }
     speeds.iter().map(|speed| if speed.is_empty() { "unknown" } else { speed }).collect::<Vec<_>>().join(", ")
 }
@@ -959,10 +962,12 @@ pub fn compare_identity(baseline: &RunIdentity, current: &RunIdentity) -> Vec<Ru
             ));
         }
         // The speeds the fingerprint covers, where they moved: an XMP/EXPO change. A result from before TMR read the configured
-        // speed (5c4bdfa) records none
+        // speed (5c4bdfa) records none, which is no speed that moved: a note, as a run without fingerprints, compared by its parts,
+        // against such a file from the same machine (the 2026-11-03 baselines, v0.1.2's) would otherwise read as another machine's
         let (was, now) = (module_speeds(&baseline.memory_modules), module_speeds(&current.memory_modules));
         if was != now {
-            diffs.push(RunDifference::new(&part("Module speeds"), was, now, true));
+            let both = was != SPEEDS_NOT_RECORDED && now != SPEEDS_NOT_RECORDED;
+            diffs.push(RunDifference::new(&part("Module speeds"), was, now, both));
         }
         // Without the fingerprint, the modules it covers besides: their makers, part numbers and sizes (not their serials, which a run
         // leaves out with it)
@@ -970,7 +975,7 @@ pub fn compare_identity(baseline: &RunIdentity, current: &RunIdentity) -> Vec<Ru
         if !memory_ids && was != now {
             diffs.push(RunDifference::new("Memory modules", was, now, true));
         }
-        let moved = memory_ids || diffs.len() > parts_before;
+        let moved = memory_ids || diffs[parts_before..].iter().any(|diff| diff.invalidates);
         if moved && (!baseline.memory_identity_is_physical || !current.memory_identity_is_physical) {
             diffs.push(RunDifference::new(
                 &part("(virtualized)"),
@@ -1488,6 +1493,14 @@ mod tests {
         let dimms = compare_identity(&kept, &without(left_out, "AMD Ryzen 5 8600G", "F5-6400J3239G16G"));
         let (was, now) = ("2 × G Skill F5-6000J3038F16G 16.0 GB".to_string(), "2 × G Skill F5-6400J3239G16G 16.0 GB".to_string());
         assert_eq!(fields(dimms), [("Memory modules".to_string(), was, now, true)]);
+        // A file from before 5c4bdfa records no speeds (its modules' `speed_mts` is read no more): against a run at the default, on the
+        // same machine, a note, not another machine's
+        let timed = |module: MemoryModule| MemoryModule { configured_mts: 3600, max_mts: 3600, ..module };
+        let now = RunIdentity { memory_modules: base.memory_modules.iter().cloned().map(timed).collect(), ..base.clone() };
+        let speeds = ("Module speeds".to_string(), "not recorded".to_string(), "3600 MT/s".to_string(), false);
+        assert_eq!(fields(compare_identity(&kept, &now)), [speeds]);
+        let virtualized = RunIdentity { memory_identity_is_physical: false, ..now.clone() };
+        assert_eq!(compare_identity(&kept, &virtualized).len(), 1, "a note, no cause to give for it");
     }
 
     /// The fingerprint covers the configured speed (5c4bdfa), so an XMP/EXPO change moves it: the comparison says what moved, and of a
@@ -1512,7 +1525,7 @@ mod tests {
         let retuned = with("xyz", &[(6200, 4800), (6200, 4800)]);
         assert_eq!(moved(&expo, &retuned), [("6000 MT/s (SMBIOS max 4800)".into(), "6200 MT/s (SMBIOS max 4800)".into(), true)]);
         let before = with("old", &[(0, 0), (0, 0)]);
-        assert_eq!(moved(&before, &expo), [("not recorded".into(), "6000 MT/s (SMBIOS max 4800)".into(), true)]);
+        assert_eq!(moved(&before, &expo), [("not recorded".into(), "6000 MT/s (SMBIOS max 4800)".into(), false)]);
         let swapped = with("xyz", &[(6000, 4800), (0, 4800)]);
         assert_eq!(moved(&expo, &swapped)[0].1, "6000 MT/s (SMBIOS max 4800), 4800 MT/s");
         assert!(moved(&expo, &with("xyz", &[(6000, 4800), (6000, 4800)])).is_empty(), "a fingerprint moved by something else");
