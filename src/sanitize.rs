@@ -24,7 +24,8 @@
 //! - what only the log has: the SMBIOS parse's string tables (`RUST_LOG=debug`: the system's, the board's and the chassis' serials and
 //!   asset tags among them), and the values tmr-cfg.json recorded, in a calibration's identity check (its `stored=` and `current=`);
 //! - the user folder of a profile path (`C:\Users\<name>\`, but `Public` and `Default`) and a OneDrive's organisation
-//!   (`OneDrive - <name>`), each whole (`folder_name`), and a share's PC (`\\<PC>\share`, but `localhost` and WSL's: `OWN_HOSTS`);
+//!   (`OneDrive - <name>`, and a SharePoint library's it syncs, `C:\Users\<user>\<name>\<site> - <library>\`), each whole
+//!   (`folder_name`), and a share's PC (`\\<PC>\share`, `//<PC>/share`, but `localhost` and WSL's: `OWN_HOSTS`);
 //! - accounts as the large-page check names them (`👤 User: PC\name`, by its label, and beside a SID: a grant's, the security policy's
 //!   holders), but the built-in ones (`BUILTIN\Administrators`), and every SID of a machine or a domain (`S-1-5-21-…`, Entra ID's
 //!   `S-1-12-1-…`; the well-known ones, `S-1-5-32-544`, stay);
@@ -67,6 +68,13 @@ const ACCOUNT_DOMAINS: [&str; 2] = ["AzureAD", "MicrosoftAccount"];
 
 /// The profiles every PC shares, whose folders name no one: not replaced in a path
 const SHARED_PROFILES: [&str; 4] = ["Public", "Default", "Default User", "All Users"];
+
+/// The folders Windows makes in a profile, which name no organisation (`library_organisations`), as they are on the disk (Explorer shows
+/// them in the system's language)
+const PROFILE_FOLDERS: [&str; 13] = [
+    "Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos", "Favorites", "Links", "Contacts", "Searches", "Saved Games",
+    "3D Objects", "AppData",
+];
 
 /// The names that identify no one, which are replaced only where an account or a path has them, not as words elsewhere: the built-in
 /// accounts', the shared profiles', and words TMR's own lines are full of (an account named `tmr` would take every `tmr::` with it)
@@ -553,6 +561,8 @@ impl Scrubber {
         text = replace_spans(&text, &spans, Kind::UserFolder, counts);
         let spans = onedrive_organisations(&text);
         text = replace_spans(&text, &spans, Kind::OneDrive, counts);
+        let spans = library_organisations(&text);
+        text = replace_spans(&text, &spans, Kind::OneDrive, counts);
         let spans = share_hosts(&text);
         text = replace_spans(&text, &spans, Kind::Name, counts);
         let spans = machine_sids(&text);
@@ -956,26 +966,73 @@ fn onedrive_organisations(text: &str) -> Vec<(usize, usize)> {
     spans
 }
 
+/// The organisations of the SharePoint libraries OneDrive syncs into `text`'s profiles (`\Users\<name>\<organisation>\<site> -
+/// <library>\`, or with `/`, or escaped), as byte ranges: the folder after the user's, whole (`folder_name`), where the folder in it is
+/// named as a library is (` - ` in it). Not a folder Windows makes in a profile (`PROFILE_FOLDERS`), OneDrive's own, nor one already
+/// replaced; a folder of the user's in the profile with one so named in it goes too, as no path tells the two apart (review: the
+/// organisation stayed, where `OneDrive - <organisation>` went).
+fn library_organisations(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let separator = |b: u8| b == b'\\' || b == b'/';
+    // The folder at `start` and the end of the separators after it, when one follows it
+    let folder = |start: usize, ends: fn(u8) -> bool| {
+        let (start, end) = if text[start..].starts_with(REMOVED) { (start, start + REMOVED.len()) } else { folder_name(text, start, ends) };
+        let after = end + bytes[end..].iter().take_while(|&&b| separator(b)).count();
+        (start, end, after)
+    };
+    let mut spans = Vec::new();
+    let mut i = 1;
+    while i + 6 <= bytes.len() {
+        if !(separator(bytes[i - 1]) && bytes[i..i + 5].eq_ignore_ascii_case(b"users") && separator(bytes[i + 5])) {
+            i += 1;
+            continue;
+        }
+        let user = i + 5 + bytes[i + 5..].iter().take_while(|&&b| separator(b)).count();
+        let (_, user_end, organisation) = folder(user, ends_a_user);
+        let (start, end, library) = folder(organisation, ends_a_folder);
+        i = end.max(i + 1);
+        if organisation == user_end || library == end || start == end {
+            continue;
+        }
+        let (name, (library_start, library_end, _)) = (&text[start..end], folder(library, ends_a_folder));
+        let windows = PROFILE_FOLDERS.iter().any(|own| name.eq_ignore_ascii_case(own));
+        let onedrive = name.get(..8).is_some_and(|start| start.eq_ignore_ascii_case("OneDrive"));
+        if text[library_start..library_end].contains(" - ") && name != REMOVED && !windows && !onedrive {
+            spans.push((start, end));
+        }
+    }
+    spans
+}
+
 /// The PCs of `text`'s share paths, as byte ranges: the name after a path's opening `\\` (`\\PC\share`, or `\\\\PC\\share` as a
-/// debug line escapes it, or after a device path's `\\?\UNC\`), where a space, a quote, `=` or the like comes before it
-/// (`BEFORE_A_SHARE`), but this PC's own (`OWN_HOSTS`). A name starts with a letter or a digit: not a device's path (`\\?\C:\`,
-/// `\\.\PhysicalDrive0`), nor one already replaced. A URL's `//` is none.
+/// debug line escapes it, or after a device path's `\\?\UNC\`), or `//`, which Windows takes as well (`//PC/share`, review: typed so,
+/// as a command line has it, the PC stayed), where a space, a quote, `=` or the like comes before it (`BEFORE_A_SHARE`), but this PC's
+/// own (`OWN_HOSTS`). A name starts with a letter or a digit: not a device's path (`\\?\C:\`, `\\.\PhysicalDrive0`), nor one already
+/// replaced; after `//`, a separator follows it, so `//TODO:` names none. A URL's `//` is none: a colon comes before it. Nor is an
+/// escaped path's folder after one replaced (`"C:\\Users\\<removed>\\Documents"`, whose `>` came before a share's `\\`).
 fn share_hosts(text: &str) -> Vec<(usize, usize)> {
     let bytes = text.as_bytes();
     let host_byte = |b: u8| word_byte(b) || b == b'.' || b == b'$';
     let mut spans = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] != b'\\' {
+        let slash = bytes[i];
+        if slash != b'\\' && slash != b'/' {
             i += 1;
             continue;
         }
         let opening = i;
-        while i < bytes.len() && bytes[i] == b'\\' {
+        while i < bytes.len() && bytes[i] == slash {
             i += 1;
         }
+        // No escaped `/`: JSON and a debug line leave it as it is
         let width = i - opening;
-        if !matches!(width, 2 | 4) || (opening > 0 && !BEFORE_A_SHARE.contains(&bytes[opening - 1])) {
+        let widths: &[usize] = if slash == b'\\' { &[2, 4] } else { &[2] };
+        if !widths.contains(&width) || (opening > 0 && !BEFORE_A_SHARE.contains(&bytes[opening - 1])) {
+            continue;
+        }
+        // An escaped path's separator after a folder already replaced (`C:\\Users\\<removed>\\Documents`), whose `>` is no share's
+        if text[..opening].ends_with(REMOVED) {
             continue;
         }
         // A device path's share, `\\?\UNC\PC\share`: its separators each half the opening's
@@ -988,7 +1045,8 @@ fn share_hosts(text: &str) -> Vec<(usize, usize)> {
             }
         }
         let end = start + bytes[start..].iter().take_while(|&&b| host_byte(b)).count();
-        let named = bytes.get(start).is_some_and(|&b| b.is_ascii_alphanumeric() || !b.is_ascii());
+        let named = bytes.get(start).is_some_and(|&b| b.is_ascii_alphanumeric() || !b.is_ascii())
+            && (slash == b'\\' || matches!(bytes.get(end), Some(b'/' | b'\\')));
         if named && !OWN_HOSTS.iter().any(|own| text[start..end].eq_ignore_ascii_case(own)) {
             spans.push((start, end));
         }
@@ -1700,6 +1758,18 @@ mod tests {
             (r"C:\Users\x\OneDrive - Contoso; Fabrikam\y", r"C:\Users\<removed>\OneDrive - <removed>\y"),
             (r"C:\Users\x\OneDrive - [Contoso]+Fabrikam\y", r"C:\Users\<removed>\OneDrive - <removed>\y"),
             (r"C:\Users\x\OneDrive - Contoso Ltd (synced).", r"C:\Users\<removed>\OneDrive - <removed> (synced)."),
+            // A SharePoint library OneDrive syncs, `<organisation>\<site> - <library>` in the profile (review), escaped and with `/`
+            // too; not a folder of the profile's own, nor OneDrive's, nor one deeper in
+            (r"C:\Users\x\Contoso Pty Ltd\IT Team - Documents\z.cfg", r"C:\Users\<removed>\<removed>\IT Team - Documents\z.cfg"),
+            (r"C:\Users\x\Smith, Jones & Co\IT - Documents.", r"C:\Users\<removed>\<removed>\IT - Documents."),
+            (r#""C:\\Users\\x\\Contoso\\IT - Docs\\z.cfg""#, r#""C:\\Users\\<removed>\\<removed>\\IT - Docs\\z.cfg""#),
+            ("C:/Users/x/Contoso/IT - Docs/z.cfg", "C:/Users/<removed>/<removed>/IT - Docs/z.cfg"),
+            (r"C:\Users\x\Documents\TMR - copy\z.cfg", r"C:\Users\<removed>\Documents\TMR - copy\z.cfg"),
+            (r"C:\Users\x\OneDrive - Contoso\Site - Docs\z.cfg", r"C:\Users\<removed>\OneDrive - <removed>\Site - Docs\z.cfg"),
+            (r"C:\Users\x\tmr\logs\TMR - 1.log", r"C:\Users\<removed>\tmr\logs\TMR - 1.log"),
+            (r"C:\Users\x\Contoso\z.cfg", r"C:\Users\<removed>\Contoso\z.cfg"),
+            // Escaped, as a debug line has a path: the folder after one replaced is no share's PC
+            (r#""C:\\Users\\x\\Documents\\y.cfg""#, r#""C:\\Users\\<removed>\\Documents\\y.cfg""#),
         ] {
             assert_eq!(rules_only.log(text, &mut BTreeMap::new()), scrubbed, "{text}");
         }
@@ -1714,6 +1784,8 @@ mod tests {
         let hosts = |text: &str| share_hosts(text).into_iter().map(|(start, end)| text[start..end].to_string()).collect::<Vec<_>>();
         let named = r#"config=\\NAS-7\cfg\y.cfg, "\\\\DESKTOP-J4M13\\share\\y.cfg", \\?\UNC\files.corp.example\x (\\192.168.7.20\x)"#;
         assert_eq!(hosts(named), ["NAS-7", "DESKTOP-J4M13", "files.corp.example", "192.168.7.20"]);
+        // With `/`, as Windows takes a share's path too (review: `config=//NAS-7/cfg/y.cfg` kept its PC in both copies)
+        assert_eq!(hosts(r"config=//NAS-8/cfg/y.cfg, (//files.example/x) //10.0.0.9\x"), ["NAS-8", "files.example", "10.0.0.9"]);
         for none in [
             r"\\?\C:\x",
             r#""\\\\?\\C:\\x""#,
@@ -1724,9 +1796,18 @@ mod tests {
             r"\\wsl$\Ubuntu\x",
             "xmlns='http://schemas.microsoft.com/win'",
             r"a\\b",
+            "file://NAS/x",
+            "// a comment",
+            "//TODO: x",
+            "a//b/c",
+            "//localhost/c$/x",
+            "///x/y",
         ] {
             assert!(hosts(none).is_empty(), "{none}: {:?}", hosts(none));
         }
+        let log = "  Command Line: tmr.exe config=//NAS-7/cfg/y.cfg\n  Explicit Parameters: config=//NAS-7/cfg/y.cfg\nOn NAS-7\n";
+        let scrubbed = Scrubber::new(&serde_json::Value::Null, &[log]).log(log, &mut BTreeMap::new());
+        assert_eq!(scrubbed, log.replace("NAS-7", REMOVED), "the PC, and the name wherever else the log has it");
 
         let dir = TempDir::new("sanitize-share");
         let run = Run::new(&dir, "TMR_2026-11-23_12-00-01", RUN, false, false);
