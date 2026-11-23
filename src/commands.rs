@@ -1,8 +1,8 @@
 //! The one-shot commands (TODO 29): `--help`, `--version`, `--create-demo-configs`, `--compare-results`, `--show-results`, `--sanitize`,
-//! `--debug-topology`, `--show-topology`, `--setup-large-pages`, `--remove-large-pages`, the calibrations and `--show-calibration`, what
-//! they stored. A session that is handed one returns it (`session::SessionEnd::Command`), past the parameters every session reads first
-//! (`core-priority=` types the topology the topology commands show); its caller runs it here, writing to a writer of its own. The CLI does,
-//! on the console; the window doesn't offer them.
+//! `--sanitize-single`, `--debug-topology`, `--show-topology`, `--setup-large-pages`, `--remove-large-pages`, the calibrations and
+//! `--show-calibration`, what they stored. A session that is handed one returns it (`session::SessionEnd::Command`), past the parameters
+//! every session reads first (`core-priority=` types the topology the topology commands show); its caller runs it here, writing to a
+//! writer of its own. The CLI does, on the console; the window doesn't offer them.
 //!
 //! A calibration asks whether to save what it measured over what tmr-cfg.json holds. That question is the caller's to put: it passes
 //! `confirm`, which gets the question and says yes or no, unless the command line has answered it already (`--yes`, `--no-save`:
@@ -28,6 +28,9 @@ pub enum Command {
     /// `--sanitize <results.json | log>`: copies of a run's results file and its log without its serials, accounts and names
     /// (`sanitize::sanitize`): the command line, the exe's name first
     Sanitize(Vec<String>),
+    /// `--sanitize-single <results.json | log>`: a copy of that one file without them, its pair not looked for
+    /// (`sanitize::sanitize_single`): the command line, the exe's name first
+    SanitizeSingle(Vec<String>),
     /// `--debug-topology`: every topology detector, alone and as Auto's cascade
     DebugTopology,
     /// `--show-topology`: each core's type, scheduling class, NUMA node and CPUs
@@ -60,6 +63,7 @@ impl Command {
                 "--compare-results" => return Some(Command::Compare(args.to_vec())),
                 "--show-results" => return Some(Command::ShowResults(args.to_vec())),
                 "--sanitize" => return Some(Command::Sanitize(args.to_vec())),
+                "--sanitize-single" => return Some(Command::SanitizeSingle(args.to_vec())),
                 "--debug-topology" => return Some(Command::DebugTopology),
                 "--show-topology" => return Some(Command::ShowTopology),
                 // --cache-latency and --ram-latency are no commands: they pick tests for the run
@@ -96,7 +100,8 @@ pub fn run(
         Command::DemoConfigs => return demo_configs(out),
         Command::Compare(args) => return compare(args, out),
         Command::ShowResults(args) => return show_results(args, out, text),
-        Command::Sanitize(args) => return sanitize(args, out),
+        Command::Sanitize(args) => return sanitize(args, false, out),
+        Command::SanitizeSingle(args) => return sanitize(args, true, out),
         Command::DebugTopology => {
             writeln!(out, "🔍 Debugging CPU Topology Detection")?;
             crate::cpu_topology::debug_topology_detection(out)?;
@@ -146,6 +151,8 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     cmd(out, "--show-results results.json", "How a run ended, then its final summary (here, or in the results folder)")?;
     cmd(out, "--sanitize results.json", "Copies of a run's results file and its log, to post: no serials, UUID,")?;
     more(out, "  fingerprints, SIDs, or user, account and PC names; either file names the pair")?;
+    cmd(out, "--sanitize-single x.log", "  ...or one file alone, a results file or a log, its pair not looked for: the")?;
+    more(out, "  same, as far as that file shows them; it says what only the other file has")?;
     cmd(out, "--setup-large-pages", "Grant 'Lock pages in memory' to you (as administrator), then sign out and in")?;
     writeln!(out, "  {} --setup-large-pages Group:Administrators", program_name)?;
     more(out, "  ...or to a group or another user: Group:<name>, User:<name>")?;
@@ -561,13 +568,16 @@ fn show_results(args: &[String], out: &mut dyn Write, text: &dyn Fn(&Event) -> S
 }
 
 /// `--sanitize <results.json | log>`, `args` the command line: sanitized copies of the run's results file and its log, beside them
-/// (`sanitize::sanitize`), and what was replaced; or why not, with nothing written.
-fn sanitize(args: &[String], out: &mut dyn Write) -> io::Result<RunStatus> {
+/// (`sanitize::sanitize`), and what was replaced; or why not, with nothing written. With `single`, `--sanitize-single`'s: a copy of
+/// that one file alone (`sanitize::sanitize_single`).
+fn sanitize(args: &[String], single: bool, out: &mut dyn Write) -> io::Result<RunStatus> {
     let [_, _, file] = args else {
-        writeln!(out, "❌ Usage: {} --sanitize <results.json | log>", args[0])?;
+        let flag = if single { "--sanitize-single" } else { "--sanitize" };
+        writeln!(out, "❌ Usage: {} {flag} <results.json | log>", args[0])?;
         return Ok(RunStatus::NotRun);
     };
-    match crate::sanitize::sanitize(file) {
+    let sanitized = if single { crate::sanitize::sanitize_single(file) } else { crate::sanitize::sanitize(file) };
+    match sanitized {
         Ok(done) => {
             out.write_all(done.text().as_bytes())?;
             Ok(RunStatus::Passed)
@@ -1215,8 +1225,9 @@ mod tests {
     /// The commands that read and change nothing on this machine, as they write, each after a `## case` line with how it ended (TODO 29):
     /// `--version`, `--help`, `--compare-results` without its files, of one that isn't there, and of a results file with itself (its time
     /// masked, and TMR's home, which is the test binary's folder), `--show-results` without its file, with two, and of one that isn't
-    /// there (TODO 72; the CLI's golden has one shown), `--sanitize`'s refusals before it reads anything, and the large-page commands'
-    /// refusals of their target (TODO 113), which come before anything is read. None asks a question, nor has an event rendered.
+    /// there (TODO 72; the CLI's golden has one shown), `--sanitize`'s and `--sanitize-single`'s refusals before they read anything, and
+    /// the large-page commands' refusals of their target (TODO 113), which come before anything is read. None asks a question, nor has an
+    /// event rendered.
     #[test]
     fn commands_write_as_their_golden() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata").join("result_files").join("before_todo_72.json");
@@ -1237,6 +1248,12 @@ mod tests {
             ("--sanitize without its file", Command::Sanitize(args(&["tmr.exe", "--sanitize"]))),
             ("--sanitize of a file that isn't there", Command::Sanitize(args(&["tmr.exe", "--sanitize", "nowhere.json"]))),
             ("--sanitize of a file neither kind", Command::Sanitize(args(&["tmr.exe", "--sanitize", "notes.txt"]))),
+            ("--sanitize-single without its file", Command::SanitizeSingle(args(&["tmr.exe", "--sanitize-single"]))),
+            (
+                "--sanitize-single of a file that isn't there",
+                Command::SanitizeSingle(args(&["tmr.exe", "--sanitize-single", "nowhere.log"])),
+            ),
+            ("--sanitize-single of a file neither kind", Command::SanitizeSingle(args(&["tmr.exe", "--sanitize-single", "notes.txt"]))),
             // TODO 113: each refusal before anything is looked up, the target's type missing, unknown or with no name, or two targets
             ("--setup-large-pages without a type", Command::SetupLargePages(args(&["tmr.exe", "--setup-large-pages", "witches"]))),
             ("--setup-large-pages with an unknown type", Command::SetupLargePages(args(&["tmr.exe", "--setup-large-pages", "Team:x"]))),
@@ -1398,6 +1415,11 @@ mod tests {
         let line = ["tmr.exe", "--sanitize", r"logs.log"];
         assert!(matches!(parse(&line), Some(Command::Sanitize(given)) if given == args(&line)));
         assert!(!crate::logfile::wanted(&args(&line)), "--sanitize keeps no log file: it would have the paths it leaves out");
+        // The owner, 2026-11-23: a flag the session takes, or the console refuses it as unknown before it is parsed
+        let line = ["tmr.exe", "--sanitize-single", r"results.json"];
+        assert!(matches!(parse(&line), Some(Command::SanitizeSingle(given)) if given == args(&line)));
+        assert!(crate::session::KNOWN_FLAGS.contains(&"--sanitize-single"));
+        assert!(!crate::logfile::wanted(&args(&line)), "--sanitize-single keeps no log file, as --sanitize");
         for none in [&["tmr.exe"][..], &["tmr.exe", "memory=50%", "--help"], &["tmr.exe", "--startup-debug"]] {
             assert!(parse(none).is_none(), "{none:?}");
         }

@@ -265,6 +265,19 @@ the same run ID, or nothing is written. The originals stay as they were. It can'
 didn't write, such as a config's name or a folder outside `C:\Users\`, so read the copies before you
 post them.
 
+Use `--sanitize` when you have both files. When you have only one, or its partner is from another run
+(a log from before TMR recorded run IDs has none), `tmr --sanitize-single <results file or log>`
+(Sanitize one file, in the same menu) copies that file alone, to `<name>.sanitized.json` or
+`<name>.sanitized.log`, without looking for its partner or checking a run ID. It removes the same
+things, as far as that one file shows them, and its last lines say what it couldn't:
+- A results file alone doesn't know the PC and user names only its log gives (the account TMR ran as,
+  a hardware error event's PC), so one of those stays where the results file has it outside a
+  `C:\Users\` path, such as a config on `\\PC\share`.
+- A log alone has no results file to name the serials, the UUID and the hashes, so it finds them by
+  TMR's own lines for them (each DIMM's line, the system's, a calibration's identity check) and then
+  wherever else the log has them. One that only a line of another kind has, as an older build's log
+  might, stays.
+
 ## License
 
 This project is licensed under either of:

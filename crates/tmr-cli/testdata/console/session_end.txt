@@ -49,6 +49,8 @@ USAGE:
   tmr --show-results results.json     # How a run ended, then its final summary (here, or in the results folder)
   tmr --sanitize results.json         # Copies of a run's results file and its log, to post: no serials, UUID,
                                       #   fingerprints, SIDs, or user, account and PC names; either file names the pair
+  tmr --sanitize-single x.log         #   ...or one file alone, a results file or a log, its pair not looked for: the
+                                      #   same, as far as that file shows them; it says what only the other file has
   tmr --setup-large-pages             # Grant 'Lock pages in memory' to you (as administrator), then sign out and in
   tmr --setup-large-pages Group:Administrators
                                       #   ...or to a group or another user: Group:<name>, User:<name>

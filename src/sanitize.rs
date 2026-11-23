@@ -6,6 +6,14 @@
 //! `logfile::run_id_of`). Nothing is written unless both are there, both read, the results file is one TMR reads, and the run IDs are
 //! the same.
 //!
+//! `--sanitize-single <file>` (the owner, 2026-11-23) sanitizes one file alone, no partner looked for and no run ID checked: a results
+//! file without its log, or a log without its results file (one from before TMR recorded a run ID among them), each into its own copy
+//! beside it. It removes what the pair's sanitize would that the file shows by itself, by the same rules (`Scrubber`). A results file
+//! names its own values. A log alone has no results file to name them, so they are found by TMR's own lines for them (`log_values`: the
+//! console's for the system and each DIMM, the SMBIOS parse's, a calibration identity check's `current=`) and then replaced wherever else
+//! the log has them as words; its words of the hardware are those lines' (`log_part_words`). What only the other file would have named
+//! stays, and the outcome says so in a line (`RESULTS_ALONE`, `LOG_ALONE`).
+//!
 //! What it replaces with `REMOVED`, each occurrence in either file (`Kind` counts them):
 //! - the values the results file records: each DIMM's serial, the system UUID, `machine_id` and `memory_id`, wherever either file has
 //!   them as words (a run with `--serials` keeps them; without it the run left them out already, and its stand-ins stay);
@@ -67,8 +75,40 @@ const PLACEHOLDERS: [&str; 9] = [
     "Serial Number",
 ];
 
-/// The calibration identity checks' lines, whose `stored=` and `current=` values tmr-cfg.json recorded (`MachineFingerprint::matches`)
-const RECORDED_LINES: [&str; 3] = ["machine ID mismatch", "system UUID mismatch", "memory configuration changed"];
+/// The calibration identity checks' lines, whose `stored=` values tmr-cfg.json recorded and whose `current=` is the run's own value
+/// (`MachineFingerprint::matches`), each with the kind of that value
+const RECORDED_LINES: [(&str, Kind); 3] = [
+    ("machine ID mismatch", Kind::MachineId),
+    ("system UUID mismatch", Kind::SystemUuid),
+    ("memory configuration changed", Kind::MemoryId),
+];
+
+/// The console's line for the system (tmr-cli's `machine_text`), with its UUID after `SYSTEM_UUID`; each DIMM's line follows it,
+/// `MODULE_INDENT` in, its serial last, after `MODULE_SERIAL`
+const SYSTEM_LINE: &str = "🖥️  System: ";
+const SYSTEM_UUID: &str = " · UUID ";
+const MODULE_INDENT: &str = "    ";
+const MODULE_SERIAL: &str = " · serial ";
+
+/// The SMBIOS parse's summary line (`smbios::parse_smbios`), with the system UUID after `SMBIOS_UUID`
+const SMBIOS_LINE: &str = "SMBIOS: BIOS=";
+const SMBIOS_UUID: &str = ", UUID=";
+
+/// The CPU's lines, which name it: the System Information table's row, and the cache detection's at debug (`cache::CacheInfo`)
+const CPU_LINES: [&str; 2] = ["CPU           ", "]   CPU: "];
+
+/// What the outcome of a file sanitized alone says it couldn't remove, without the other file to name it: for a results file, then a
+/// log
+const RESULTS_ALONE: &str = "Without its log: a PC or user name only the log gives (the account TMR ran as, a WHEA event's PC) stays \
+                             where this file has it, outside a user folder's path";
+const LOG_ALONE: &str = "Without its results file: the serials, UUID and fingerprints were found by TMR's lines for them, not by their \
+                         values: one in a line of another kind (an older build's) stays";
+
+/// A refusal's hint, where the pair isn't one run's: the file can still be sanitized alone
+const ALONE_HINT: &str = "--sanitize-single (the window's Sanitize one file) sanitizes one file alone";
+
+/// Why a sanitize wrote nothing, its check after the scrub
+const LOST_RUN_ID: &str = "a sanitized copy lost its run ID: nothing written";
 
 /// The results file's keys whose values `Scrubber` replaces: a module's serial, and the identity's UUID and fingerprints
 const VALUE_KEYS: [&str; 4] = ["serial_number", "system_uuid", "machine_id", "memory_id"];
@@ -115,24 +155,38 @@ impl Kind {
 /// The copies a sanitize wrote, and what it replaced in them
 #[derive(Clone, Debug)]
 pub struct Sanitized {
-    pub results: PathBuf,
-    pub log: PathBuf,
-    /// How many of each kind it replaced, in the two files together; none of a kind it found none of
+    /// Each copy it wrote: the results file's, then the log's; for a file alone (`sanitize_single`), that file's
+    pub copies: Vec<PathBuf>,
+    /// How many of each kind it replaced, in the files together; none of a kind it found none of
     pub replaced: BTreeMap<Kind, usize>,
+    /// For a file alone, what it couldn't remove without the other file (`RESULTS_ALONE`, `LOG_ALONE`); none for a pair
+    pub alone: Option<&'static str>,
 }
 
 impl Sanitized {
-    /// What the console and the window show: the copies, then what was replaced in them
+    /// What the console and the window show: the copies, then what was replaced in them, and for a file alone what couldn't be
     pub fn text(&self) -> String {
-        let mut text =
-            format!("🧹 Sanitized copies written, the originals as they were:\n   {}\n   {}\n", self.results.display(), self.log.display());
+        let one = self.copies.len() == 1;
+        let mut text = if one {
+            "🧹 Sanitized copy written, the original as it was:\n".to_string()
+        } else {
+            "🧹 Sanitized copies written, the originals as they were:\n".to_string()
+        };
+        for copy in &self.copies {
+            text += &format!("   {}\n", copy.display());
+        }
         if self.replaced.is_empty() {
-            text += "   Nothing to replace: the run left its serials out, and the files name no user, account or PC\n";
+            let names = if one { "the file names" } else { "the files name" };
+            text += &format!("   Nothing to replace: the run left its serials out, and {names} no user, account or PC\n");
         } else {
             let kinds: Vec<String> = self.replaced.iter().map(|(kind, count)| kind.counted(*count)).collect();
             text += &format!("   Replaced with {REMOVED}: {}\n", kinds.join(", "));
         }
-        text += "   Read them before you post them: a name TMR didn't write, in a config's name or a folder's, is still there\n";
+        if let Some(alone) = self.alone {
+            text += &format!("   {alone}\n");
+        }
+        let read = if one { "it before you post it" } else { "them before you post them" };
+        text += &format!("   Read {read}: a name TMR didn't write, in a config's name or a folder's, is still there\n");
         text
     }
 }
@@ -141,24 +195,22 @@ impl Sanitized {
 /// not, with nothing written.
 pub fn sanitize(file: &str) -> Result<Sanitized, String> {
     let pair = Pair::of(file)?;
-    let read = |path: &Path| std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()));
     let (results_text, log_text) = (read(&pair.results)?, read(&pair.log)?);
-    let unreadable = |e: serde_json::Error| format!("{} isn't a results file TMR reads: {e}", pair.results.display());
-    let result: TestRunResult = serde_json::from_str(&results_text).map_err(unreadable)?;
-    let json: serde_json::Value = serde_json::from_str(&results_text).map_err(unreadable)?;
-    let no_id = |path: &Path| format!("{} has no run ID, as files from before TMR recorded one: it can't be paired", path.display());
+    let (result, json) = results_of(&pair.results, &results_text)?;
+    let no_id =
+        |path: &Path| format!("{} has no run ID, as files from before TMR recorded one: it can't be paired; {ALONE_HINT}", path.display());
     let results_id = result.metadata.run_id.as_deref().ok_or_else(|| no_id(&pair.results))?;
     let log_id = crate::logfile::run_id_of(&log_text).ok_or_else(|| no_id(&pair.log))?;
     if results_id != log_id {
         return Err(format!(
-            "{} and {} are two runs': the results file's run ID is {results_id}, the log's {log_id}",
+            "{} and {} are two runs': the results file's run ID is {results_id}, the log's {log_id}; {ALONE_HINT}",
             pair.results.display(),
             pair.log.display()
         ));
     }
-    let copies = (copy_of(&pair.results), copy_of(&pair.log));
-    if let Some(there) = [&copies.0, &copies.1].into_iter().find(|copy| copy.exists()) {
-        return Err(format!("{} is there already: move or delete it to sanitize the pair again", there.display()));
+    let copies = [copy_of(&pair.results), copy_of(&pair.log)];
+    for copy in &copies {
+        not_there(copy, "the pair")?;
     }
 
     let scrubber = Scrubber::new(&json, &[&results_text, &log_text]);
@@ -166,17 +218,97 @@ pub fn sanitize(file: &str) -> Result<Sanitized, String> {
     let clean_results = scrubber.json(&results_text, &mut replaced)?;
     let clean_log = scrubber.log(&log_text, &mut replaced);
     // Read back as TMR reads them, the pair's run ID in both, before anything is written
-    let back: TestRunResult =
-        serde_json::from_str(&clean_results).map_err(|e| format!("the sanitized results file doesn't read back ({e}): nothing written"))?;
+    let back = read_back(&clean_results)?;
     if back.metadata.run_id.as_deref() != Some(results_id) || crate::logfile::run_id_of(&clean_log) != Some(log_id) {
-        return Err("the sanitized copies lost their run ID: nothing written".to_string());
+        return Err(LOST_RUN_ID.to_string());
     }
-    write_new(&copies.0, &clean_results)?;
-    if let Err(e) = write_new(&copies.1, &clean_log) {
-        let _ = std::fs::remove_file(&copies.0);
+    write_new(&copies[0], &clean_results)?;
+    if let Err(e) = write_new(&copies[1], &clean_log) {
+        let _ = std::fs::remove_file(&copies[0]);
         return Err(e);
     }
-    Ok(Sanitized { results: copies.0, log: copies.1, replaced })
+    Ok(Sanitized { copies: copies.into(), replaced, alone: None })
+}
+
+/// A sanitized copy of `file`, a results file or a log, alone (`--sanitize-single`, the owner 2026-11-23): no partner looked for and no
+/// run ID checked, the copy written beside it, and what was replaced in it; or why not, with nothing written. It removes what the pair's
+/// sanitize would that the file shows by itself (a results file's values its own, a log's from TMR's lines for them, `Scrubber::of_log`),
+/// and its outcome says what it couldn't (`Sanitized::alone`).
+pub fn sanitize_single(file: &str) -> Result<Sanitized, String> {
+    let (path, which) = located(file)?;
+    let text = read(&path)?;
+    let copy = copy_of(&path);
+    let mut replaced = BTreeMap::new();
+    let (clean, alone) = match which {
+        RunFile::Results => {
+            let (result, json) = results_of(&path, &text)?;
+            not_there(&copy, "it")?;
+            let clean = Scrubber::new(&json, &[&text]).json(&text, &mut replaced)?;
+            if read_back(&clean)?.metadata.run_id != result.metadata.run_id {
+                return Err(LOST_RUN_ID.to_string());
+            }
+            (clean, RESULTS_ALONE)
+        }
+        RunFile::Log => {
+            not_there(&copy, "it")?;
+            let clean = Scrubber::of_log(&text).log(&text, &mut replaced);
+            if crate::logfile::run_id_of(&clean) != crate::logfile::run_id_of(&text) {
+                return Err(LOST_RUN_ID.to_string());
+            }
+            (clean, LOG_ALONE)
+        }
+    };
+    write_new(&copy, &clean)?;
+    Ok(Sanitized { copies: vec![copy], replaced, alone: Some(alone) })
+}
+
+/// Which of a run's two files a path is, by its extension
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunFile {
+    Results,
+    Log,
+}
+
+/// The file `file` names, found as `--show-results` finds a results file (as given, or by its name in TMR's home's `results\`, and a log
+/// in its `logs\`), and which of a run's it is; or why it is none to sanitize: neither kind, not there, or a sanitized copy already
+fn located(file: &str) -> Result<(PathBuf, RunFile), String> {
+    let extension = Path::new(file).extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase);
+    let (folder, which) = match extension.as_deref() {
+        Some("json") => (crate::home::results(), RunFile::Results),
+        Some("log") => (crate::home::logs(), RunFile::Log),
+        _ => return Err(format!("{file} is neither a results file (.json) nor a log (.log)")),
+    };
+    let found = crate::home::find(file, &folder).map_err(|looked| format!("{file} isn't there ({looked})"))?;
+    let found = std::path::absolute(&found).unwrap_or(found);
+    let stem = found.file_stem().and_then(|stem| stem.to_str()).ok_or_else(|| format!("{}: its name isn't text", found.display()))?;
+    if stem.to_ascii_lowercase().ends_with(SANITIZED) {
+        return Err(format!("{} is a sanitized copy already", found.display()));
+    }
+    Ok((found, which))
+}
+
+/// The text of the file at `path`, or why it can't be read as text
+fn read(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// `text`, the results file at `path`'s, as TMR reads it and as JSON; or why it isn't one TMR reads
+fn results_of(path: &Path, text: &str) -> Result<(TestRunResult, serde_json::Value), String> {
+    let unreadable = |e: serde_json::Error| format!("{} isn't a results file TMR reads: {e}", path.display());
+    Ok((serde_json::from_str(text).map_err(unreadable)?, serde_json::from_str(text).map_err(unreadable)?))
+}
+
+/// `clean`, a sanitized results file's text, read back as TMR reads one, before it is written; or why it doesn't
+fn read_back(clean: &str) -> Result<TestRunResult, String> {
+    serde_json::from_str(clean).map_err(|e| format!("the sanitized results file doesn't read back ({e}): nothing written"))
+}
+
+/// Nothing at `copy`, where a copy goes, or why the copy of `what` (the pair, it) isn't written
+fn not_there(copy: &Path, what: &str) -> Result<(), String> {
+    if copy.exists() {
+        return Err(format!("{} is there already: move or delete it to sanitize {what} again", copy.display()));
+    }
+    Ok(())
 }
 
 /// A run's results file and its log
@@ -186,30 +318,27 @@ struct Pair {
 }
 
 impl Pair {
-    /// The pair `file` names, found as `--show-results` finds a results file (as given, or by its name in TMR's home's `results\`, and
-    /// a log in its `logs\`), its partner by the stem they share; or why there isn't one
+    /// The pair `file` names (`located`), its partner by the stem they share; or why there isn't one
     fn of(file: &str) -> Result<Pair, String> {
-        let extension = Path::new(file).extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase);
-        let (folder, partner_extension, partner_folder, partner) = match extension.as_deref() {
-            Some("json") => (crate::home::results(), "log", "logs", "log"),
-            Some("log") => (crate::home::logs(), "json", "results", "results file"),
-            _ => return Err(format!("{file} is neither a results file (.json) nor a log (.log)")),
+        let (found, which) = located(file)?;
+        let (partner_extension, partner_folder, partner) = match which {
+            RunFile::Results => ("log", "logs", "log"),
+            RunFile::Log => ("json", "results", "results file"),
         };
-        let found = crate::home::find(file, &folder).map_err(|looked| format!("{file} isn't there ({looked})"))?;
-        let found = std::path::absolute(&found).unwrap_or(found);
-        let stem = found.file_stem().and_then(|stem| stem.to_str()).ok_or_else(|| format!("{}: its name isn't text", found.display()))?;
-        if stem.to_ascii_lowercase().ends_with(SANITIZED) {
-            return Err(format!("{} is a sanitized copy already", found.display()));
-        }
+        // Text: `located` checked it
+        let stem = found.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
         let name = format!("{stem}.{partner_extension}");
         let here = found.parent().map_or_else(PathBuf::new, Path::to_path_buf);
         let places: Vec<PathBuf> =
             here.parent().map(|up| up.join(partner_folder).join(&name)).into_iter().chain([here.join(&name)]).collect();
         let Some(other) = places.iter().find(|place| place.is_file()).cloned() else {
             let looked: Vec<String> = places.iter().map(|place| place.display().to_string()).collect();
-            return Err(format!("{}'s {partner} isn't there: looked for {}", found.display(), looked.join(" and ")));
+            return Err(format!("{}'s {partner} isn't there: looked for {}; {ALONE_HINT}", found.display(), looked.join(" and ")));
         };
-        Ok(if partner_extension == "log" { Pair { results: found, log: other } } else { Pair { results: other, log: found } })
+        Ok(match which {
+            RunFile::Results => Pair { results: found, log: other },
+            RunFile::Log => Pair { results: other, log: found },
+        })
     }
 }
 
@@ -246,7 +375,7 @@ struct Scrubber {
 }
 
 impl Scrubber {
-    /// The values `json`, a results file, records, and the names `texts`, its text and its log's, give
+    /// The values `json`, a results file, records, and the names `texts`, its text and its log's (or its own alone), give
     fn new(json: &serde_json::Value, texts: &[&str]) -> Self {
         let identity = &json["identity"];
         let mut values: Vec<(String, Kind)> = Vec::new();
@@ -256,8 +385,21 @@ impl Scrubber {
         for (key, kind) in [("system_uuid", Kind::SystemUuid), ("machine_id", Kind::MachineId), ("memory_id", Kind::MemoryId)] {
             values.extend(identity[key].as_str().map(|value| (value.trim().to_string(), kind)));
         }
+        Self::with(values, &part_words(identity), texts)
+    }
+
+    /// A log's alone (`sanitize_single`), without a results file to name its values: those TMR's lines for them give (`log_values`),
+    /// the words of the hardware those lines' (`log_part_words`), and the names it gives
+    fn of_log(log: &str) -> Self {
+        let values = log_values(log);
+        Self::with(values.clone(), &log_part_words(log, &values), &[log])
+    }
+
+    /// `values`, the run's, each with its kind, and the names `texts` give, but a word of the hardware's description among them (`parts`)
+    fn with(mut values: Vec<(String, Kind)>, parts: &BTreeSet<String>, texts: &[&str]) -> Self {
         values.retain(|(value, _)| informative(value));
-        values.sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
+        // The longest first, so none is replaced in part by a shorter one; each once, ASCII case aside
+        values.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase())));
         values.dedup_by(|a, b| a.0.eq_ignore_ascii_case(&b.0));
 
         let (mut accounts, mut names) = (Vec::new(), Vec::new());
@@ -278,7 +420,6 @@ impl Scrubber {
         // A name that is a word of the machine's own description (a PC named RYZEN, on a Ryzen) tells no more than the parts do, and
         // replaced as a word it takes the CPU's name with it, in both files: a copy compared by its parts (`compare_identity`, as one
         // without fingerprints is) would read as another machine's. It goes only where an account, a path or an event names it.
-        let parts = part_words(identity);
         names.retain(|name| name.chars().count() >= 3 && !no_ones(name) && !parts.contains(&name.to_ascii_lowercase()));
         Scrubber { values, accounts, names }
     }
@@ -336,12 +477,13 @@ impl Scrubber {
     }
 }
 
-/// Whether `value`, a serial, a UUID or a fingerprint the results file records, names a machine: not a run's stand-in (`smbios::LEFT_OUT`,
-/// an earlier build's `(left out: --no-serials)`, `REMOVED`), nor what SMBIOS gives for none (`PLACEHOLDERS`, a digit repeated:
-/// `00000000`), nor shorter than 4 letters and digits, which would be found in words that aren't it
+/// Whether `value`, a serial, a UUID or a fingerprint the results file records (or a log's line shows), names a machine: not a run's
+/// stand-in, in brackets (`smbios::LEFT_OUT`, an earlier build's `(left out: --no-serials)`, the SMBIOS parse's `(none)`), nor `REMOVED`,
+/// nor what SMBIOS gives for none (`PLACEHOLDERS`, a digit repeated: `00000000`), nor shorter than 4 letters and digits, which would be
+/// found in words that aren't it
 fn informative(value: &str) -> bool {
     let alphanumerics: Vec<char> = value.chars().filter(|c| c.is_alphanumeric()).collect();
-    let stand_in = value.starts_with("(left out") || value == REMOVED;
+    let stand_in = value.starts_with('(') || value == REMOVED;
     let placeholder = PLACEHOLDERS.iter().any(|placeholder| value.eq_ignore_ascii_case(placeholder));
     alphanumerics.len() >= 4 && alphanumerics.iter().any(|c| *c != alphanumerics[0]) && !stand_in && !placeholder
 }
@@ -452,13 +594,12 @@ fn smbios_strings(line: &str, counts: &mut BTreeMap<Kind, usize>) -> Option<Stri
 /// `line` without the values tmr-cfg.json recorded, when it is a calibration's identity check (`RECORDED_LINES`): its `stored=` and its
 /// `current=`, each up to a comma or the line's end, but a stand-in
 fn recorded(line: &str, counts: &mut BTreeMap<Kind, usize>) -> Option<String> {
-    if !RECORDED_LINES.iter().any(|check| line.contains(check)) {
+    if !RECORDED_LINES.iter().any(|(check, _)| line.contains(check)) {
         return None;
     }
     let mut out = line.to_string();
     for key in ["stored=", "current="] {
-        let Some(start) = out.find(key).map(|at| at + key.len()) else { continue };
-        let end = out[start..].find([',', '\r', '\n']).map_or(out.len(), |end| start + end);
+        let Some((start, end)) = field(&out, key, ',') else { continue };
         let value = out[start..end].trim();
         if !value.is_empty() && !value.starts_with('(') && value != REMOVED {
             out.replace_range(start..end, REMOVED);
@@ -466,6 +607,65 @@ fn recorded(line: &str, counts: &mut BTreeMap<Kind, usize>) -> Option<String> {
         }
     }
     (out != line).then_some(out)
+}
+
+/// The value after `key` in `line`, as a byte range: up to `end` or the line's end, its spaces kept
+fn field(line: &str, key: &str, end: char) -> Option<(usize, usize)> {
+    let start = line.find(key)? + key.len();
+    Some((start, line[start..].find([end, '\r', '\n']).map_or(line.len(), |at| start + at)))
+}
+
+/// TMR's lines in `log` that describe the machine: the console's for the system and each DIMM's below it (`SYSTEM_LINE`), the SMBIOS
+/// parse's summary (`SMBIOS_LINE`) and the CPU's (`CPU_LINES`), each with whether it is a DIMM's
+fn machine_lines(log: &str) -> Vec<(&str, bool)> {
+    let mut lines = Vec::new();
+    let mut below_system = false;
+    for line in log.lines() {
+        let module = below_system && line.starts_with(MODULE_INDENT);
+        below_system = module || line.contains(SYSTEM_LINE);
+        if below_system || line.contains(SMBIOS_LINE) || CPU_LINES.iter().any(|cpu| line.contains(cpu)) {
+            lines.push((line, module));
+        }
+    }
+    lines
+}
+
+/// The values a log alone names (`sanitize_single`), each with its kind, by TMR's lines for them, as a results file would name them:
+/// each DIMM's serial, its line's last field (`MODULE_SERIAL`); the system UUID, in the console's system line and the SMBIOS parse's
+/// summary; and the run's own fingerprints and UUID, a calibration identity check's `current=` (`RECORDED_LINES`). A stand-in among
+/// them is no value (`informative`).
+fn log_values(log: &str) -> Vec<(String, Kind)> {
+    let mut values = Vec::new();
+    let mut found = |line: &str, span: Option<(usize, usize)>, kind: Kind| {
+        values.extend(span.map(|(start, end)| (line[start..end].trim().to_string(), kind)));
+    };
+    for (line, module) in machine_lines(log) {
+        let serial = line.rfind(MODULE_SERIAL).filter(|_| module).map(|at| (at + MODULE_SERIAL.len(), line.len()));
+        found(line, serial, Kind::Serial);
+        if line.contains(SYSTEM_LINE) {
+            found(line, field(line, SYSTEM_UUID, '·'), Kind::SystemUuid);
+        }
+        if line.contains(SMBIOS_LINE) {
+            found(line, field(line, SMBIOS_UUID, ','), Kind::SystemUuid);
+        }
+    }
+    for line in log.lines() {
+        if let Some((_, kind)) = RECORDED_LINES.iter().find(|(check, _)| line.contains(check)) {
+            found(line, field(line, "current=", ','), *kind);
+        }
+    }
+    values
+}
+
+/// The words of the machine's description in `log`, a log alone's, as `part_words` gives a results file's: those of TMR's lines for it
+/// (`machine_lines`), a record's after its time, level and target, but `values`, which `Scrubber` replaces
+fn log_part_words(log: &str, values: &[(String, Kind)]) -> BTreeSet<String> {
+    fn described(line: &str) -> &str {
+        line.strip_prefix('[').and_then(|record| record.split_once("] ")).map_or(line, |(_, text)| text)
+    }
+    let without_values = |line: &str| values.iter().fold(described(line).to_string(), |line, (value, _)| line.replace(value.as_str(), " "));
+    let lines = machine_lines(log).into_iter().map(|(line, _)| serde_json::Value::String(without_values(line)));
+    part_words(&serde_json::Value::Array(lines.collect()))
 }
 
 /// A byte of a word, which a name found as a word doesn't run into: a letter or a digit, `_`, `-`, or any byte of a character beyond ASCII
@@ -701,6 +901,20 @@ mod tests {
         SERIALS[0], SERIALS[1], UUID, MACHINE, MEMORY, STORED, SID, OTHER_SID, BOARD_SERIAL, "jamie", "Jamie Doe", "DESKTOP-J4M13",
         "robin", "Contoso",
     ];
+    /// What a sanitized log of `Run`'s with `--serials` keeps: what isn't the machine's or anyone's (a built-in group and its SID, the word
+    /// Administrator, the parts), and its lines' shapes, each value in them `REMOVED`
+    const KEPT: [&str; 10] = [
+        r"BUILTIN\Administrators (S-1-5-32-544), <removed> (<removed>)",
+        "Running with Administrator privileges",
+        "0 Unknown); <removed>'s run on <removed>, memory_id <removed>",
+        r"\OneDrive - <removed>\configs\x.cfg --serials",
+        "👤 User: <removed>\n",
+        "strings=<removed>, next_offset=171",
+        "strings=[], next_offset=25\n",
+        "stored=<removed>, current=<removed>\n",
+        "G Skill F5-6000J3038F16G · serial <removed>\n",
+        "# run id: 0123456789abcdef0123456789abcdef\n",
+    ];
 
     /// A synthetic run, `stem`: its results file in `<dir>\results\` and its log in `<dir>\logs\` (or both in `<dir>`, `one_folder`), the
     /// log's run ID `log_id`, the results' `RUN`. With `kept`, as a run with `--serials` keeps them, every kind of value; without, as a run
@@ -803,6 +1017,19 @@ mod tests {
         names
     }
 
+    /// The pair's copies `done` wrote: the results file's, then the log's
+    fn pair(done: &Sanitized) -> (&Path, &Path) {
+        match &done.copies[..] {
+            [results, log] => (results, log),
+            copies => panic!("not a pair's copies: {copies:?}"),
+        }
+    }
+
+    /// What `done` replaced, by kind
+    fn counts(done: &Sanitized) -> Vec<(Kind, usize)> {
+        done.replaced.iter().map(|(kind, count)| (*kind, *count)).collect()
+    }
+
     /// A run kept with `--serials`, then sanitized from its results file: the copies beside the originals, which stay as they were, have
     /// none of its values or names, each counted by kind, and keep what isn't the machine's or anyone's (a built-in group and its SID,
     /// the word Administrator, the parts); the results file reads as TMR reads one (`--show-results`, `--compare-results`)
@@ -812,34 +1039,21 @@ mod tests {
         let run = Run::new(&dir, "TMR_2026-11-23_10-00-00", RUN, true, false);
         let (results_before, log_before) = (read(&run.results), read(&run.log));
         let done = sanitize(run.results.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(done.results, run.results.with_file_name("TMR_2026-11-23_10-00-00.sanitized.json"));
-        assert_eq!(done.log, run.log.with_file_name("TMR_2026-11-23_10-00-00.sanitized.log"));
+        assert_eq!(pair(&done).0, run.results.with_file_name("TMR_2026-11-23_10-00-00.sanitized.json"));
+        assert_eq!(pair(&done).1, run.log.with_file_name("TMR_2026-11-23_10-00-00.sanitized.log"));
         assert_eq!((read(&run.results), read(&run.log)), (results_before, log_before), "the originals as they were");
 
-        let (results, log) = (read(&done.results), read(&done.log));
+        let (results, log) = (read(pair(&done).0), read(pair(&done).1));
         for copy in [&results, &log] {
             let lower = copy.to_ascii_lowercase();
             for gone in GONE {
                 assert!(!lower.contains(&gone.to_ascii_lowercase()), "{gone} is still there:\n{copy}");
             }
         }
-        for kept in [
-            r"BUILTIN\Administrators (S-1-5-32-544), <removed> (<removed>)",
-            "Running with Administrator privileges",
-            "0 Unknown); <removed>'s run on <removed>, memory_id <removed>",
-            r"Log file: C:\Users\<removed>\tmr\logs\TMR_2026-11-23_10-00-00.log (here",
-            r"\OneDrive - <removed>\configs\x.cfg --serials",
-            "👤 User: <removed>\n",
-            "strings=<removed>, next_offset=171",
-            "strings=[], next_offset=25\n",
-            "stored=<removed>, current=<removed>\n",
-            "G Skill F5-6000J3038F16G · serial <removed>\n",
-            "# run id: 0123456789abcdef0123456789abcdef\n",
-        ] {
+        for kept in KEPT.into_iter().chain([r"Log file: C:\Users\<removed>\tmr\logs\TMR_2026-11-23_10-00-00.log (here"]) {
             assert!(log.contains(kept), "{kept} isn't in the log:\n{log}");
         }
-        let counts: Vec<(Kind, usize)> = done.replaced.iter().map(|(kind, count)| (*kind, *count)).collect();
-        assert_eq!(counts, [
+        assert_eq!(counts(&done), [
             (Kind::Serial, 4),
             (Kind::SystemUuid, 3),
             (Kind::MachineId, 2),
@@ -857,11 +1071,11 @@ mod tests {
         assert_eq!((back.metadata.run_id.as_deref(), back.identity.machine_id.as_str()), (Some(RUN), REMOVED));
         assert_eq!(back.identity.memory_modules[0].serial_number, REMOVED);
         assert_eq!(back.run_config.command_line[1], r"config=C:\Users\<removed>\OneDrive - <removed>\configs\x.cfg");
-        let copy = done.results.to_str().unwrap();
+        let copy = pair(&done).0.to_str().unwrap();
         crate::commands::saved_run(copy).unwrap_or_else(|e| panic!("--show-results: {e}"));
         crate::results::compare_test_results(run.results.to_str().unwrap(), copy).unwrap_or_else(|e| panic!("--compare-results: {e}"));
         let text = done.text();
-        assert!(text.contains(&done.results.display().to_string()) && text.contains(&done.log.display().to_string()), "{text}");
+        assert!(text.contains(&pair(&done).0.display().to_string()) && text.contains(&pair(&done).1.display().to_string()), "{text}");
         assert!(text.contains("Replaced with <removed>: 4 DIMM serials, 3 system UUIDs, "), "{text}");
     }
 
@@ -872,17 +1086,17 @@ mod tests {
         let dir = TempDir::new("sanitize-from-log");
         let run = Run::new(&dir, "TMR_2026-11-23_10-00-01", RUN, true, false);
         let done = sanitize(run.log.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!((done.results.parent(), done.log.parent()), (run.results.parent(), run.log.parent()));
-        assert!(read(&done.log).contains("👤 User: <removed>\n"));
+        assert_eq!((pair(&done).0.parent(), pair(&done).1.parent()), (run.results.parent(), run.log.parent()));
+        assert!(read(pair(&done).1).contains("👤 User: <removed>\n"));
 
         let dir = TempDir::new("sanitize-one-folder");
         let run = Run::new(&dir, "TMR_2026-11-23_10-00-02", RUN, true, true);
         let done = sanitize(run.results.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(done.log, run.log.with_file_name("TMR_2026-11-23_10-00-02.sanitized.log"));
+        assert_eq!(pair(&done).1, run.log.with_file_name("TMR_2026-11-23_10-00-02.sanitized.log"));
     }
 
     /// Nothing is written without its partner, with another run's, with no run ID, with a file that isn't TMR's, or with one that is
-    /// neither kind: each says why
+    /// neither kind: each says why, and where the pair isn't one run's, that one file can be sanitized alone
     #[test]
     fn nothing_is_written_without_the_pair_of_one_run() {
         let dir = TempDir::new("sanitize-refused");
@@ -891,18 +1105,20 @@ mod tests {
         let alone = Run::new(&dir, "TMR_alone", RUN, true, false);
         std::fs::remove_file(&alone.log).unwrap();
         let e = refused(&alone.results);
-        assert!(e.contains("'s log isn't there: looked for ") && e.contains("TMR_alone.log"), "{e}");
+        assert!(e.contains("'s log isn't there: looked for ") && e.contains("TMR_alone.log") && e.ends_with(ALONE_HINT), "{e}");
         let e = refused(&alone.log);
         assert!(e.contains("TMR_alone.log isn't there"), "{e}");
 
         let other = Run::new(&dir, "TMR_other", "ffffffffffffffffffffffffffffffff", true, false);
         let e = refused(&other.results);
         assert!(e.contains(&format!("the results file's run ID is {RUN}, the log's ffffffffffffffffffffffffffffffff")), "{e}");
+        assert!(e.ends_with(ALONE_HINT), "{e}");
 
         let old = Run::new(&dir, "TMR_old", RUN, true, false);
         let log = read(&old.log).replace(&format!("# run id: {RUN}\n"), "");
         std::fs::write(&old.log, log).unwrap();
-        assert!(refused(&old.results).contains("TMR_old.log has no run ID"));
+        let e = refused(&old.results);
+        assert!(e.contains("TMR_old.log has no run ID") && e.ends_with(ALONE_HINT), "{e}");
 
         let foreign = Run::new(&dir, "TMR_foreign", RUN, true, false);
         std::fs::write(&foreign.results, r#"{"name": "not TMR's"}"#).unwrap();
@@ -920,8 +1136,8 @@ mod tests {
         let run = Run::new(&dir, "TMR_2026-11-23_10-00-03", RUN, false, false);
         let done = sanitize(run.results.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
         assert!(done.replaced.is_empty(), "{:?}", done.replaced);
-        assert_eq!((read(&done.results), read(&done.log)), (read(&run.results), read(&run.log)));
-        let back: TestRunResult = serde_json::from_str(&read(&done.results)).expect("TMR reads the copy");
+        assert_eq!((read(pair(&done).0), read(pair(&done).1)), (read(&run.results), read(&run.log)));
+        let back: TestRunResult = serde_json::from_str(&read(pair(&done).0)).expect("TMR reads the copy");
         assert_eq!(back.identity.machine_id, crate::smbios::LEFT_OUT);
         assert!(done.text().contains("Nothing to replace"), "{}", done.text());
     }
@@ -933,13 +1149,160 @@ mod tests {
         let dir = TempDir::new("sanitize-twice");
         let run = Run::new(&dir, "TMR_2026-11-23_10-00-04", RUN, true, false);
         let done = sanitize(run.results.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
-        assert!(done.results != run.results && done.log != run.log);
-        let copies = (read(&done.results), read(&done.log));
+        assert!(pair(&done).0 != run.results && pair(&done).1 != run.log);
+        let copies = (read(pair(&done).0), read(pair(&done).1));
         let e = sanitize(run.log.to_str().unwrap()).expect_err("the copies are there");
         assert!(e.contains("TMR_2026-11-23_10-00-04.sanitized.json is there already"), "{e}");
-        assert_eq!((read(&done.results), read(&done.log)), copies);
-        let e = sanitize(done.results.to_str().unwrap()).expect_err("a copy");
+        assert_eq!((read(pair(&done).0), read(pair(&done).1)), copies);
+        let e = sanitize(pair(&done).0.to_str().unwrap()).expect_err("a copy");
         assert!(e.ends_with("TMR_2026-11-23_10-00-04.sanitized.json is a sanitized copy already"), "{e}");
+    }
+
+    /// `--sanitize-single` of a results file whose log isn't there: its copy beside it, the original as it was and no log written, has
+    /// none of the values it records nor its user folder's name, and reads as TMR reads one. What only the log names stays: a PC name in
+    /// a share's path, which the pair's sanitize removes, as the log's account names it.
+    #[test]
+    fn a_results_file_alone_loses_its_values_and_still_reads_as_tmr_reads_it() {
+        let dir = TempDir::new("sanitize-single-results");
+        let run = Run::new(&dir, "TMR_2026-11-23_11-00-00", RUN, true, false);
+        std::fs::remove_file(&run.log).unwrap();
+        let before = read(&run.results);
+        let done = sanitize_single(run.results.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(done.copies, [run.results.with_file_name("TMR_2026-11-23_11-00-00.sanitized.json")]);
+        assert_eq!(read(&run.results), before, "the original as it was");
+        assert_eq!(files(&dir), ["TMR_2026-11-23_11-00-00.json", "TMR_2026-11-23_11-00-00.sanitized.json"]);
+        let copy = read(&done.copies[0]);
+        for gone in [SERIALS[0], SERIALS[1], UUID, MACHINE, MEMORY, "Jamie Doe", "Contoso"] {
+            assert!(!copy.to_ascii_lowercase().contains(&gone.to_ascii_lowercase()), "{gone} is still there:\n{copy}");
+        }
+        assert_eq!(counts(&done), [
+            (Kind::Serial, 2),
+            (Kind::SystemUuid, 1),
+            (Kind::MachineId, 1),
+            (Kind::MemoryId, 1),
+            (Kind::UserFolder, 1),
+            (Kind::OneDrive, 1),
+        ]);
+        let back: TestRunResult = serde_json::from_str(&copy).expect("TMR reads the copy");
+        assert_eq!((back.metadata.run_id.as_deref(), back.identity.memory_modules[1].serial_number.as_str()), (Some(RUN), REMOVED));
+        crate::commands::saved_run(done.copies[0].to_str().unwrap()).unwrap_or_else(|e| panic!("--show-results: {e}"));
+        let text = done.text();
+        assert!(text.starts_with("🧹 Sanitized copy written, the original as it was:\n   "), "{text}");
+        assert!(text.contains(&format!("\n   {RESULTS_ALONE}\n   Read it before you post it: ")), "{text}");
+
+        // A config on a share of the PC's: alone, its name stays; with its log, which names the account, it goes
+        let run = Run::new(&dir, "TMR_2026-11-23_11-00-01", RUN, true, false);
+        let share = read(&run.results).replace(r#""--serials""#, r#""config=\\\\DESKTOP-J4M13\\share\\y.cfg""#);
+        std::fs::write(&run.results, share).unwrap();
+        let done = sanitize_single(run.results.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(read(&done.copies[0]).contains(r"\\\\DESKTOP-J4M13\\share"), "a name only the log gives");
+        std::fs::remove_file(&done.copies[0]).unwrap();
+        let done = sanitize(run.results.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(read(pair(&done).0).contains(r"\\\\<removed>\\share"), "the log's account names it");
+    }
+
+    /// `--sanitize-single` of a log whose results file isn't there, from a run with `--serials`: every serial, the UUID and both
+    /// fingerprints go, found by TMR's lines for them and then wherever else the log has them, as do the accounts, names, paths and
+    /// SIDs, each counted as the pair's sanitize counts them in the log. A value only a line of another kind has stays: there is no
+    /// results file to name it.
+    #[test]
+    fn a_log_alone_loses_every_serial_the_uuid_and_the_fingerprints() {
+        let dir = TempDir::new("sanitize-single-log");
+        let run = Run::new(&dir, "TMR_2026-11-23_11-00-02", RUN, true, false);
+        std::fs::remove_file(&run.results).unwrap();
+        let without = read(&run.log);
+        // The memory fingerprint, as TMR's lines have it: a calibration identity check's `current=`
+        let log = format!(
+            "{without}[2026-11-23 10:00:00.008 WARN tmr::app_config] Seal calibration: memory configuration changed (DIMM swap, XMP \
+             change, or capacity change): stored=0a0b0c0d0e0f1011, current={MEMORY}\n"
+        );
+        std::fs::write(&run.log, &log).unwrap();
+        let done = sanitize_single(run.log.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(done.copies, [run.log.with_file_name("TMR_2026-11-23_11-00-02.sanitized.log")]);
+        assert_eq!(read(&run.log), log, "the original as it was");
+        assert_eq!(files(&dir), ["TMR_2026-11-23_11-00-02.log", "TMR_2026-11-23_11-00-02.sanitized.log"]);
+        let copy = read(&done.copies[0]);
+        for gone in GONE.into_iter().chain(["0a0b0c0d0e0f1011"]) {
+            assert!(!copy.to_ascii_lowercase().contains(&gone.to_ascii_lowercase()), "{gone} is still there:\n{copy}");
+        }
+        for kept in KEPT.into_iter().chain([
+            r"Log file: C:\Users\<removed>\tmr\logs\TMR_2026-11-23_11-00-02.log (here",
+            "UUID=<removed>, Memory=2 module(s)\n",
+            "🖥️  System: ASUS PRIME B650M-A · UUID <removed> · 2 modules, 32 GiB\n",
+        ]) {
+            assert!(copy.contains(kept), "{kept} isn't in the log:\n{copy}");
+        }
+        assert_eq!(counts(&done), [
+            (Kind::Serial, 2),
+            (Kind::SystemUuid, 2),
+            (Kind::MachineId, 1),
+            (Kind::MemoryId, 2),
+            (Kind::Recorded, 2),
+            (Kind::SmbiosStrings, 1),
+            (Kind::UserFolder, 4),
+            (Kind::OneDrive, 1),
+            (Kind::Account, 3),
+            (Kind::Sid, 2),
+            (Kind::Name, 2),
+        ]);
+        assert!(done.text().contains(&format!("\n   {LOG_ALONE}\n")), "{}", done.text());
+
+        // Without the check's line, the memory fingerprint is only in a line of another kind: it stays
+        let scrubbed = Scrubber::of_log(&without).log(&without, &mut BTreeMap::new());
+        assert!(scrubbed.contains(&format!("memory_id {MEMORY}\n")) && !scrubbed.contains(SERIALS[0]), "{scrubbed}");
+        // A PC named for a word of the hardware's, as its lines describe it, goes as the account, not from the CPU's name
+        let log = "👤 User: RYZEN\\jamie\nCPU           AMD Ryzen 7 5700X 8-Core Processor (AuthenticAMD)\nOn RYZEN, jamie's run\n";
+        assert_eq!(
+            Scrubber::of_log(log).log(log, &mut BTreeMap::new()),
+            "👤 User: <removed>\nCPU           AMD Ryzen 7 5700X 8-Core Processor (AuthenticAMD)\nOn RYZEN, <removed>'s run\n"
+        );
+    }
+
+    /// `--sanitize-single` of a log from a run that left its serials out and names no account or path: nothing to replace, and the copy
+    /// is still written, as the original; its results file, there, is neither looked at nor copied
+    #[test]
+    fn a_log_alone_without_serials_has_nothing_to_replace_and_is_still_copied() {
+        let dir = TempDir::new("sanitize-single-left-out");
+        let run = Run::new(&dir, "TMR_2026-11-23_11-00-03", RUN, false, false);
+        let done = sanitize_single(run.log.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(done.replaced.is_empty(), "{:?}", done.replaced);
+        assert_eq!(read(&done.copies[0]), read(&run.log));
+        let names = ["TMR_2026-11-23_11-00-03.json", "TMR_2026-11-23_11-00-03.log", "TMR_2026-11-23_11-00-03.sanitized.log"];
+        assert_eq!(files(&dir), names);
+        let text = done.text();
+        assert!(text.contains("Nothing to replace: the run left its serials out, and the file names no user, account or PC\n"), "{text}");
+    }
+
+    /// `--sanitize-single` refuses a file that is neither kind, isn't there, isn't one TMR reads, isn't text, or is a copy already, and
+    /// a copy there already, which it never writes over; each says why, with nothing written. It doesn't refuse what only a pair's
+    /// sanitize does: a log without a run ID, or a results file whose log is another run's.
+    #[test]
+    fn a_file_alone_is_refused_only_for_what_it_is() {
+        let dir = TempDir::new("sanitize-single-refused");
+        let refused = |file: &Path| sanitize_single(file.to_str().unwrap()).map(|done| done.text()).expect_err("refused");
+        assert!(refused(Path::new(&dir.file("notes.txt"))).contains("neither a results file (.json) nor a log (.log)"));
+        assert!(refused(Path::new(&dir.file("nowhere.log"))).contains("nowhere.log isn't there"));
+        let foreign = Run::new(&dir, "TMR_foreign", RUN, true, false);
+        std::fs::write(&foreign.results, r#"{"name": "not TMR's"}"#).unwrap();
+        assert!(refused(&foreign.results).contains("isn't a results file TMR reads"));
+        std::fs::write(&foreign.log, b"# TMR \xff\xfe a log that isn't text\n").unwrap();
+        assert!(refused(&foreign.log).starts_with(&format!("{}: ", foreign.log.display())));
+        assert!(files(&dir).iter().all(|name| !name.contains(".sanitized")), "{:?}", files(&dir));
+
+        let run = Run::new(&dir, "TMR_twice", RUN, true, false);
+        let done = sanitize_single(run.log.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        let copy = read(&done.copies[0]);
+        assert!(refused(&run.log).ends_with("TMR_twice.sanitized.log is there already: move or delete it to sanitize it again"));
+        assert_eq!(read(&done.copies[0]), copy, "not written over");
+        assert!(refused(&done.copies[0]).ends_with("TMR_twice.sanitized.log is a sanitized copy already"));
+
+        // What a pair's sanitize refuses, each file alone takes: a log from before the run ID, and a results file whose log is another run's
+        let old = Run::new(&dir, "TMR_old", "ffffffffffffffffffffffffffffffff", true, false);
+        std::fs::write(&old.log, read(&old.log).replace("# run id: ffffffffffffffffffffffffffffffff\n", "")).unwrap();
+        assert!(sanitize(old.results.to_str().unwrap()).is_err());
+        for file in [&old.log, &old.results] {
+            sanitize_single(file.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        }
     }
 
     /// The rules on their own: a machine's or a domain's SID goes, a well-known one stays; a user folder with a space goes whole, a shared

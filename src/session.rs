@@ -31,11 +31,11 @@ pub(crate) const CACHE_LATENCY_FILTER: &str =
 /// The flags that pick a mode's defaults, which `run` takes out before it looks for a one-shot command (`logfile::wanted` too)
 pub(crate) const MODE_FLAGS: [&str; 3] = ["--ram-latency", "--cache-latency", "--quick-test"];
 /// Every flag a session takes, exactly: any other is refused before anything runs (`Stopped::UnknownFlags`); `--help` names each
-pub(crate) const KNOWN_FLAGS: [&str; 27] = [
+pub(crate) const KNOWN_FLAGS: [&str; 28] = [
     "--ram-latency", "--cache-latency", "--quick-test", "--calibrate-cache", "--calibrate-curve", "--calibrate-seal", "--calibrate-all",
     "--show-calibration", "--output", "--yes", "--no-save", "--create-demo-configs", "--compare-results", "--show-results", "--sanitize",
-    "--debug-topology", "--show-topology", "--setup-large-pages", "--remove-large-pages", "--startup-debug", "--disable-pinning",
-    "--serials", "--help", "-h", "-?", "--version", "-v",
+    "--sanitize-single", "--debug-topology", "--show-topology", "--setup-large-pages", "--remove-large-pages", "--startup-debug",
+    "--disable-pinning", "--serials", "--help", "-h", "-?", "--version", "-v",
 ];
 
 /// How a session ended. An error that stops it is `run`'s `Err`.
