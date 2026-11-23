@@ -29,29 +29,34 @@ impl Conversion {
         if !def.actual_name.starts_with("Mem-SimpleV2") {
             return None;
         }
-        let source = def.tm5_pattern?;
+        let source = def.tm5_pattern.clone()?;
         let effective_numbered = def.config.native_program().is_none().then(|| {
             let pattern = PatternId::from_config(&def.config);
-            Tm5PatternSource { mode: pattern.mode, param0: pattern.param0, param1: pattern.param1 }
+            Tm5PatternSource { mode: pattern.mode, param0: pattern.param0, param1: pattern.param1, written: None }
         });
-        let disposition = match effective_numbered {
+        let disposition = match &effective_numbered {
             None => Disposition::ReplacedByNativeProgram,
-            Some(effective) if effective == source => Disposition::RetainedForNumberedMode,
+            Some(effective) if (effective.mode, effective.param0, effective.param1) == (source.mode, source.param0, source.param1) => {
+                Disposition::RetainedForNumberedMode
+            }
             Some(_) => Disposition::OverriddenForNumberedMode,
         };
         Some(Self { source, disposition, effective_numbered })
     }
 
     fn detail(&self, label: &str, effective: &str) -> String {
-        let Tm5PatternSource { mode, param0, param1 } = self.source;
+        let Tm5PatternSource { mode, param0, param1, written } = &self.source;
+        let [param0, param1] = written.clone().unwrap_or_else(|| [format!("{param0:#x}"), format!("{param1:#x}")]);
         let status = match self.disposition {
             Disposition::ReplacedByNativeProgram => "replaced by native program",
             Disposition::RetainedForNumberedMode => "retained for TMR's numbered adaptation",
             Disposition::OverriddenForNumberedMode => "overridden by effective numbered-mode inputs",
         };
-        let inputs =
-            self.effective_numbered.map_or(String::new(), |p| format!("; effective Param0={:#x}, Param1={:#x}", p.param0, p.param1));
-        format!("TM5 import {label}: Pattern Mode={mode}, Param0={param0:#x}, Param1={param1:#x}: {status}; {effective}{inputs}")
+        let inputs = self
+            .effective_numbered
+            .as_ref()
+            .map_or(String::new(), |p| format!("; effective Param0={:#x}, Param1={:#x}", p.param0, p.param1));
+        format!("TM5 import {label}: Pattern Mode={mode}, Param0={param0}, Param1={param1}: {status}; {effective}{inputs}")
     }
 }
 

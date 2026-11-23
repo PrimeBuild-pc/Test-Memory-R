@@ -333,7 +333,7 @@ the like (TM5 checks it without the `-`, then stores it negated: `Cycles=-3` wou
 line TM5 ignores, a repeated key or section, a missing section, a `[TestN]` at or above Tests, a clamped Tests, Channels or Lock
 Memory Granularity, text that isn't UTF-8) is a warning with its line, and the file is read as TM5 reads it
 (`LegacyConfig::parse_reporting`). A SimpleTest's Pattern Param0/1 written as digits only is decimal,
-as in TM5, and one wider than 32 bits keeps its low 32 (1usmus_v3's four 9-digit Param1 values), warned. A Pattern Mode TMR
+as in TM5. Pattern parameter spellings are recorded as supplied. Only `patterns=legacy` truncates their generator inputs to 32 bits. Other TM5 numeric fields retain 32-bit semantics. A Pattern Mode TMR
 doesn't name imports as TM5 runs it, by its low byte (1 or 2, else mode 0); the numbers TMR names (10, 11, 13, 15-17, 20, 21,
 30-33) keep TMR's meaning, though TM5 runs each as mode 0, and the others from 10 to 33 (12, 14, 18, 19, 22-29) run as mode 0. A
 negative Test Block Size runs as TM5's shift to bytes in 32 bits leaves it (`tm5_negative_block_mib`: its low 12 bits in MiB, 0

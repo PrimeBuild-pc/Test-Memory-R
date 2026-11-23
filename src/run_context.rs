@@ -1780,7 +1780,7 @@ mod tests {
         let cache_info = crate::tests::get_cache_info();
         let mut def =
             crate::runner::create_test_definitions(cache_info).into_iter().find(|d| d.actual_name.starts_with("Mem-SimpleV2")).unwrap();
-        def.tm5_pattern = Some(Tm5PatternSource { mode: 2, param0: 0x77777777, param1: 0x33333333 });
+        def.tm5_pattern = Some(Tm5PatternSource { mode: 2, param0: 0x77777777, param1: 0x33333333, written: None });
         def.config.pattern_mode = None;
         def.config.program = crate::pattern::Program::from_tm5_mode(2);
         let captured = TestConfigSnapshot::capture(&def, true, cache_info, 1, 64 << 20);

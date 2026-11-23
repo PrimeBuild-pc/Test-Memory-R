@@ -52,12 +52,15 @@ pub struct LegacyMetadata {
 }
 
 /// The original SimpleTest fields, retained only for import reporting. They never supply a native generator's inputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tm5PatternSource {
     pub mode: u32,
     pub param0: u64,
     pub param1: u64,
+    /// Parameter spellings from the .cfg, including wide values. Older exports have only the numeric fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written: Option<[String; 2]>,
 }
 
 fn default_channels() -> u32 {
@@ -1027,6 +1030,7 @@ pub struct LegacyTest {
     pub pattern_mode: u32,
     pub pattern_param0: u64,
     pub pattern_param1: u64,
+    pub written_params: Option<[String; 2]>,
     pub parameter: u32,
     pub test_chunk_size_mb: u32,
 }
@@ -1205,7 +1209,7 @@ impl ModernConfig {
                 config: self.build_test(i, test)?,
                 id: test.id.as_deref(),
                 seal_opt_out: test.seal == Some(false),
-                tm5_pattern: test.tm5_pattern,
+                tm5_pattern: test.tm5_pattern.clone(),
                 latency: Self::latency_settings(i, test)?,
             });
         }
@@ -1841,6 +1845,7 @@ fn cfg_value(value: &str) -> &str {
 struct Tm5Number {
     /// Its low 32 bits, negated (two's complement) when it has a `-`, as TM5's register holds it
     value: u32,
+    source: u64,
     negative: bool,
     /// Written in hex, so said in hex
     hex: bool,
@@ -1875,14 +1880,14 @@ fn tm5_number(text: &str) -> Option<Tm5Number> {
     }
     let (mut value, mut wide) = (0u64, false);
     for d in digits.chars().filter_map(|c| c.to_digit(radix)) {
-        value = value * radix as u64 + d as u64;
+        value = value.wrapping_mul(radix as u64).wrapping_add(d as u64);
         if value > u32::MAX as u64 {
             wide = true;
-            value &= u32::MAX as u64;
         }
     }
+    let source = if negative { value.wrapping_neg() } else { value };
     let value = if negative { (value as u32).wrapping_neg() } else { value as u32 };
-    Some(Tm5Number { value, negative: negative && value != 0, hex, wide })
+    Some(Tm5Number { value, source, negative: negative && value != 0, hex, wide })
 }
 
 /// TM5's `Test Sequence` buffer, 128 bytes with its NUL (`mt_ini.inc` `szTestSequenceBuff`), and its table of steps (`TstSequencySize`)
@@ -2158,10 +2163,13 @@ impl LegacyConfig {
             let n = tm5_number(text).ok_or_else(|| format!("TM5 config [{name}] {key}={}: not a number", cfg_quoted(text)))?;
             if n.wide {
                 let kept = if n.hex { format!("0x{:X}", n.value) } else { n.value.to_string() };
-                let message = format!(
-                    "[{name}] {key}={} is wider than 32 bits; TM5 keeps the low 32 bits, {kept}, and so does TMR",
-                    cfg_quoted(text)
-                );
+                let handling = if matches!(key, "Pattern Param0" | "Pattern Param1") {
+                    "patterns=legacy uses that value; the original is recorded"
+                } else {
+                    "TMR uses that value"
+                };
+                let message =
+                    format!("[{name}] {key}={} is wider than 32 bits; TM5 keeps the low 32 bits, {kept}; {handling}", cfg_quoted(text));
                 warnings.push(CfgWarning { line: section.line_of(key), message });
             }
             Ok(Some(n))
@@ -2303,16 +2311,24 @@ impl LegacyConfig {
                 );
                 warnings.push(CfgWarning { line: test.line_of(block), message });
             }
-            let pattern_param0 = signed(test, name, "Pattern Param0", TM5_DEFAULT_PATTERN_PARAM0[d] as u32, warnings)?;
-            let pattern_param1 = signed(test, name, "Pattern Param1", TM5_DEFAULT_PATTERN_PARAM1[d] as u32, warnings)?;
+            let mut param = |key: &str, default: u64| -> Result<(u64, String), String> {
+                let n = number(test, name, key, warnings)?;
+                Ok((
+                    n.map_or(default, |n| n.source),
+                    test.get(key).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("{default:#x}")),
+                ))
+            };
+            let (pattern_param0, text0) = param("Pattern Param0", TM5_DEFAULT_PATTERN_PARAM0[d])?;
+            let (pattern_param1, text1) = param("Pattern Param1", TM5_DEFAULT_PATTERN_PARAM1[d])?;
             tests.push(LegacyTest {
                 id: i,
                 enabled: num(test, name, "Enable", 1, warnings)? == 1,
                 time_percent: num(test, name, "Time (%)", 100, warnings)?,
                 function: test.get("function").cloned().unwrap_or_else(|| TM5_DEFAULT_FUNCTION[d].to_string()),
                 pattern_mode: signed(test, name, "Pattern Mode", TM5_DEFAULT_PATTERN_MODE[d], warnings)?,
-                pattern_param0: pattern_param0 as u64,
-                pattern_param1: pattern_param1 as u64,
+                pattern_param0,
+                pattern_param1,
+                written_params: Some([text0, text1]),
                 parameter,
                 test_chunk_size_mb,
             });
@@ -2338,6 +2354,10 @@ impl LegacyConfig {
 
     /// `to_modern_config`, its notes (each a level and a line) into `notes` rather than the log
     fn convert(&self, notes: &mut Vec<(log::Level, String)>) -> Result<ModernConfig, String> {
+        self.convert_with_patterns(notes, crate::pattern::legacy_import())
+    }
+
+    fn convert_with_patterns(&self, notes: &mut Vec<(log::Level, String)>, legacy_patterns: bool) -> Result<ModernConfig, String> {
         let mut test_sequence = Vec::new();
         let mut sealed = false;
         // TM5's Interleave Type 0 on two channels or more: a SimpleTest's bus is 128 bits, so it walks in 128 B visits
@@ -2397,10 +2417,15 @@ impl LegacyConfig {
                 // other function reads the pattern fields, so they get none.
                 let simple = function == "Mem-SimpleV2-Auto";
                 let mode = if simple { Self::tm5_pattern_mode(test, notes) } else { test.pattern_mode };
-                let tm5_pattern = simple.then_some(Tm5PatternSource { mode, param0: test.pattern_param0, param1: test.pattern_param1 });
+                let tm5_pattern = simple.then_some(Tm5PatternSource {
+                    mode,
+                    param0: test.pattern_param0,
+                    param1: test.pattern_param1,
+                    written: test.written_params.clone(),
+                });
                 let (function, program, pattern) = match function.as_str() {
-                    "Mem-SimpleV2-Auto" if crate::pattern::legacy_import() => {
-                        (function, None, Some((mode, test.pattern_param0, test.pattern_param1)))
+                    "Mem-SimpleV2-Auto" if legacy_patterns => {
+                        (function, None, Some((mode, u64::from(test.pattern_param0 as u32), u64::from(test.pattern_param1 as u32))))
                     }
                     "Mem-SimpleV2-Auto" => match crate::pattern::Program::from_tm5_mode(mode)
                         .or_else(|| crate::pattern::Family::from_number(mode).map(crate::pattern::Program::single))
@@ -2856,6 +2881,7 @@ mod tests {
             pattern_mode: 0,
             pattern_param0: 0,
             pattern_param1: 0,
+            written_params: None,
             parameter: 0,
             test_chunk_size_mb: block,
         }
@@ -4018,7 +4044,7 @@ mod tests {
     /// decimal with its fraction dropped; a `-` negates decimal; only the low 32 bits count. Text TM5 reads only by accident is refused.
     #[test]
     fn tm5_numbers_read_as_tm5_reads_them() {
-        let n = |value: u32, negative: bool, hex: bool, wide: bool| Some(Tm5Number { value, negative, hex, wide });
+        let n = |value: u32, negative: bool, hex: bool, wide: bool| Some((value, negative, hex, wide));
         for (text, read) in [
             ("7775", n(7775, false, false, false)),
             ("0x1E5F", n(0x1E5F, false, true, false)),
@@ -4039,10 +4065,24 @@ mod tests {
             ("4294967301", n(5, false, false, true)),
             ("0x00000000FFFFFFFF", n(u32::MAX, false, true, false)),
         ] {
-            assert_eq!(tm5_number(text), read, "{text}");
+            assert_eq!(tm5_number(text).map(|n| (n.value, n.negative, n.hex, n.wide)), read, "{text}");
         }
         for text in ["eight", "two", "lots", "0xZZ", "0x", "h", "-0x10", "-1A", "+0x10", "1 2", "4\0x", "12g", ".5", "1.2.3", "-", ""] {
             assert_eq!(tm5_number(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn wide_source_parameters_survive_import_and_only_legacy_truncates() {
+        let source = LegacyConfig::parse_legacy_format("[Main Section]\nTest Sequence=1\n[Global Memory Setup]\n[Test1]\nFunction=SimpleTest\nPattern Mode=2\nPattern Param1=0xC50552FE6").unwrap();
+        for legacy in [false, true] {
+            let modern = source.convert_with_patterns(&mut Vec::new(), legacy).unwrap();
+            let test = modern.test_sequence.iter().find(|t| t.id.as_deref() == Some("1")).unwrap();
+            let recorded = test.tm5_pattern.as_ref().unwrap();
+            assert_eq!(recorded.param1, 0xC_5055_2FE6);
+            assert_eq!(recorded.written.as_ref().unwrap()[1], "0xC50552FE6");
+            assert_eq!(test.pattern_param1, legacy.then_some(0x5055_2FE6));
+            assert_eq!(test.program.is_some(), !legacy);
         }
     }
 
@@ -4058,15 +4098,14 @@ mod tests {
             parsed.map(|legacy| (legacy.tests.into_iter().find(|t| t.id == 1).unwrap(), warnings))
         };
         let (t, _) = test1("Pattern Param0=7775\nPattern Param1=-1").unwrap();
-        assert_eq!((t.pattern_param0, t.pattern_param1), (0x1E5F, 0xFFFF_FFFF));
+        assert_eq!((t.pattern_param0, t.pattern_param1), (0x1E5F, u64::MAX));
         let (t, _) = test1("Pattern Param0=0x1E5F\nPattern Param1=6E72A941").unwrap();
         assert_eq!((t.pattern_param0, t.pattern_param1), (0x1E5F, 0x6E72_A941));
         let (t, warnings) = test1("Pattern Param1=0xC50552FE6").unwrap();
-        assert_eq!(t.pattern_param1, 0x5055_2FE6);
+        assert_eq!(t.pattern_param1, 0xC_5055_2FE6);
         assert_eq!(warnings, [(
             6,
-            "[Test1] Pattern Param1=0xC50552FE6 is wider than 32 bits; TM5 keeps the low 32 bits, 0x50552FE6, and so \
-                does TMR"
+            "[Test1] Pattern Param1=0xC50552FE6 is wider than 32 bits; TM5 keeps the low 32 bits, 0x50552FE6; patterns=legacy uses that value; the original is recorded"
                 .to_string()
         )]);
         // Test1's own defaults for empty values; a value's quotes and comment dropped
@@ -4234,7 +4273,7 @@ mod tests {
             let (modern, notes, _) =
                 imported("Test Sequence=1", "", &format!("[Test1]\nFunction=SimpleTest\nPattern Mode={written}\n")).unwrap();
             let t = &modern.test_sequence[1];
-            assert_eq!(t.tm5_pattern.map(|p| p.mode), Some(runs), "{written}");
+            assert_eq!(t.tm5_pattern.as_ref().map(|p| p.mode), Some(runs), "{written}");
             modern.get_test_configs().unwrap();
             let warned = notes.iter().any(|n| n.contains(&format!("so runs mode {runs}, and so does TMR")));
             assert_eq!(warned, !matches!(written, "13" | "32"), "{written}: {notes:?}");

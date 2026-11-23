@@ -4803,7 +4803,7 @@ fn create_test_definitions_from_config(
                 id,
                 seal_use: seal_use(resolved_name),
                 seal_opt_out: test.seal_opt_out,
-                tm5_pattern: test.tm5_pattern,
+                tm5_pattern: test.tm5_pattern.clone(),
             }
         } else {
             // Convert to 'static str by leaking (safe for test names, small and finite set)
@@ -4820,7 +4820,7 @@ fn create_test_definitions_from_config(
                 id,
                 seal_use: seal_use(test_name),
                 seal_opt_out: test.seal_opt_out,
-                tm5_pattern: test.tm5_pattern,
+                tm5_pattern: test.tm5_pattern.clone(),
             }
         };
         tests.push(def);
@@ -7357,7 +7357,8 @@ mod tests {
         let cache_info = crate::tests::get_cache_info();
         let (mut defs, _) = create_test_definitions_from_config(&modern, cache_info).unwrap();
         assert_eq!(defs.iter().map(|d| d.id.as_deref().unwrap()).collect::<Vec<_>>(), ["1", "2", "3", "1"]);
-        let source = Tm5PatternSource { mode: 2, param0: 0x77777777, param1: 0x33333333 };
+        let source =
+            Tm5PatternSource { mode: 2, param0: 0x77777777, param1: 0x33333333, written: Some(["0x77777777".into(), "0x33333333".into()]) };
         assert_eq!(defs[0].tm5_pattern, Some(source));
         assert_eq!((defs[0].config.pattern_param0, defs[0].config.pattern_param1), (None, None));
         assert!(defs[2].tm5_pattern.is_none(), "a mirror's fields are not a SimpleTest conversion");

@@ -282,8 +282,8 @@ Otherwise TMR reads a `.cfg` as TM5 does:
   test once.
 - **Numbers.** Hex is written with `0x`, an `h` after it, or a letter A-F in it; anything else is
   decimal, and a fraction is dropped. Pattern Param0 and Param1 written as digits only are decimal.
-  Only a number's low 32 bits count, so 1usmus_v3's 9-digit Pattern Param1 values run as their
-  last 8 digits. Quotes around a value and a `;` comment after it are dropped.
+  The import report keeps the original Pattern Param0/1 spelling. Native programs supply their own data.
+  With `patterns=legacy`, the generator uses the low 32 bits, so 1usmus_v3's 9-digit values run as their last 8 digits. Quotes around a value and a `;` comment after it are dropped.
 - **Odd values.** A SimpleTest Pattern Mode TMR doesn't have runs as TM5 runs it, by its lowest
   byte (1 or 2, else 0); TMR's own mode numbers (10, 11, 13, 15-17, 20, 21, 30-33) keep their
   meaning. A negative Parameter runs as 0, and a negative Test Block Size as TM5's shift to bytes
