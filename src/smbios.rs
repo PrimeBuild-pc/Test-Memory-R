@@ -37,7 +37,7 @@ pub struct SystemIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryModule {
     /// The module's slot as TMR names it: the channel letter and the slot, `A-2`, where the board's strings say both (`assign_slots`),
-    /// else the board's own name for it, made unique
+    /// else the board's own name for it, made unique; empty where SMBIOS names it nothing (a VM's), for its reader to name
     #[serde(default)]
     pub slot: String,
     /// SMBIOS Device Locator (Type 17 offset 0x10), the board's name for the socket: `DIMM 1`, `DIMMA2`, `Controller0-ChannelA-DIMM0`
@@ -169,9 +169,14 @@ impl SmbiosData {
             module.manufacturer.hash(&mut hasher);
             module.serial_number.hash(&mut hasher);
             module.part_number.hash(&mut hasher);
-            // The configured speed, so an XMP/EXPO change shows, and the maximum the firmware reports
-            module.configured_mts.hash(&mut hasher);
+            // The maximum the firmware reports, as earlier builds hashed it (their `speed_mts`), then the configured speed where the
+            // firmware gives one apart from it, so an XMP/EXPO change shows, and a machine whose configured speed is unknown or the
+            // maximum keeps the `memory_id` its earlier results recorded (a compare against them, the 2026-11-03 baselines among them,
+            // stays like-for-like)
             module.max_mts.hash(&mut hasher);
+            if module.configured_mts != 0 && module.configured_mts != module.max_mts {
+                module.configured_mts.hash(&mut hasher);
+            }
             module.capacity_bytes.hash(&mut hasher);
         }
         format!("{:016x}", hasher.finish())
@@ -333,6 +338,9 @@ fn parse_smbios(raw: &[u8]) -> SmbiosData {
     // Skip the firmware table header to get to the SMBIOS structure table
     let table = &raw[SMBIOS_HEADER_SIZE..];
     let mut offset = 0;
+    // Every Type 17's Device and Bank Locator, its slot empty or not: a board that counts its slots from 0 says so in a name it gives an
+    // empty one as often as a filled one (`assign_slots`)
+    let mut sockets: Vec<(String, String)> = Vec::new();
 
     while offset + 4 <= table.len() {
         let struct_type = table[offset];
@@ -408,6 +416,7 @@ fn parse_smbios(raw: &[u8]) -> SmbiosData {
                         &formatted[..struct_len]
                     );
                 }
+                sockets.push(type17_locators(formatted, &strings));
                 if let Some(module) = parse_type17_memory(formatted, &strings, version) {
                     data.memory_modules.push(module);
                 } else {
@@ -440,7 +449,7 @@ fn parse_smbios(raw: &[u8]) -> SmbiosData {
         }
     }
 
-    assign_slots(&mut data.memory_modules);
+    assign_slots(&mut data.memory_modules, &sockets);
 
     // Set capacity_human for any modules that have it unset
     for module in &mut data.memory_modules {
@@ -631,17 +640,15 @@ fn parse_type17_memory(formatted: &[u8], strings: &[String], version: (u8, u8)) 
 
     // Offset 0x15: Speed, the maximum capable (2.3+), and 0x20: Configured Memory Speed (2.7+), each MT/s (MHz before 3.1), 0 unknown,
     // 0xFFFF for the DWORD at 0x54 / 0x58 (3.3+). Each read only where the structure's length covers it (DSP0134 6.1.1)
-    let max_mts = speed_field(formatted, 0x15, 0x54);
+    let max_mts = as_data_rate(speed_field(formatted, 0x15, 0x54), memory_type, version);
     let configured_mts = as_data_rate(speed_field(formatted, 0x20, 0x58), memory_type, version);
 
     // String references (all guarded for short structs)
-    // 0x10: Device Locator
     // 0x17: Manufacturer
     // 0x18: Serial Number
     // 0x19: Asset Tag
     // 0x1A: Part Number
-    let locator = if formatted.len() > 0x10 { get_string(strings, formatted[0x10]) } else { String::new() };
-    let bank_locator = if formatted.len() > 0x11 { get_string(strings, formatted[0x11]) } else { String::new() };
+    let (locator, bank_locator) = type17_locators(formatted, strings);
     let manufacturer = if formatted.len() > 0x17 { get_string(strings, formatted[0x17]) } else { String::new() };
     let serial_number = if formatted.len() > 0x18 { get_string(strings, formatted[0x18]) } else { String::new() };
     let part_number = if formatted.len() > 0x1A { get_string(strings, formatted[0x1A]) } else { String::new() };
@@ -661,6 +668,12 @@ fn parse_type17_memory(formatted: &[u8], strings: &[String], version: (u8, u8)) 
     })
 }
 
+/// A Type 17's Device Locator (0x10) and Bank Locator (0x11), each empty where the structure is too short to have it
+fn type17_locators(formatted: &[u8], strings: &[String]) -> (String, String) {
+    let string_at = |at: usize| formatted.get(at).map_or_else(String::new, |&index| get_string(strings, index));
+    (string_at(0x10), string_at(0x11))
+}
+
 /// A Type 17 speed (DSP0134 Table 75): the WORD at `word`, or past 65,534 MT/s (0xFFFF) the DWORD at `dword`, bit 31 reserved. 0 when
 /// unknown, including a field the structure is too short to have.
 fn speed_field(formatted: &[u8], word: usize, dword: usize) -> u32 {
@@ -673,68 +686,108 @@ fn speed_field(formatted: &[u8], word: usize, dword: usize) -> u32 {
     }
 }
 
-/// A configured speed as a data rate. Before SMBIOS 3.1 it was a clock in MHz, and some firmware of then writes the half-rate clock
-/// (an MSI X370 BIOS of 2017: 1200 for DDR4-2400, TODO 132's research): a value below the type's slowest JEDEC data rate is taken for
-/// one and doubled. From 3.1 it is MT/s as it reads.
-fn as_data_rate(configured: u32, memory_type: u8, version: (u8, u8)) -> u32 {
+/// A speed as a data rate. Before SMBIOS 3.1 both speeds were clocks in MHz, and some firmware of then writes the half-rate clock (an
+/// MSI X370 BIOS of 2017: 1200 for DDR4-2400, TODO 132's research; an MSI B350 TOMAHAWK ARCTIC on 2.8: 1067 for DDR4-2133). A value
+/// below the type's slowest JEDEC data rate can only be such a clock, and is doubled. The firmware rounds the clock (1067 for 1066.67
+/// MHz), so a double within 2 MT/s of a JEDEC grid rate is that rate (the rates are multiples of 200/3 MT/s, written truncated: 2133,
+/// 2666, 2933). A clock at or above the slowest rate (1600, DDR4-3200's) reads the same as a data rate (DDR4-1600) and is left as it
+/// reads: telling them apart would take a table of firmware. From 3.1 it is MT/s as it reads.
+fn as_data_rate(speed: u32, memory_type: u8, version: (u8, u8)) -> u32 {
     let slowest = match memory_type {
         0x18 => 800,         // DDR3
         0x1A | 0x1E => 1600, // DDR4, LPDDR4
         0x1D => 1066,        // LPDDR3
         _ => 0,
     };
-    if version < (3, 1) && configured > 0 && configured < slowest { configured * 2 } else { configured }
+    if version >= (3, 1) || speed == 0 || speed >= slowest {
+        return speed;
+    }
+    let doubled = speed * 2;
+    // The grid rate nearest it, as a multiple of 200/3: in thirds of a MT/s, within 6 is within 2 MT/s
+    let step = (doubled * 3 + 100) / 200;
+    if (doubled * 3).abs_diff(step * 200) <= 6 { step * 200 / 3 } else { doubled }
 }
 
 /// Each module's `slot`, the board's slot as a reader names it, `A-2`: the channel letter, then the slot in it from 1. From the board's
 /// strings where they say both, one scheme for the whole machine (TODO 132's research, about 250 boards' SMBIOS dumps):
-/// - a letter and a number at the end of the Device Locator, as the board prints its slots: `DIMMA2`, `DIMM_A1`, `DDR5-B2`,
-///   `Controller1-DIMMB2`, `A1` (newer MSI AM5 BIOSes, ASUS AM4, Gigabyte Z790, Supermicro, Dell servers);
+/// - a letter and a number at the end of the Device Locator, after `DIMM` or `DDRn`, as the board prints its slots: `DIMMA2`,
+///   `DIMM_A1`, `DDR5-B2`, `Controller1-DIMMB2`, `P1-DIMMA1` (newer MSI AM5 BIOSes, ASUS AM4, Gigabyte Z790's newer BIOSes,
+///   Supermicro). A board that counts them from 0 (EC2's m6a.metal `CPU0_DIMM_A0`, its c5.metal `DIMM_A0`) names a slot 0 in some
+///   socket, filled or not (`sockets`: every Type 17's Device and Bank Locator), and then its numbers take 1;
 /// - AMD's default: Device Locator `DIMM n`, the slot in its channel from 0, and Bank Locator `P0 CHANNEL X`: `X-(n + 1)` (most AM4 and
 ///   AM5 boards, AMD laptops; one MSI board seen under both its BIOS formats reads `DIMM 1`/`P0 CHANNEL A` on one and `DIMMA2` on the
 ///   other).
 ///
-/// Every other scheme (Intel's `Controller0-ChannelA-DIMM0`, counted from 0 or 1 by vendor; servers' `CPU0 Channel0 DIMM0`; Dell
-/// laptops' `Motherboard` on every channel) keeps the board's own names: the Device Locator where those differ, else with the Bank
-/// Locator before it, else numbered in the table's order. So do all of them when any module doesn't fit or two labels would match: a
-/// wrong slot is worse than the board's own words.
-fn assign_slots(modules: &mut [MemoryModule]) {
-    let slots: Option<Vec<String>> = modules.iter().map(|m| slot_label(&m.locator, &m.bank_locator)).collect();
-    let names = match slots.filter(|slots| all_differ(slots)) {
-        Some(slots) => slots,
-        None => board_names(modules),
-    };
+/// Every other scheme keeps the board's own names: Intel's `Controller0-ChannelA-DIMM0`, counted from 0 or 1 by vendor (Gigabyte
+/// Z790's older BIOSes print these, so its labels follow the BIOS); servers' `CPU0 Channel0 DIMM0`; Dell servers' bare `A1` to `A16`,
+/// the letter a CPU socket and the number across all its channels; Dell laptops' `Motherboard` on every channel. That is the Device
+/// Locator where those differ, else with the Bank Locator before it, else numbered in the table's order; a module SMBIOS names nothing
+/// (a VM's) keeps an empty slot, for the console and the window to name (`a module`, `DIMM 2`). So do all of them when any module
+/// doesn't fit, the machine mixes the two schemes, or two labels would match: a wrong slot is worse than the board's own words.
+fn assign_slots(modules: &mut [MemoryModule], sockets: &[(String, String)]) {
+    let from_zero = sockets
+        .iter()
+        .map(|(device, bank)| (device.as_str(), bank.as_str()))
+        .chain(modules.iter().map(|m| (m.locator.as_str(), m.bank_locator.as_str())))
+        .any(|(device, bank)| matches!(named_slot(device, bank), Some(Named::Printed(_, 0))));
+    let named: Option<Vec<Named>> = modules.iter().map(|m| named_slot(&m.locator, &m.bank_locator)).collect();
+    let slots = named
+        .filter(|named| named.windows(2).all(|pair| std::mem::discriminant(&pair[0]) == std::mem::discriminant(&pair[1])))
+        .map(|named| named.into_iter().map(|slot| slot.label(from_zero)).collect::<Vec<_>>())
+        .filter(|slots| all_differ(slots));
+    let names = slots.unwrap_or_else(|| board_names(modules));
     for (module, name) in modules.iter_mut().zip(names) {
         module.slot = name;
     }
 }
 
-/// The `A-2` label a module's two strings give, if they give one (`assign_slots`)
-fn slot_label(device: &str, bank: &str) -> Option<String> {
+/// A slot a module's strings name (`named_slot`): the channel letter, and the number as they give it
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Named {
+    /// A letter and a number the board prints, `DIMMA2`: counted from 1, or on some boards from 0
+    Printed(char, u32),
+    /// AMD's default, `DIMM n` with `P0 CHANNEL X`: counted from 0
+    AmdDefault(char, u32),
+}
+
+impl Named {
+    /// `A-2`, the slot counted from 1; `from_zero`, the machine prints its numbers from 0
+    fn label(self, from_zero: bool) -> String {
+        match self {
+            Named::Printed(letter, slot) => format!("{letter}-{}", slot + u32::from(from_zero)),
+            Named::AmdDefault(letter, slot) => format!("{letter}-{}", slot + 1),
+        }
+    }
+}
+
+/// The slot a module's two strings name, if they name one (`assign_slots`). Each number is 1 or 2 digits: no board has 100 slots, and a
+/// longer one from the firmware would overflow.
+fn named_slot(device: &str, bank: &str) -> Option<Named> {
     let device = device.trim().to_ascii_uppercase();
-    // A letter and a number the board prints: at the end, after `DIMM`, `DDRn` and an optional separator, or the whole string
+    // A letter and a number the board prints, at the end, after `DIMM` or `DDRn` and an optional separator
     let digits = device.len() - device.trim_end_matches(|c: char| c.is_ascii_digit()).len();
     if (1..=2).contains(&digits) {
         let head = &device[..device.len() - digits];
-        let number = &device[device.len() - digits..];
         if let Some(letter) = head.chars().last().filter(char::is_ascii_uppercase) {
             let before = head[..head.len() - 1].trim_end_matches(['_', '-', ' ']);
-            let named =
-                before.is_empty() || before.ends_with("DIMM") || before.strip_suffix(char::is_numeric).is_some_and(|b| b.ends_with("DDR"));
-            if named {
-                return Some(format!("{letter}-{}", number.parse::<u32>().ok()?));
+            if before.ends_with("DIMM") || before.strip_suffix(char::is_numeric).is_some_and(|b| b.ends_with("DDR")) {
+                return Some(Named::Printed(letter, device[device.len() - digits..].parse().ok()?));
             }
         }
     }
     // AMD's default: `DIMM n`, counted from 0 in the channel the Bank Locator names
-    let slot: u32 = device.strip_prefix("DIMM")?.trim().parse().ok()?;
+    let number = device.strip_prefix("DIMM")?.trim();
+    if !(1..=2).contains(&number.len()) || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     let bank = bank.trim().to_ascii_uppercase();
     let channel = bank.split_whitespace().skip_while(|word| *word != "CHANNEL").nth(1)?;
     let letter = channel.chars().next().filter(|c| c.is_ascii_uppercase() && channel.len() == 1)?;
-    Some(format!("{letter}-{}", slot + 1))
+    Some(Named::AmdDefault(letter, number.parse().ok()?))
 }
 
-/// The board's own names, made to differ: the Device Locator, else the Bank Locator with it, else either numbered in table order
+/// The board's own names, made to differ: the Device Locator, else the Bank Locator with it, else either numbered in table order. A
+/// module with neither keeps an empty name, which its reader names (`assign_slots`).
 fn board_names(modules: &[MemoryModule]) -> Vec<String> {
     let device: Vec<String> = modules.iter().map(|m| m.locator.trim().to_string()).collect();
     if device.iter().all(|d| !d.is_empty()) && all_differ(&device) {
@@ -744,10 +797,11 @@ fn board_names(modules: &[MemoryModule]) -> Vec<String> {
         .iter()
         .map(|m| [m.bank_locator.trim(), m.locator.trim()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" "))
         .collect();
-    if both.iter().all(|b| !b.is_empty()) && all_differ(&both) {
+    let named: Vec<String> = both.iter().filter(|name| !name.is_empty()).cloned().collect();
+    if all_differ(&named) {
         return both;
     }
-    both.iter().enumerate().map(|(i, name)| if name.is_empty() { format!("#{}", i + 1) } else { format!("{name} #{}", i + 1) }).collect()
+    both.iter().enumerate().map(|(i, name)| if name.is_empty() { String::new() } else { format!("{name} #{}", i + 1) }).collect()
 }
 
 fn all_differ(names: &[String]) -> bool {
@@ -756,11 +810,6 @@ fn all_differ(names: &[String]) -> bool {
 }
 
 impl MemoryModule {
-    /// The speed it runs at, else the maximum the firmware reports: what to show first
-    pub fn speed_mts(&self) -> u32 {
-        if self.configured_mts > 0 { self.configured_mts } else { self.max_mts }
-    }
-
     /// Its speed for a reader: `6000 MT/s`, the SMBIOS maximum after it where it differs, `6000 MT/s (SMBIOS max 4800)`; empty when
     /// neither is known
     pub fn speed_label(&self) -> String {
@@ -849,6 +898,14 @@ mod tests {
         assert_eq!(as_data_rate(1200, 0x1A, (3, 1)), 1200, "MT/s from 3.1");
         assert_eq!(as_data_rate(2400, 0x1A, (3, 0)), 2400, "a data rate already");
         assert_eq!(as_data_rate(3000, 0x22, (3, 0)), 3000, "no rule for a type without a pre-3.1 era");
+        // The firmware's rounded clock, its double taken to the JEDEC rate within 2 MT/s: an MSI B350 TOMAHAWK ARCTIC's 1067 for
+        // DDR4-2133 (not 2134, which read as above its SMBIOS max of 2133), DDR4-2933's 1466 or 1467, DDR3-1333's 667
+        let rates = [(1067, 0x1A, 2133), (1466, 0x1A, 2933), (1467, 0x1A, 2933), (1333, 0x1A, 2666), (933, 0x1A, 1866), (667, 0x18, 1333)];
+        for (clock, memory_type, rate) in rates {
+            assert_eq!(as_data_rate(clock, memory_type, (2, 8)), rate, "{clock} MHz");
+        }
+        assert_eq!(as_data_rate(1250, 0x1A, (3, 0)), 2500, "off the grid (a BCLK overclock): the double as it is");
+        assert_eq!(as_data_rate(1600, 0x1A, (3, 0)), 1600, "DDR4-3200's clock or DDR4-1600: left as it reads");
     }
 
     /// The current speed first, the SMBIOS maximum only where it differs
@@ -859,7 +916,6 @@ mod tests {
         assert_eq!(speeds(6000, 6000).speed_label(), "6000 MT/s");
         assert_eq!(speeds(0, 7200).speed_label(), "7200 MT/s", "an EC2 VM: no configured speed");
         assert_eq!(speeds(0, 0).speed_label(), "");
-        assert_eq!((speeds(6000, 4800).speed_mts(), speeds(0, 7200).speed_mts()), (6000, 7200));
     }
 
     /// TODO 132's labels, from real boards' strings (the research's dumps): the channel letter and the slot from 1, where the strings say
@@ -871,13 +927,12 @@ mod tests {
             ("DIMM 1", "P0 CHANNEL A", Some("A-2")),
             ("DIMM 0", "P0 CHANNEL B", Some("B-1")),
             ("DIMM 0", "P0 CHANNEL D", Some("D-1")),
-            // The slot as the board prints it: MSI AM5's newer BIOSes, ASUS AM4, Gigabyte Z790, MSI Z790, Supermicro, Dell servers
+            // The slot as the board prints it: MSI AM5's newer BIOSes, ASUS AM4, Gigabyte Z790, MSI Z790, Supermicro
             ("DIMMA2", "P0 CHANNEL A", Some("A-2")),
             ("DIMM_B1", "BANK 2", Some("B-1")),
             ("DDR5-B2", "BANK 0", Some("B-2")),
             ("Controller1-DIMMB2", "BANK 0", Some("B-2")),
             ("P1-DIMMA1", "P0_Node0_Channel0_Dimm0", Some("A-1")),
-            ("A16", "", Some("A-16")),
             // Schemes that don't say both, or count by vendor: the board's own names
             ("Controller0-ChannelA-DIMM0", "BANK 0", None),
             ("ChannelA-DIMM1", "BANK 1", None),
@@ -887,24 +942,39 @@ mod tests {
             ("Motherboard", "BANK 0", None),
             ("DIMM 1", "BANK 0", None),
             ("", "", None),
+            // Dell PowerEdge: the letter is a CPU socket and the number runs across its channels, so `A16` is no channel's slot 16
+            ("A16", "", None),
+            ("B12", "", None),
+            // A number past 2 digits, which no board prints, is no slot (and `DIMM 4294967295` would overflow its `+ 1`)
+            ("DIMM 4294967295", "P0 CHANNEL A", None),
+            ("DIMM 100", "P0 CHANNEL A", None),
+            ("DIMM_A100", "", None),
         ];
         for (device, bank, slot) in cases {
-            assert_eq!(slot_label(device, bank).as_deref(), slot, "{device:?} / {bank:?}");
+            assert_eq!(named_slot(device, bank).map(|named| named.label(false)).as_deref(), slot, "{device:?} / {bank:?}");
         }
+        // A board's printed 0 is kept for `assign_slots`, which then counts the whole machine from 1
+        assert_eq!(named_slot("CPU0_DIMM_A0", "P0 CHANNEL A"), Some(Named::Printed('A', 0)));
+        assert_eq!(Named::Printed('A', 0).label(true), "A-1");
+        assert_eq!(Named::AmdDefault('A', 0).label(true), "A-1", "AMD's default counts from 0 already");
+    }
+
+    /// `assign_slots` over modules' (Device Locator, Bank Locator) pairs, `empty` the sockets SMBIOS lists with no module in them
+    fn slots_of(pairs: &[(&str, &str)], empty: &[(&str, &str)]) -> Vec<String> {
+        let mut modules: Vec<MemoryModule> = pairs
+            .iter()
+            .map(|(device, bank)| MemoryModule { locator: device.to_string(), bank_locator: bank.to_string(), ..Default::default() })
+            .collect();
+        let sockets: Vec<(String, String)> = empty.iter().map(|(device, bank)| (device.to_string(), bank.to_string())).collect();
+        assign_slots(&mut modules, &sockets);
+        modules.into_iter().map(|m| m.slot).collect()
     }
 
     /// One scheme a machine: labels where every module has one and they differ, else the board's names, the Bank Locator with them
     /// where the Device Locators repeat, else numbered in table order
     #[test]
     fn every_module_gets_a_slot_of_its_own() {
-        let slots = |pairs: &[(&str, &str)]| {
-            let mut modules: Vec<MemoryModule> = pairs
-                .iter()
-                .map(|(device, bank)| MemoryModule { locator: device.to_string(), bank_locator: bank.to_string(), ..Default::default() })
-                .collect();
-            assign_slots(&mut modules);
-            modules.into_iter().map(|m| m.slot).collect::<Vec<_>>()
-        };
+        let slots = |pairs: &[(&str, &str)]| slots_of(pairs, &[]);
         // The forum reporter's ASUS board, and the ASRock B650M: "DIMM 1" twice
         assert_eq!(slots(&[("DIMM 1", "P0 CHANNEL A"), ("DIMM 1", "P0 CHANNEL B")]), ["A-2", "B-2"]);
         assert_eq!(
@@ -917,9 +987,126 @@ mod tests {
         ]);
         // A module that doesn't fit puts the whole machine on the board's names
         assert_eq!(slots(&[("DIMM 1", "P0 CHANNEL A"), ("DIMM 1", "BANK 1")]), ["P0 CHANNEL A DIMM 1", "BANK 1 DIMM 1"]);
+        // So does a machine that mixes the two schemes, whose numbers count from different places
+        assert_eq!(slots(&[("DIMMA2", "P0 CHANNEL A"), ("DIMM 0", "P0 CHANNEL B")]), ["DIMMA2", "DIMM 0"]);
         // Dell laptops: every channel "Motherboard", the bank repeated
         assert_eq!(slots(&[("Motherboard", "BANK 0"), ("Motherboard", "BANK 0")]), ["BANK 0 Motherboard #1", "BANK 0 Motherboard #2"]);
-        assert_eq!(slots(&[("", ""), ("", "")]), ["#1", "#2"], "a VM's empty strings");
+        // Dell PowerEdge: its silkscreen names, kept
+        assert_eq!(slots(&[("A1", ""), ("A12", ""), ("B1", "")]), ["A1", "A12", "B1"]);
+        // A VM's empty strings: no slot, which the console and the window name (`a module`, `DIMM 2`)
+        assert_eq!(slots(&[("", "")]), [""]);
+        assert_eq!(slots(&[("", ""), ("", "")]), ["", ""]);
+        assert_eq!(slots(&[("", ""), ("Motherboard", ""), ("Motherboard", "")]), ["", "Motherboard #2", "Motherboard #3"]);
+    }
+
+    /// A board that prints its slots from 0 says so in some socket, filled or not, and the machine's labels count from 1, as AMD's
+    /// default's do: EC2 m6a.metal (`CPU0_DIMM_A0`, `P0 CHANNEL A`) and c5.metal (`DIMM_A0`, `NODE 1`), which gave `A-0` labels
+    #[test]
+    fn a_board_counting_from_0_counts_from_1() {
+        let m6a = [("CPU0_DIMM_A0", "P0 CHANNEL A"), ("CPU0_DIMM_A1", "P0 CHANNEL A"), ("CPU1_DIMM_Q1", "P1 CHANNEL Q")];
+        assert_eq!(slots_of(&m6a, &[]), ["A-1", "A-2", "Q-2"]);
+        let c5 = [("DIMM_A0", "NODE 1"), ("DIMM_M0", "NODE 2")];
+        assert_eq!(slots_of(&c5, &[("DIMM_A1", "NODE 1"), ("DIMM_M1", "NODE 2")]), ["A-1", "M-1"]);
+        // Only its second slots filled: the empty first ones say where it counts from
+        assert_eq!(slots_of(&[("DIMM_A1", "NODE 1"), ("DIMM_B1", "NODE 1")], &[("DIMM_A0", "NODE 1"), ("DIMM_B0", "NODE 1")]), [
+            "A-2", "B-2"
+        ]);
+        // A board that counts from 1 names no 0, empty sockets and all
+        assert_eq!(slots_of(&[("DIMMA2", ""), ("DIMMB2", "")], &[("DIMMA1", ""), ("DIMMB1", "")]), ["A-2", "B-2"]);
+    }
+
+    /// A Type 17 structure as the firmware lays it out: `len` formatted bytes, `fields` written at their offsets, then its strings
+    fn structure17(len: u8, fields: &[(usize, &[u8])], strings: &[&str]) -> Vec<u8> {
+        let mut s = vec![0u8; len as usize];
+        s[0] = 17;
+        s[1] = len;
+        for (at, bytes) in fields {
+            s[*at..*at + bytes.len()].copy_from_slice(bytes);
+        }
+        for string in strings {
+            s.extend_from_slice(string.as_bytes());
+            s.push(0);
+        }
+        s.push(0);
+        if strings.is_empty() {
+            s.push(0);
+        }
+        s
+    }
+
+    /// `GetSystemFirmwareTable(RSMB)`'s data: the `RawSMBIOSData` header with its SMBIOS version, the structures, the end marker
+    fn firmware_table(version: (u8, u8), structures: &[Vec<u8>]) -> Vec<u8> {
+        let mut table: Vec<u8> = structures.concat();
+        table.extend_from_slice(&[127, 4, 0, 0, 0, 0]);
+        let mut raw = vec![0, version.0, version.1, 0];
+        raw.extend_from_slice(&(table.len() as u32).to_le_bytes());
+        raw.extend_from_slice(&table);
+        raw
+    }
+
+    /// An SMBIOS 2.8-sized (0x28-byte) DDR4 module: 8 GiB, its Device and Bank Locator, Speed (0x15) and Configured Memory Speed (0x20)
+    fn ddr4_module(device: &str, bank: &str, speed: u16, configured: u16) -> Vec<u8> {
+        let size: u16 = 8192;
+        let fields: [(usize, &[u8]); 9] = [
+            (0x0C, &size.to_le_bytes()),
+            (0x10, &[1]),
+            (0x11, &[2]),
+            (0x12, &[0x1A]),
+            (0x15, &speed.to_le_bytes()),
+            (0x17, &[3]),
+            (0x18, &[4]),
+            (0x1A, &[5]),
+            (0x20, &configured.to_le_bytes()),
+        ];
+        structure17(0x28, &fields, &[device, bank, "Kingston", "1234ABCD", "KHX2133C14/8G"])
+    }
+
+    /// The fingerprint as builds before 5c4bdfa hashed it, their `speed_mts` the SMBIOS Speed now in `max_mts`
+    fn fingerprint_before_5c4bdfa(data: &SmbiosData) -> String {
+        let mut hasher = DefaultHasher::new();
+        data.memory_modules.len().hash(&mut hasher);
+        for module in &data.memory_modules {
+            module.manufacturer.hash(&mut hasher);
+            module.serial_number.hash(&mut hasher);
+            module.part_number.hash(&mut hasher);
+            module.max_mts.hash(&mut hasher);
+            module.capacity_bytes.hash(&mut hasher);
+        }
+        format!("{:016x}", hasher.finish())
+    }
+
+    /// The whole read, through `parse_smbios`: the SMBIOS version from the firmware table's header reaching the speeds, the Bank Locator
+    /// from 0x11, an empty socket's name reaching the slots, and the fingerprint. An MSI B350 TOMAHAWK ARCTIC's module (SMBIOS 2.8, a
+    /// 0x28-byte Type 17, DDR4-2133: Speed 2133, Configured Memory Speed its 1067 MHz clock), which read as `2134 MT/s (SMBIOS max 2133)`
+    #[test]
+    fn a_firmware_table_reads_to_modules() {
+        let empty = structure17(0x28, &[(0x10, &[1]), (0x11, &[2])], &["DIMM 1", "P0 CHANNEL A"]);
+        let modules = [ddr4_module("DIMM 0", "P0 CHANNEL A", 2133, 1067), empty, ddr4_module("DIMM 0", "P0 CHANNEL B", 2133, 1067)];
+        let data = parse_smbios(&firmware_table((2, 8), &modules));
+        assert_eq!(data.memory_modules.len(), 2, "the empty socket is no module");
+        let m = &data.memory_modules[0];
+        assert_eq!((m.locator.as_str(), m.bank_locator.as_str(), m.slot.as_str()), ("DIMM 0", "P0 CHANNEL A", "A-1"));
+        assert_eq!((m.configured_mts, m.max_mts, m.speed_label().as_str()), (2133, 2133, "2133 MT/s"));
+        assert_eq!((m.memory_type, m.capacity_bytes, m.serial_number.as_str()), (0x1A, 8 << 30, "1234ABCD"));
+        assert_eq!(data.memory_modules[1].slot, "B-1");
+        // The same structure under 3.1: MT/s as it reads
+        let v31 = parse_smbios(&firmware_table((3, 1), &modules));
+        assert_eq!((v31.memory_modules[0].configured_mts, v31.memory_modules[0].max_mts), (1067, 2133));
+
+        // A board printing its slots from 0, its slot 0 empty: the empty socket's name counts the filled one from 1
+        let empty = structure17(0x28, &[(0x10, &[1]), (0x11, &[2])], &["DIMM_A0", "NODE 1"]);
+        let from_zero = parse_smbios(&firmware_table((3, 1), &[empty, ddr4_module("DIMM_A1", "NODE 1", 3200, 3200)]));
+        assert_eq!(from_zero.memory_modules[0].slot, "A-2");
+
+        // The fingerprint: a configured speed that is the maximum (or unknown) hashes as earlier builds did, so an unchanged machine
+        // keeps its `memory_id`; one apart from it is in the hash, so an XMP/EXPO change moves it
+        assert_eq!(data.memory_fingerprint(), fingerprint_before_5c4bdfa(&data));
+        let unknown = parse_smbios(&firmware_table((3, 1), &[ddr4_module("DIMM 0", "P0 CHANNEL A", 2133, 0)]));
+        assert_eq!(unknown.memory_fingerprint(), fingerprint_before_5c4bdfa(&unknown));
+        let xmp = |configured| parse_smbios(&firmware_table((3, 1), &[ddr4_module("DIMM 0", "P0 CHANNEL A", 2133, configured)]));
+        assert_ne!(xmp(3200).memory_fingerprint(), fingerprint_before_5c4bdfa(&xmp(3200)));
+        assert_ne!(xmp(3200).memory_fingerprint(), xmp(3600).memory_fingerprint());
+        assert_eq!(xmp(3200).memory_fingerprint(), xmp(3200).memory_fingerprint());
     }
 
     #[test]
@@ -933,7 +1120,8 @@ mod tests {
         println!("Memory modules: {}", data.memory_modules.len());
         for m in &data.memory_modules {
             println!(
-                "  {} {} {} {} {}MT/s {:.1}GB",
+                "  {} ({}) {} {} {} {} {:.1}GB",
+                m.slot,
                 m.locator,
                 m.manufacturer,
                 m.serial_number,

@@ -849,6 +849,17 @@ fn differs_materially(baseline: f64, current: f64) -> bool {
     ((current - baseline).abs() / reference) * 100.0 > SIZE_TOLERANCE_PERCENT
 }
 
+/// The modules' speeds as `compare_identity` shows them: each one's `speed_label`, neighbours that read the same once, `not recorded`
+/// where none has one
+fn module_speeds(modules: &[MemoryModule]) -> String {
+    let mut speeds: Vec<String> = modules.iter().map(MemoryModule::speed_label).collect();
+    speeds.dedup();
+    if speeds.iter().all(String::is_empty) {
+        return "not recorded".to_string();
+    }
+    speeds.iter().map(|speed| if speed.is_empty() { "unknown" } else { speed }).collect::<Vec<_>>().join(", ")
+}
+
 /// Compare the identity of two runs.
 ///
 /// Hardware differences are reported as *invalidating*: if the CPU, RAM, or cache geometry changed then a throughput delta says nothing
@@ -896,6 +907,12 @@ pub fn compare_identity(baseline: &RunIdentity, current: &RunIdentity) -> Vec<Ru
                 format!("{:.1} GiB", current.memory_reported_gib),
                 true,
             ));
+        }
+        // The speeds the fingerprint covers, where they moved: an XMP/EXPO change. A result from before TMR read the configured
+        // speed (5c4bdfa) records none
+        let (was, now) = (module_speeds(&baseline.memory_modules), module_speeds(&current.memory_modules));
+        if was != now {
+            diffs.push(RunDifference::new("  Module speeds", was, now, true));
         }
         if !baseline.memory_identity_is_physical || !current.memory_identity_is_physical {
             diffs.push(RunDifference::new(
@@ -1366,6 +1383,34 @@ mod tests {
         let diffs = compare_identity(&base, &ram_swapped);
         assert!(diffs.iter().any(|d| d.field.starts_with("Memory fingerprint") && d.invalidates));
         assert!(!diffs.iter().any(|d| d.field.starts_with("Machine ID")));
+    }
+
+    /// The fingerprint covers the configured speed (5c4bdfa), so an XMP/EXPO change moves it: the comparison says what moved, and of a
+    /// result from before then, that it records no speed
+    #[test]
+    fn a_memory_speed_change_says_what_moved() {
+        let with = |memory: &str, speeds: &[(u32, u32)]| RunIdentity {
+            memory_modules: speeds
+                .iter()
+                .map(|&(configured_mts, max_mts)| MemoryModule { configured_mts, max_mts, ..Default::default() })
+                .collect(),
+            ..identity("abc", memory)
+        };
+        let moved = |baseline: &RunIdentity, current: &RunIdentity| {
+            compare_identity(baseline, current)
+                .into_iter()
+                .filter(|d| d.field == "  Module speeds")
+                .map(|d| (d.baseline, d.current, d.invalidates))
+                .collect::<Vec<_>>()
+        };
+        let expo = with("def", &[(6000, 4800), (6000, 4800)]);
+        let retuned = with("xyz", &[(6200, 4800), (6200, 4800)]);
+        assert_eq!(moved(&expo, &retuned), [("6000 MT/s (SMBIOS max 4800)".into(), "6200 MT/s (SMBIOS max 4800)".into(), true)]);
+        let before = with("old", &[(0, 0), (0, 0)]);
+        assert_eq!(moved(&before, &expo), [("not recorded".into(), "6000 MT/s (SMBIOS max 4800)".into(), true)]);
+        let swapped = with("xyz", &[(6000, 4800), (0, 4800)]);
+        assert_eq!(moved(&expo, &swapped)[0].1, "6000 MT/s (SMBIOS max 4800), 4800 MT/s");
+        assert!(moved(&expo, &with("xyz", &[(6000, 4800), (6000, 4800)])).is_empty(), "a fingerprint moved by something else");
     }
 
     #[test]
