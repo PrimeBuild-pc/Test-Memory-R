@@ -23,6 +23,7 @@ use crate::dialogs::{self, Open};
 use crate::logger::{self, LogLine, LogLines};
 use crate::model::{Bar, DialogButton, Model, Opened, Slot, Status, StepRow};
 use crate::palette::{Palette, Palettes, brush};
+use crate::placement::{self, Placement};
 use crate::report::{Block, Report};
 use crate::settings::{Settings, Theme};
 use crate::{Feed, GuiFrontend, chart};
@@ -144,7 +145,7 @@ pub(crate) struct Window {
     about: bool,
     /// The Settings dialog is open
     settings_open: bool,
-    /// `window.json`'s (TODO 109): the chart shown or hidden, the theme, the parameters, the size
+    /// `window.json`'s (TODO 109): the chart shown or hidden, the theme, the parameters, the size and where the window is
     settings: Settings,
     dark: bool,
     width: f64,
@@ -385,8 +386,16 @@ impl Window {
 
     /// Writes `window.json`, or says in the errors list why it couldn't
     fn save_settings(&mut self) {
+        self.keep_placement();
         if let Err(e) = self.settings.save() {
             self.model.errors.push(format!("window.json: {e}"));
+        }
+    }
+
+    /// Where the window is now, as `placement.rs` followed it, into the settings, for a save; not followed, they keep what they had
+    fn keep_placement(&mut self) {
+        if let Some(placement) = placement::last() {
+            (self.settings.position, self.settings.maximized) = (Some(placement.position), placement.maximized);
         }
     }
 
@@ -439,9 +448,10 @@ const MENU_CALIBRATE: &str = "Calibrate the caches and the seal";
 const MENU_SETTINGS: &str = "Settings";
 const MENU_ABOUT: &str = "About TMR";
 
-/// The window's size, as it closes, into `window.json` (TODO 109): Run again's window opens as this one was
+/// The window's size and place, as it closes, into `window.json` (TODO 109): the next window opens as this one was
 impl Drop for Window {
     fn drop(&mut self) {
+        self.keep_placement();
         let _ = self.settings.save();
     }
 }
@@ -611,10 +621,15 @@ impl Component for Window {
                     Theme::Dark => true,
                 }
             }
-            // Saved as the window closes (`Drop`)
+            // Saved as the window closes (`Drop`): maximized or minimized, the size it had before, which it restores to and opens at
             Message::Size(size) => {
                 self.width = size.width;
-                self.settings.size = Some((size.width, size.height));
+                // The first: the window is there now, so it goes where it last closed, and is followed from then on (`placement.rs`)
+                let (position, maximized) = (self.settings.position, self.settings.maximized);
+                placement::attach(position.map(|position| Placement { position, maximized }));
+                if placement::restored() {
+                    self.settings.size = Some((size.width, size.height));
+                }
             }
         }
     }

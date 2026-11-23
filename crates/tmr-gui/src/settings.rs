@@ -9,13 +9,16 @@
 //! | `serials`       | the DIMMs' serials and the system's UUID in the run's output, log and results   | `true`    |
 //! | `parameters`    | the parameters box's text when tmr.exe is given none: the last run's           | none      |
 //! | `size`          | the window's size, `[width, height]`, as it last closed                         | 860 × 960 |
+//! | `position`      | its frame's top-left, `[x, y]` in screen pixels, as it last closed             | Windows'  |
+//! | `maximized`     | it closed maximized and opens so, restoring to `size` and `position`           | `false`   |
 //! | `colours`       | the palette over its defaults, a `"dark"` and a `"light"` object (`palette.rs`) | none      |
 //!
-//! The window writes `chart` as it changes, `parameters` at Start, `size` as it closes, and its Settings dialog's (`start_on_open`,
-//! `serials`, `theme`) as they change, keeping the rest of the file (the colours, any
-//! notes) as it was. Keys starting with `_` are notes. A missing file is the defaults; a bad key or value goes in the errors list and keeps
-//! its default; a file that isn't JSON says so, and the window doesn't write over it. `crates/tmr-gui/window.example.json` has every key
-//! at its default, a test keeping it so: copy it into TMR's folder as `window.json` and edit it.
+//! `position` and `maximized` are put back only onto the screens there now: mostly off them, the window opens where Windows puts it
+//! (`placement.rs`). The window writes `chart` as it changes, `parameters` at Start, `size`, `position` and `maximized` as it closes (and
+//! with any other save), and its Settings dialog's (`start_on_open`, `serials`, `theme`) as they change, keeping the rest of the file (the
+//! colours, any notes) as it was. Keys starting with `_` are notes. A missing file is the defaults; a bad key or value goes in the errors
+//! list and keeps its default; a file that isn't JSON says so, and the window doesn't write over it. `crates/tmr-gui/window.example.json`
+//! has every key at its default, a test keeping it so: copy it into TMR's folder as `window.json` and edit it.
 
 use std::path::PathBuf;
 
@@ -61,6 +64,9 @@ pub struct Settings {
     pub serials: bool,
     pub parameters: Option<String>,
     pub size: Option<(f64, f64)>,
+    /// Its frame's top-left in screen pixels, and whether it was maximized, as it last closed (`placement.rs`)
+    pub position: Option<(i32, i32)>,
+    pub maximized: bool,
     /// The file as it was read, so a save keeps what the window doesn't own: the colours, notes
     file: Map<String, Value>,
     /// The file isn't JSON: the window doesn't write over it
@@ -76,6 +82,8 @@ impl Default for Settings {
             serials: true,
             parameters: None,
             size: None,
+            position: None,
+            maximized: false,
             file: Map::new(),
             unreadable: false,
         }
@@ -85,6 +93,11 @@ impl Default for Settings {
 /// `window.json`, in TMR's home
 fn path() -> PathBuf {
     tmr::home::dir().join("window.json")
+}
+
+/// A screen coordinate: a whole number of pixels that fits Win32's
+fn pixel(value: &Value) -> Option<i32> {
+    value.as_i64().and_then(|value| i32::try_from(value).ok())
 }
 
 impl Settings {
@@ -147,6 +160,15 @@ impl Settings {
                     Some([Some(width), Some(height)]) if *width > 0.0 && *height > 0.0 => settings.size = Some((*width, *height)),
                     _ => problems.push(wrong("[width, height]")),
                 },
+                // Whole pixels, either side of the primary screen's top-left
+                "position" => match value.as_array().map(|at| at.iter().map(pixel).collect::<Vec<_>>()).as_deref() {
+                    Some([Some(x), Some(y)]) => settings.position = Some((*x, *y)),
+                    _ => problems.push(wrong("[x, y], in whole pixels")),
+                },
+                "maximized" => match value.as_bool() {
+                    Some(maximized) => settings.maximized = maximized,
+                    None => problems.push(wrong("true or false")),
+                },
                 "colours" => palettes = Palettes::parse(value, problems),
                 key => problems.push(format!("{key} is not a setting")),
             }
@@ -165,6 +187,10 @@ impl Settings {
         if let Some((width, height)) = self.size {
             file.insert("size".to_string(), serde_json::json!([width.round(), height.round()]));
         }
+        if let Some((x, y)) = self.position {
+            file.insert("position".to_string(), serde_json::json!([x, y]));
+        }
+        file.insert("maximized".to_string(), Value::Bool(self.maximized));
         let mut text = serde_json::to_string_pretty(&Value::Object(file)).unwrap_or_default();
         text.push('\n');
         text
@@ -195,9 +221,11 @@ mod tests {
              \"serials: the DIMMs' serials and the system's UUID in the run's output, log and results; false runs with --no-serials.\",\n    \
              \"parameters: the parameters box's text when tmr.exe is given none; the window keeps the last run's.\",\n    \
              \"size: [width, height], as it last closed.\",\n    \
+             \"position: [x, y], its top-left in screen pixels, as it last closed; off the screens now, Windows places it.\",\n    \
+             \"maximized: it closed maximized, and opens so; size and position are what it restores to.\",\n    \
              \"colours: #RRGGBB or #AARRGGBB (alpha first). Leave a key out to keep its default.\"\n  ],\n  \
              \"chart\": true,\n  \"theme\": \"system\",\n  \"start_on_open\": false,\n  \"serials\": true,\n  \"parameters\": null,\n  \
-             \"colours\": {colours}\n}}\n"
+             \"maximized\": false,\n  \"colours\": {colours}\n}}\n"
         )
     }
 
@@ -220,6 +248,7 @@ mod tests {
         let mut problems = Vec::new();
         let (settings, palettes) = Settings::parse(&text, &mut problems);
         assert_eq!((settings.chart, settings.theme, settings.start_on_open, settings.parameters), (true, Theme::System, false, None));
+        assert_eq!((settings.position, settings.maximized), (None, false));
         assert_eq!((palettes.dark, palettes.light, problems.len()), (Palettes::DEFAULT.dark, Palettes::DEFAULT.light, 0), "{problems:?}");
     }
 
@@ -246,5 +275,35 @@ mod tests {
         let mut problems = Vec::new();
         let (broken, _) = Settings::parse("{", &mut problems);
         assert!(broken.unreadable && problems.len() == 1 && broken.save().is_ok(), "{problems:?}");
+    }
+
+    /// Where the window closed: its position in whole pixels, either side of the primary screen's top-left, and maximized or not; a bad
+    /// one keeps the default, Windows' place, and a save writes both, the position only once there is one
+    #[test]
+    fn where_the_window_closed_read_and_written() {
+        let mut problems = Vec::new();
+        let (mut settings, _) = Settings::parse(r#"{"position": [-1500, 40], "maximized": true, "chart": false}"#, &mut problems);
+        assert_eq!((settings.position, settings.maximized, problems.len()), (Some((-1500, 40)), true, 0), "{problems:?}");
+        settings.position = Some((2600, -8));
+        let saved: Value = serde_json::from_str(&settings.text()).expect("JSON");
+        assert_eq!(
+            (&saved["position"], &saved["maximized"], &saved["chart"]),
+            (&serde_json::json!([2600, -8]), &Value::from(true), &Value::from(false))
+        );
+
+        for bad in
+            [r#"{"position": [10.5, 20]}"#, r#"{"position": [10]}"#, r#"{"position": [1, 2, 3]}"#, r#"{"position": [4294967296, 0]}"#]
+        {
+            let mut problems = Vec::new();
+            let (settings, _) = Settings::parse(bad, &mut problems);
+            assert_eq!(settings.position, None, "{bad}");
+            assert!(problems.len() == 1 && problems[0].ends_with("is not [x, y], in whole pixels"), "{bad}: {problems:?}");
+        }
+        let mut problems = Vec::new();
+        let (settings, _) = Settings::parse(r#"{"maximized": "yes"}"#, &mut problems);
+        assert_eq!((settings.maximized, &problems[..]), (false, &["maximized = \"yes\" is not true or false".to_string()][..]));
+
+        let saved: Value = serde_json::from_str(&Settings::default().text()).expect("JSON");
+        assert_eq!((saved.get("position"), &saved["maximized"]), (None, &Value::from(false)));
     }
 }

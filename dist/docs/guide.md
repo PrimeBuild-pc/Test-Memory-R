@@ -121,11 +121,12 @@ The Memory report's 4 KB column says which kind a run took.
   starts; Compare compares two runs' results files. The window keeps its settings in
   `window.json` beside tmr.exe: the chart shown or hidden, the theme, whether a run starts as it
   opens (`tmr --gui --start` does that once), whether serial numbers are kept, the last run's
-  parameters, its size and colours. Settings, in its `•••` menu, sets the theme, starting on open
-  and the serial numbers. The line above the box, the header's last, says before a run what
-  cache calibration it finds; the first run on a machine measures one before its tests (about 2
-  minutes), or Calibrate the caches and the seal, in the same menu, measures it now, with the
-  seal's fastest width.
+  parameters, its colours, and its size and place on the screen as it closed, maximized or not
+  (it opens there again only if that is still on a screen). Settings, in its `•••` menu, sets the
+  theme, starting on open and the serial numbers. The line above the box, the header's last, says
+  before a run what cache calibration it finds; the first run on a machine measures one before its
+  tests (about 2 minutes), or Calibrate the caches and the seal, in the same menu, measures it
+  now, with the seal's fastest width.
 - **From a console**, type `tmr plan=stability` for the stability plan, 3 cycles of it: any
   setting starts a run, and `tmr` alone lists every setting and starts nothing. Press Ctrl+C to
   stop a run sooner, and it stops at its next checkpoint and writes its report. In the classic

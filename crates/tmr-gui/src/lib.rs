@@ -25,6 +25,7 @@ mod dialogs;
 mod logger;
 mod model;
 mod palette;
+mod placement;
 mod report;
 mod sections;
 mod settings;

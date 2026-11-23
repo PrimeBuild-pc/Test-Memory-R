@@ -7,6 +7,8 @@
     "serials: the DIMMs' serials and the system's UUID in the run's output, log and results; false runs with --no-serials.",
     "parameters: the parameters box's text when tmr.exe is given none; the window keeps the last run's.",
     "size: [width, height], as it last closed.",
+    "position: [x, y], its top-left in screen pixels, as it last closed; off the screens now, Windows places it.",
+    "maximized: it closed maximized, and opens so; size and position are what it restores to.",
     "colours: #RRGGBB or #AARRGGBB (alpha first). Leave a key out to keep its default."
   ],
   "chart": true,
@@ -14,6 +16,7 @@
   "start_on_open": false,
   "serials": true,
   "parameters": null,
+  "maximized": false,
   "colours": {
     "_note": "egui's grey text instead of WinUI's white: dark.text_primary #8C8C8C, light.text_primary #505050.",
     "_keys": {
