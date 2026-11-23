@@ -236,6 +236,14 @@ fn needs_administrator(
     }
 }
 
+/// Consent to test under the administrator token. Only an explicit affirmative answer counts.
+pub fn admin_run(input: &mut dyn BufRead, out: &mut dyn Write, home: &std::path::Path, flush: &dyn Fn()) -> bool {
+    if write!(out, "Run memory tests as Administrator using {}? [y/N] ", home.display()).and_then(|()| out.flush()).is_err() {
+        return false;
+    }
+    matches!(answer(input, flush).as_str(), "Y" | "YES")
+}
+
 /// Asks `question` [Y/n]: yes for Enter, y or yes; no for anything else. When no answer can come (the input ended, or can't be read: a run
 /// with no console to answer from, over WinRM), the default, yes, as the [Y/n] says: the one question is a calibration's save, whose
 /// command was the request to calibrate. `--no-save` is how such a run keeps what is stored.
@@ -255,6 +263,15 @@ pub fn confirm(input: &mut dyn BufRead, out: &mut dyn Write, question: &str) -> 
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+
+    #[test]
+    fn elevated_prompt_requires_an_explicit_yes() {
+        for (answer, allowed) in [("", false), ("\n", false), ("no\n", false), ("yesterday\n", false), ("Y\n", true), (" Yes \r\n", true)] {
+            let mut out = Vec::new();
+            assert_eq!(super::admin_run(&mut answer.as_bytes(), &mut out, std::path::Path::new("protected"), &|| {}), allowed);
+            assert!(String::from_utf8(out).unwrap().ends_with("using protected? [y/N] "));
+        }
+    }
 
     use tmr::frontend::{Reach, Sid};
 

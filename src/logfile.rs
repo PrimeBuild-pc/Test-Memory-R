@@ -123,7 +123,8 @@ pub fn is_open() -> bool {
 pub fn wanted(args: &[String]) -> bool {
     use crate::commands::Command;
     // Without the mode flags, as the session parses it (`session::MODE_FLAGS`): `tmr --quick-test --help` is `--help`
-    let args: Vec<String> = args.iter().filter(|a| !crate::session::MODE_FLAGS.contains(&a.as_str())).cloned().collect();
+    let args: Vec<String> =
+        args.iter().filter(|a| a.as_str() != "--allow-admin" && !crate::session::MODE_FLAGS.contains(&a.as_str())).cloned().collect();
     matches!(Command::parse(&args), None | Some(Command::SetupLargePages(_) | Command::RemoveLargePages(_) | Command::Calibrate(_)))
         // record=off on the command line (TODO 105): no log file at all; a config's is the session's (`discard`)
         && !args.iter().any(|a| a.trim().eq_ignore_ascii_case("record=off"))

@@ -76,7 +76,7 @@ jobs:
       run: python tools/build_release.py --locked
 
     # What the installer installs (dist/tmr.iss): tmr.exe; docs\, the guide, the licences and the third-party notices; configs\, its
-    # README and the two demo configs, which tmr.exe writes into the home TMR_HOME names (the runner's CPU passes its startup check)
+    # README and the two demo configs. An elevated runner uses TMR's protected home.
     - name: 📂 Stage the installer's files
       shell: pwsh
       run: |
@@ -92,7 +92,13 @@ jobs:
         $env:TMR_HOME = (Resolve-Path $stage).Path
         & "$stage\tmr.exe" --cli --create-demo-configs
         if ($LASTEXITCODE -ne 0) { throw "tmr.exe --create-demo-configs failed" }
-        Remove-Item "$stage\results", "$stage\logs" -Recurse -ErrorAction SilentlyContinue
+        $admin = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+        if ($admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+          $source = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'TMR Admin\configs'
+          foreach ($name in 'demo_comprehensive_test.json', 'demo_tm5_compatible.json') {
+            Copy-Item -LiteralPath (Join-Path $source $name) -Destination "$stage\configs"
+          }
+        }
         Get-ChildItem $stage -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
 
     # Inno Setup 7.1, for its 64-bit setup (SetupArchitecture=x64). The runners and Chocolatey have only 6.7, so its own release, pinned

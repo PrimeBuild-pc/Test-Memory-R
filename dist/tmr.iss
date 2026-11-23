@@ -61,23 +61,22 @@ Name: "addtopath"; Description: "Put tmr on the PATH, to run it from a console"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Dirs]
-Name: "{app}\configs"; Permissions: users-modify; Flags: uninsneveruninstall
-Name: "{app}\results"; Permissions: users-modify; Flags: uninsneveruninstall
-Name: "{app}\logs"; Permissions: users-modify; Flags: uninsneveruninstall
-; Before [Files]: an upgrade from a version that kept tmr-cfg.json and window.json beside tmr.exe moves them in first (MoveOldSettings)
-Name: "{app}\settings"; Permissions: users-modify; Flags: uninsneveruninstall; AfterInstall: MoveOldSettings
+Name: "{app}\configs"; Permissions: users-modify; Flags: uninsneveruninstall; Check: NewSharedDir('configs')
+Name: "{app}\configs"; Flags: uninsneveruninstall; Check: not IsAdminInstallMode
+Name: "{app}\results"; Permissions: users-modify; Flags: uninsneveruninstall; Check: NewSharedDir('results')
+Name: "{app}\results"; Flags: uninsneveruninstall; Check: not IsAdminInstallMode
+Name: "{app}\logs"; Permissions: users-modify; Flags: uninsneveruninstall; Check: NewSharedDir('logs')
+Name: "{app}\logs"; Flags: uninsneveruninstall; Check: not IsAdminInstallMode
+Name: "{app}\settings"; Permissions: users-modify; Flags: uninsneveruninstall; Check: NewSharedDir('settings')
+Name: "{app}\settings"; Flags: uninsneveruninstall; Check: not IsAdminInstallMode
 
 [Files]
 Source: "{#Stage}\tmr.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\tmr.build.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs
-Source: "{#Stage}\configs\*"; DestDir: "{app}\configs"; Flags: onlyifdoesntexist uninsneveruninstall
-; The calibrations save into it (src/app_config.rs): an empty one, which TMR reads as no settings, writable by users as settings\ is.
-; Not while one is still beside tmr.exe, not moved (MoveOldSettings): TMR, run unelevated, takes that one into settings\, as the move
-; would have, when settings\ has had none
-Source: "tmr-cfg.json"; DestDir: "{app}\settings"; Flags: onlyifdoesntexist uninsneveruninstall; Check: NoOldSetting('tmr-cfg.json')
-; The window's settings save into it as well (crates/tmr-gui/src/settings.rs): an empty one, which is its defaults
-Source: "window.json"; DestDir: "{app}\settings"; Flags: onlyifdoesntexist uninsneveruninstall; Check: NoOldSetting('window.json')
+; Ship the examples separately. An elevated upgrade must not write through an ordinary user's configs directory.
+Source: "{#Stage}\configs\*"; DestDir: "{app}\examples"; Flags: ignoreversion
+; Settings are created on first use. The ordinary launch imports earlier settings with the user's permissions.
 
 [Icons]
 ; A double-click opens TMR's window (crates/tmr-app/src/launch.rs)
@@ -90,13 +89,19 @@ Name: "{autodesktop}\TMR"; Filename: "{app}\tmr.exe"; WorkingDir: "{app}"; Tasks
 Filename: "{app}\tmr.exe"; Description: "Open TMR"; Flags: nowait postinstall skipifsilent unchecked runasoriginaluser
 
 [Messages]
-FinishedLabel=TMR is installed. It keeps its configs, results, logs and settings in its folder, beside tmr.exe.%n%nIts window needs the Windows App Runtime 2.4 or later, which TMR offers to download when it is missing; its console runs without it.
+FinishedLabel=TMR is installed. Ordinary runs keep their files beside tmr.exe. Administrator runs use a separate protected folder.%n%nIts window needs the Windows App Runtime 2.4 or later, which TMR offers to download when it is missing; its console runs without it.
 
 [Code]
 const
   SystemEnvironment = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
   UserEnvironment = 'Environment';
   VCRedistKey = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
+
+{ Grant ordinary users access only when creating shared data folders. Preserve per-user and existing folder permissions. }
+function NewSharedDir(Name: String): Boolean;
+begin
+  Result := IsAdminInstallMode and not DirExists(ExpandConstant('{app}\') + Name);
+end;
 
 { The PATH this install changes: the machine's for all users, the user's for one }
 function EnvironmentRoot: Integer;
@@ -152,48 +157,6 @@ begin
     + 'Get it from https://aka.ms/vs/17/release/vc_redist.x64.exe, or with:' + #13#10
     + 'winget install Microsoft.VCRedist.2015+.x64' + #13#10#13#10
     + 'Install TMR anyway?', mbConfirmation, MB_YESNO) = IDYES;
-end;
-
-{ Name (tmr-cfg.json, window.json) where a version before settings\ kept it, beside tmr.exe }
-function OldSetting(Name: String): String;
-begin
-  Result := ExpandConstant('{app}\') + Name;
-end;
-
-{ Whether no Name is left beside tmr.exe, for [Files] to install its default into settings\ }
-function NoOldSetting(Name: String): Boolean;
-begin
-  Result := not FileExists(OldSetting(Name));
-end;
-
-{ An upgrade from a version that kept Name beside tmr.exe: moved into settings\ when settings\ has had none, as TMR takes one
-  (src/settings_file.rs): it holds neither the file nor its last good copy, Name.bak, which a file deleted there to start again leaves.
-  Then given settings\'s permissions, as a file made there has them (icacls /reset): a move keeps the file's own, which give Users the
-  right to modify it only where the old installer made it. One TMR made again, run as administrator, or copied in by hand has only
-  Program Files' right to read, and a user's TMR could save it neither whole nor in place (review). Setup runs elevated for all users,
-  so it can move what a user's TMR can't. One that can't be moved (another program holding it) stays, and TMR takes a copy into
-  settings\ when it next runs without administrator rights (run as administrator it takes none). }
-procedure MoveOldSetting(Name: String);
-var
-  Moved: String;
-  ResultCode: Integer;
-begin
-  Moved := ExpandConstant('{app}\settings\') + Name;
-  if not FileExists(OldSetting(Name)) or FileExists(Moved) or FileExists(Moved + '.bak') then exit;
-  if not RenameFile(OldSetting(Name), Moved) then begin
-    Log('Couldn''t move ' + OldSetting(Name) + ' into settings\: TMR takes a copy when it next runs unelevated');
-    exit;
-  end;
-  Log('Moved ' + OldSetting(Name) + ' into settings\');
-  if not ExecAndLogOutput(ExpandConstant('{sys}\icacls.exe'), AddQuotes(Moved) + ' /reset', '', SW_SHOWNORMAL, ewWaitUntilTerminated,
-    ResultCode, nil) or (ResultCode <> 0) then
-    Log('Couldn''t give ' + Moved + ' the permissions of settings\ (icacls: ' + IntToStr(ResultCode) + '): it keeps its own');
-end;
-
-procedure MoveOldSettings;
-begin
-  MoveOldSetting('tmr-cfg.json');
-  MoveOldSetting('window.json');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

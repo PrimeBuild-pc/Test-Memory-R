@@ -235,8 +235,12 @@ unsafe fn enable_privilege_in_token(token: HANDLE, privilege_luid: LUID) -> Resu
 }
 
 /// Whether this process runs as administrator (`TokenElevation`): run elevated, or an administrator with no split token (UAC off, the
-/// built-in Administrator). False when it can't be read.
+/// built-in Administrator). A failed query is treated as elevated for diagnostics. Home selection returns the error.
 pub(crate) fn is_elevated() -> bool {
+    elevation().unwrap_or(true)
+}
+
+pub fn elevation() -> windows::core::Result<bool> {
     use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -246,9 +250,7 @@ pub(crate) fn is_elevated() -> bool {
         let process = GetCurrentProcess();
         let mut token: HANDLE = HANDLE::default();
 
-        if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
-            return false;
-        }
+        OpenProcessToken(process, TOKEN_QUERY, &mut token)?;
 
         let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
         let mut return_length = 0u32;
@@ -263,7 +265,7 @@ pub(crate) fn is_elevated() -> bool {
 
         let _ = CloseHandle(token);
 
-        result.is_ok() && elevation.TokenIsElevated != 0
+        result.map(|()| elevation.TokenIsElevated != 0)
     }
 }
 

@@ -181,6 +181,7 @@ COMMAND LINE PARAMETERS:
   calibrate=recheck                   #   ...and a stored one probed first, about 15 s, measured again if it has drifted
   calibrate=always                    #   ...measured before every run's tests
   calibrate=off                       #   ...none: sizes from CPUID, and the seal's width from its rule
+  --allow-admin                       # Start an elevated test without the confirmation prompt (required for unattended runs)
   --serials                           # Keep the DIMMs' serials, the system's UUID and the machine's fingerprints in the
                                       #   output, log and results (left out by default)
 
@@ -195,7 +196,8 @@ LOGGING:
                                       # Use debug for detailed per-thread logs
   Logs saved to: logs\TMR_YYYY-MM-DD_HH-MM-SS.log      (local time)
   Results saved to: results\TMR_YYYY-MM-DD_HH-MM-SS.json (same name as the log)
-  Both beside tmr.exe, as are configs\ and settings\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there
+  Ordinary runs: both beside tmr.exe, as are configs\ and settings\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there
+  Administrator runs keep these files separately in Program Files\TMR Admin.
 
 RESULT COMPARISON:
   Each run's results are saved as a JSON file in the results folder, as it goes

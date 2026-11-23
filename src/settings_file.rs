@@ -26,7 +26,7 @@ pub const FOLDER: &str = "settings";
 /// The settings file `name` (`tmr-cfg.json`, `window.json`): in the home's `settings\`, a file still in the old place taken first
 /// (`in_home`)
 pub fn path(name: &str) -> PathBuf {
-    in_home(crate::home::dir(), name, crate::memory::privileges::is_elevated())
+    in_home(crate::home::dir(), name, crate::home::elevated())
 }
 
 /// `home`'s settings file `name`, in its `settings\`. When that has had none (it holds neither the file nor its last good copy) and the
@@ -37,28 +37,25 @@ pub fn path(name: &str) -> PathBuf {
 ///
 /// One that can't be taken is the old one, so nothing of it is lost: one that can't be read is said by its load and isn't saved over,
 /// and in a home where `settings\` can't be made or takes no file (read-only media, an old install's folder) it is read, and saved,
-/// where it is. So is every one when TMR runs as administrator, `elevated` (review). In a home users can't write, an install for all
-/// users whose new tmr.exe was copied over the old by hand, without the installer, a `settings\` it made, for this file or for a save of
-/// the other, would hand down only the home's right to read: every user's TMR, finding the file there, could then save it neither whole
-/// nor in place, where the old one, beside tmr.exe, was theirs to write. TMR run as its user takes it: into a `settings\` the installer
-/// made writable by users (`dist/tmr.iss`), or one it makes as that user can.
+/// where it is. Elevated runs have their own home and never import an old file.
 fn in_home(home: &Path, name: &str, elevated: bool) -> PathBuf {
     let (path, old) = (home.join(FOLDER).join(name), home.join(name));
+    if elevated {
+        return path;
+    }
     // A link is a file there, for this as for a save: none is followed
     let there = |path: &Path| fs::symlink_metadata(path).is_ok();
     if there(&path) || there(&backup_of(&path)) || !there(&old) {
         return path;
     }
-    if elevated {
-        log::info!(
-            "{} isn't taken into {}: TMR, run as administrator, takes none, as users may be unable to write what it makes there; it is \
-             read and saved where it is",
-            old.display(),
-            path.display()
-        );
-        return old;
-    }
-    match take(&old, &path) {
+    let migration = || {
+        let _held = lock(&path)?;
+        if there(&path) || there(&backup_of(&path)) {
+            return Ok(());
+        }
+        take(&old, &path)
+    };
+    match migration() {
         Ok(()) => {
             log::info!("{} taken into {}; the old one is left where it was", old.display(), path.display());
             path
@@ -146,6 +143,9 @@ pub fn backup_of(path: &Path) -> PathBuf {
 /// wrote through one, so TMR run as administrator, at a setup or the window's start, wrote the bad file's bytes, which any user can
 /// choose, over the file a link there named).
 pub fn keep_aside(path: &Path) -> Result<PathBuf, String> {
+    if crate::home::protected_setting(path) {
+        return Err(format!("{} is left in place for the administrator to inspect", path.display()));
+    }
     let kept = with_suffix(path, ".unreadable");
     match fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| atomic_file::write(&kept, &bytes)) {
         Ok(_) => {
@@ -221,28 +221,14 @@ mod tests {
         assert_eq!(fs::read(backup_of(&path)).unwrap(), b"{\"machine_id\": \"newer, saved in settings\"}");
     }
 
-    /// Run as administrator, TMR takes no file into `settings\` (review): in a home users can't write, a folder it made, for this file
-    /// or a save of the other, would be theirs to read only, so the old file is read and saved where it is, `settings\` there or not.
-    /// With no old file, or one already in `settings\`, the path is `settings\`'s, nothing made; run as its user, TMR takes it
+    /// Elevated launches never select a legacy settings file, including before the first protected save.
     #[test]
-    fn run_as_administrator_tmr_takes_no_settings_file() {
+    fn elevated_settings_ignore_legacy_files() {
         let dir = TempDir::new("settings-elevated");
-        let home = PathBuf::from(dir.file("home"));
-        fs::create_dir(&home).unwrap();
-        let (folder, old) = (home.join(FOLDER), home.join("tmr-cfg.json"));
-        assert_eq!(in_home(&home, "tmr-cfg.json", true), folder.join("tmr-cfg.json"), "no old file");
-        fs::write(&old, b"{}").unwrap();
-        assert_eq!(in_home(&home, "tmr-cfg.json", true), old);
-        assert!(!folder.exists(), "settings\\ not made");
-
-        // Made by a save of the other file, run as administrator too
-        save(&folder.join("window.json"), b"{}").unwrap();
-        assert_eq!(in_home(&home, "tmr-cfg.json", true), old);
-        assert!(!folder.join("tmr-cfg.json").exists(), "not taken");
-
-        assert_eq!(in_home(&home, "tmr-cfg.json", false), folder.join("tmr-cfg.json"));
-        assert_eq!(fs::read(folder.join("tmr-cfg.json")).unwrap(), b"{}", "taken run as its user");
-        assert_eq!(in_home(&home, "tmr-cfg.json", true), folder.join("tmr-cfg.json"), "then settings\\'s, run as administrator too");
+        let home = PathBuf::from(dir.file(""));
+        std::fs::write(home.join("window.json"), b"{}").unwrap();
+        assert_eq!(in_home(&home, "window.json", true), home.join(FOLDER).join("window.json"));
+        assert!(!home.join(FOLDER).exists());
     }
 
     /// One that can't be taken is the old one, so nothing of it is lost: unread (held by a program that shares it with no one), its load

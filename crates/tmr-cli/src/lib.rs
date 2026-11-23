@@ -34,6 +34,17 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// the console gets it once, the log file too. `tmr` alone is its help (`bare_is_help`).
 pub fn main(args: Vec<String>) -> i32 {
     let args = bare_is_help(args);
+    let flags: Vec<_> = args
+        .iter()
+        .filter(|a| !matches!(a.as_str(), "--allow-admin" | "--quick-test" | "--cache-latency" | "--ram-latency"))
+        .cloned()
+        .collect();
+    if !matches!(tmr::commands::Command::parse(&flags), Some(tmr::commands::Command::Help(_) | tmr::commands::Command::Version))
+        && let Err(e) = tmr::home::initialize()
+    {
+        crate::console::eprint(&format!("{e}\n"));
+        return RunStatus::NotRun.exit_code();
+    }
     // Initialize enhanced logging, with the log file for a session and the commands that change the system (`tmr::logfile::wanted`)
     setup_logging(tmr::logfile::wanted(&args));
 
@@ -163,22 +174,22 @@ fn setup_logging(log_file: bool) {
     crate::console::init();
 
     // Shared with the result filename so a run's log and result can be paired by name
-    let log_filename = tmr::logfile::path();
+    let log_filename = log_file.then(tmr::logfile::path);
 
     // The records the log file gets and the ones the console shows, as the window's logger has them too
     let levels = tmr::logfile::levels();
 
     // Whether the log file is open, so the line below says so only when it is
-    let log_file = log_file && {
+    let opened = log_filename.as_ref().is_some_and(|log_filename| {
         // Create logs directory if it doesn't exist
         if let Err(e) = tmr::logfile::create_dir() {
             crate::console::eprint(&format!("Warning: Failed to create logs directory: {}\n", e));
         }
         // Initialize file logger for dual logging
-        tmr::logfile::open(&log_filename)
+        tmr::logfile::open(log_filename)
             .inspect_err(|e| crate::console::eprint(&format!("Warning: no log file, {}: {e}\n", log_filename.display())))
             .is_ok()
-    };
+    });
 
     // Set up env_logger for console with original nice formatting (colors + module info)
     let (shown, most) = (levels.clone(), levels.most());
@@ -229,7 +240,7 @@ fn setup_logging(log_file: bool) {
 
     // The banner says the version on the console; where the log is, the run's own output (TODO 105)
     log::info!(target: tmr::logfile::FILE_ONLY_TARGET, "TMR v{} started", tmr::BUILD.version);
-    if log_file {
+    if let Some(log_filename) = log_filename.filter(|_| opened) {
         log::info!(target: tmr::logfile::SHOWN_TARGET, "📝 Log file: {} ({})", log_filename.display(), levels.described());
     }
 }

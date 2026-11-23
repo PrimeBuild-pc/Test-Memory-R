@@ -46,11 +46,15 @@ enum Feed {
     /// A session's event, as the engine sent it
     Event(Event),
     /// This sign-in lacks the right large pages need: the window asks, and answers on the reply (`GuiFrontend::ask_large_pages`)
-    Ask { question: LargePageQuestion, reply: SyncSender<LargePageAnswer> },
+    Ask {
+        question: LargePageQuestion,
+        reply: SyncSender<LargePageAnswer>,
+    },
     /// The session ended: how, or the error that stopped it
     Ended(Result<SessionEnd, String>),
     /// The window's own calibration ended (the ••• menu's, TODO 110): how it did, or the error that stopped it
     Calibrated(Result<RunStatus, String>),
+    AskAdmin(SyncSender<bool>),
 }
 
 /// The window's frontend: each event onto the window's feed, as it comes, and its console text into the log (`transcript`). No ticks:
@@ -81,19 +85,27 @@ impl Frontend for GuiFrontend {
     /// being stopped (`end_session`): the answer to every question is then Quit, as for a frontend that can't ask (TODO 113), and the
     /// session ends with nothing allocated, as not run. A grant would go to someone with nobody picking them, and 4 KiB pages would run
     /// slower unasked, allocating the run's memory only for the stop to end the run before its first cycle.
+    fn confirm_admin_run(&self) -> bool {
+        let (reply, answer) = mpsc::sync_channel(1);
+        self.feed.send(Feed::AskAdmin(reply)).is_ok() && wait_answer(answer).unwrap_or(false)
+    }
+
     fn ask_large_pages(&self, question: &LargePageQuestion) -> LargePageAnswer {
         let (reply, answer) = mpsc::sync_channel(1);
         if self.feed.send(Feed::Ask { question: question.clone(), reply }).is_ok() {
-            loop {
-                match answer.recv_timeout(ANSWER_WAIT) {
-                    Ok(choice) => return choice,
-                    Err(RecvTimeoutError::Timeout) if !WINDOW_CLOSED.load(Ordering::Relaxed) => {}
-                    // The window closed with the question open, or dropped it unanswered
-                    Err(_) => break,
-                }
-            }
+            return wait_answer(answer).unwrap_or(LargePageAnswer::Quit);
         }
         LargePageAnswer::Quit
+    }
+}
+
+fn wait_answer<T>(answer: mpsc::Receiver<T>) -> Option<T> {
+    loop {
+        match answer.recv_timeout(ANSWER_WAIT) {
+            Ok(value) => return Some(value),
+            Err(RecvTimeoutError::Timeout) if !WINDOW_CLOSED.load(Ordering::Relaxed) => {}
+            Err(_) => return None,
+        }
     }
 }
 
@@ -165,6 +177,9 @@ pub struct Closed {
 /// ended (`end_session`), with the exit status and the window's error, if it had one (`closed`). `icon` is the exe's icon, an .ico file's
 /// bytes, for the title bar. The window needs the Windows App Runtime 2.4 or later, which Reactor offers to download when it is missing.
 pub fn main(args: Vec<String>, icon: &'static [u8]) -> Closed {
+    if let Err(e) = tmr::home::initialize() {
+        return Closed { exit_code: RunStatus::NotRun.exit_code(), error: Some(e) };
+    }
     let _ = ICON.set(icon);
     let shown = windows_reactor::App::run_component::<window::Window>(args);
     WINDOW_CLOSED.store(true, Ordering::Relaxed);

@@ -86,6 +86,19 @@ asks whether to run on them this time or quit, to be started as administrator. N
 empty line, or the window's question closed) quits, running nothing. `tmr --remove-large-pages`
 takes the privilege away again (from you, or from the `Group:` or `User:` named).
 
+### Running as Administrator
+
+After signing in again, a regular launch can use large pages. If you deliberately start TMR as Administrator, its settings, configs,
+logs and results live in a separate machine-wide folder, `%ProgramFiles%\TMR Admin`. TMR creates that folder with protected permissions
+and checks it before opening any files. Ordinary runs still use the executable's folder or `TMR_HOME`. Supply an explicit path to load
+an existing test config from elsewhere.
+
+An elevated test asks once per launch, after large-page setup. Choose **Yes** to continue. In the elevated window, **Settings → Allow
+administrator runs** remembers this choice for your account on this machine. Clear the switch to ask again. Consent is stored separately
+from window preferences and their backups. If elevated settings are damaged, TMR reports the file and leaves it in place. For an unattended
+console run, pass `--allow-admin`, for example `tmr --allow-admin plan=quick`. Without it, a headless elevated run exits with status 2.
+The setup and removal commands run independently of test consent. Granting the right ends setup so you can sign in again.
+
 ## Running a test
 
 After installation and the large-page setup, these commands cover the usual starting points:
@@ -310,8 +323,8 @@ its `-` and then stores it negated, so `Cycles=-3` would run 253 cycles.
 ### TMR JSON configs
 
 The installer includes `demo_comprehensive_test.json` and `demo_tm5_compatible.json` in
-`configs\`. They show TMR's system settings and per-test settings, and make starting points for
-your own plans. `tmr --create-demo-configs` writes the examples there too. Run one with
+`examples\` beside the executable. Ordinary runs find these by name after checking your own configs. They show system and per-test
+settings. `tmr --create-demo-configs` writes editable copies into the active home's `configs\`. Run one with
 `tmr config=demo_tm5_compatible.json`, and use `--startup-debug` to inspect an edited config
 before running it.
 
@@ -327,7 +340,7 @@ Beside `tmr.exe`, in its folder:
 
 | | What it holds |
 |---|---|
-| `configs\` | your configs, and the examples |
+| `configs\` | your configs and any editable demos you generate |
 | `results\` | one `TMR_<date>_<time>.json` a run, saved at the end of setup and as the run goes, so a crash keeps the cycles saved so far |
 | `logs\` | one `TMR_<date>_<time>.log` a run, the same name as its results file |
 | `settings\` | `tmr-cfg.json`, what TMR's calibrations (`tmr --calibrate-all`) measured, and of which system (`tmr --show-calibration` shows it, and whether it is this machine's); `window.json`, the window's settings |
@@ -344,13 +357,8 @@ writes each save in place, so a crash while it saves can still damage the file, 
 TMR starts from its defaults.
 
 A file you delete is not brought back from its copy: TMR starts again from its defaults. The 0.1.2
-release and earlier kept `tmr-cfg.json` and `window.json` beside `tmr.exe`; the installer moves them
-into `settings\`, and TMR copies one it still finds there into `settings\` the first time it needs
-it, writing its `.bak` as well, and leaves the old one in place. It copies it only into a
-`settings\` with neither the file nor its `.bak`, so a file you delete there isn't brought back
-from beside `tmr.exe` either. Run as administrator, TMR copies none, as other users might be unable
-to write what it makes in `settings\`: it reads and saves the old file where it is, until TMR runs
-without administrator rights or the installer moves it.
+release and earlier kept `tmr-cfg.json` and `window.json` beside `tmr.exe`. Your next ordinary launch copies each old file into
+`settings\` when both its new file and backup are absent. The old file stays in place. Administrator launches start with separate settings.
 
 The run's last lines say where its results file went. `tmr --compare-results <one> <other>`
 compares two results files, by their names in `results\` or by their paths. It matches the two
@@ -393,7 +401,7 @@ UUID and the fingerprints by TMR's own lines for them (each DIMM's, the system's
 identity check) rather than from a results file, so one only a line of another kind has, as in an
 older build's log, stays.
 
-To keep the files somewhere else, set the `TMR_HOME` environment variable to that folder
+To keep an ordinary run's files somewhere else, set the `TMR_HOME` environment variable to that folder
 (`setx TMR_HOME D:\tmr`, then open a new console).
 
 ## Uninstalling

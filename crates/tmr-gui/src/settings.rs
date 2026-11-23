@@ -66,6 +66,8 @@ pub struct Settings {
     pub chart: bool,
     pub theme: Theme,
     pub start_on_open: bool,
+    /// Display state of the protected per-account switch. Only its own toggle writes the switch.
+    pub allow_admin: bool,
     /// The run's output, log and results keep the DIMMs' serials, the system's UUID and the machine's fingerprints: the window runs with
     /// `--serials`. Off by default, as a run without `--serials` leaves them out (the owner, 2026-11-23)
     pub keep_serials: bool,
@@ -86,6 +88,7 @@ impl Default for Settings {
             chart: true,
             theme: Theme::System,
             start_on_open: false,
+            allow_admin: false,
             keep_serials: false,
             parameters: None,
             size: None,
@@ -102,7 +105,7 @@ const RETIRED_SERIALS: &str = "serials";
 
 /// `window.json`, in the `settings\` of TMR's home, one still in the old place taken into it first (`tmr::settings_file::path`)
 fn path() -> PathBuf {
-    tmr::settings_file::path("window.json")
+    tmr::settings_file::path(&tmr::home::window_settings_name())
 }
 
 /// `text` as window.json's object, or why it isn't one
@@ -116,7 +119,7 @@ fn object(text: &str) -> Result<Map<String, Value>, String> {
 
 /// The settings file at `path` as an object: none when it isn't there, or why it can't be read or isn't one
 fn read(path: &Path) -> Result<Option<Map<String, Value>>, String> {
-    match std::fs::read_to_string(path) {
+    match tmr::home::read_settings(path).and_then(|b| String::from_utf8(b).map_err(std::io::Error::other)) {
         Ok(text) => object(&text).map(Some),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", path.display())),

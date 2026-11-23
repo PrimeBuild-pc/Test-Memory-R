@@ -619,6 +619,23 @@ impl Model {
         std::iter::once(self.program.clone()).chain(args_of(&self.args)).collect()
     }
 
+    /// An elevated window may reopen in a different working folder. Replay the same config file it selected this time.
+    pub fn saved_parameters(&self) -> String {
+        let mut args = args_of(&self.args);
+        tmr::session::take_admin_flag(&mut args);
+        if tmr::home::elevated() {
+            for arg in &mut args {
+                if let Some(name) = arg.strip_prefix("config=") {
+                    let path = tmr::home::config_path(name).unwrap_or_else(|_| std::path::PathBuf::from(name));
+                    if let Ok(path) = std::path::absolute(path) {
+                        *arg = format!("config={}", path.display());
+                    }
+                }
+            }
+        }
+        args_text(&args)
+    }
+
     /// A config chosen in the Open dialog (TODO 109): `config=<path>` in the parameters box, in place of the one there
     pub fn set_config(&mut self, path: &Path) {
         let mut args: Vec<String> = args_of(&self.args).into_iter().filter(|arg| !arg.starts_with("config=")).collect();

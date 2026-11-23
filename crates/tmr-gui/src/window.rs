@@ -45,8 +45,9 @@ const LOG_SHOWN: usize = 1_000;
 fn icon_path() -> Option<&'static str> {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
     PATH.get_or_init(|| {
-        let path = std::env::temp_dir().join("tmr-icon.ico");
-        std::fs::write(&path, crate::ICON.get()?).ok()?;
+        let folder = if tmr::home::elevated() { tmr::home::dir().to_owned() } else { std::env::temp_dir() };
+        let path = folder.join("tmr-icon.ico");
+        tmr::atomic_file::write(&path, crate::ICON.get()?).ok()?;
         Some(path.to_string_lossy().into_owned())
     })
     .as_deref()
@@ -108,6 +109,8 @@ pub(crate) enum Message {
     /// The Settings dialog (TODO 105): closed; its switches and the theme, each saved to window.json as it changes
     SettingsClosed,
     StartOnOpen(bool),
+    AllowAdmin(bool),
+    AdminAnswer(ContentDialogResult),
     KeepSerials(bool),
     Theme(Option<usize>),
     Scheme(ColorScheme),
@@ -152,6 +155,8 @@ pub(crate) struct Window {
     about: bool,
     /// The Settings dialog is open
     settings_open: bool,
+    launch_allows_admin: bool,
+    admin_answer: Option<mpsc::SyncSender<bool>>,
     /// The ••• menu's Sanitize came back: its dialog is open with what it wrote, or why it wrote nothing, until it closes
     sanitized: Option<Result<String, String>>,
     /// `window.json`'s (TODO 109): the chart shown or hidden, the theme, the parameters, the size and where the window is
@@ -246,6 +251,11 @@ impl Window {
         tmr::session::reset_run();
         let log = self.log.take().unwrap_or_else(logger::install);
         let mut args = self.model.command();
+        // Only the process flag, the protected Settings switch or this launch's answer supplies consent. The parameter box is saved.
+        tmr::session::take_admin_flag(&mut args);
+        if self.launch_allows_admin || tmr::home::window_consent() {
+            args.push("--allow-admin".into());
+        }
         // No log file under record=off in the box (TODO 105), as the console has none
         self.model.log_path = tmr::logfile::wanted(&args).then(|| {
             logger::open_log_file();
@@ -299,7 +309,13 @@ impl Window {
         if self.settings.keep_serials {
             line.push("--serials".to_string());
         }
+        let allow_admin = self.launch_allows_admin || tmr::home::window_consent();
+        let frontend = GuiFrontend { feed: tx.clone(), transcript: None };
         let calibration = std::thread::Builder::new().name("tmr-calibrate".to_string()).spawn(move || {
+            if let Err(e) = tmr::session::authorize_run(allow_admin, &frontend) {
+                let _ = tx.send(Feed::Calibrated(Err(e.to_string())));
+                return;
+            }
             let command = tmr::commands::Command::Calibrate(line);
             let mut out = logger::TranscriptWriter::new(transcript);
             let result = tmr::commands::run(&command, &mut out, &mut |_| true, &|_| String::new()).map_err(|e| e.to_string());
@@ -326,6 +342,7 @@ impl Window {
             match item {
                 Feed::Event(event) => self.model.apply(event),
                 Feed::Ask { question, reply } => self.model.ask_large_pages(question, reply),
+                Feed::AskAdmin(reply) => self.admin_answer = Some(reply),
                 Feed::Ended(result) => {
                     self.model.ended(result);
                     ended = true;
@@ -489,14 +506,16 @@ impl Component for Window {
 
     fn create(args: &Vec<String>, context: &ComponentContext<Self>) -> Self {
         crate::window_opened();
-        let (settings, palettes, problems) = Settings::load();
+        let (mut settings, palettes, problems) = Settings::load();
+        settings.allow_admin = tmr::home::window_consent();
         let start = args.iter().any(|arg| arg == START) || settings.start_on_open;
         let mut args: Vec<String> = args.iter().filter(|arg| *arg != START).cloned().collect();
+        let launch_allows_admin = tmr::session::take_admin_flag(&mut args);
         // Given no parameters, the last run's (TODO 109)
         if args.len() <= 1
             && let Some(parameters) = &settings.parameters
         {
-            args.extend(crate::model::args_of(parameters));
+            args.extend(crate::model::args_of(parameters).into_iter().filter(|arg| arg != "--allow-admin"));
         }
         let mut model = Model::new(&args);
         // The cache calibration a run finds, from tmr-cfg.json (TODO 110): the info line says it before Start
@@ -511,6 +530,8 @@ impl Component for Window {
             tab: Tab::Run,
             about: false,
             settings_open: false,
+            launch_allows_admin,
+            admin_answer: None,
             sanitized: None,
             settings,
             dark,
@@ -530,7 +551,7 @@ impl Component for Window {
             // One session a process: the engine's run settings are set once (TODO 29), so another run is another process (Run again)
             Message::Start if self.model.status == Status::Ready && !self.model.calibrating() => {
                 // The parameters the window opens with next time, when given none
-                self.settings.parameters = Some(self.model.args.clone());
+                self.settings.parameters = Some(self.model.saved_parameters());
                 self.save_settings();
                 self.start(context);
             }
@@ -540,7 +561,7 @@ impl Component for Window {
                 self.model = self.model.again();
                 // Read again, not carried over: the run, or the window's Calibrate after it, may have saved a new one
                 self.model.stored_calibration = Some(crate::model::stored_calibration_text(tmr::session::stored_calibration().as_ref()));
-                self.settings.parameters = Some(self.model.args.clone());
+                self.settings.parameters = Some(self.model.saved_parameters());
                 self.save_settings();
                 self.start(context);
             }
@@ -646,6 +667,25 @@ impl Component for Window {
             Message::SanitizedClosed => self.sanitized = None,
             Message::AboutClosed => self.about = false,
             Message::SettingsClosed => self.settings_open = false,
+            Message::AdminAnswer(result) => {
+                if let Some(reply) = self.admin_answer.take() {
+                    let yes = result == ContentDialogResult::Secondary;
+                    self.launch_allows_admin |= yes;
+                    let _ = reply.send(yes);
+                    if !yes {
+                        crate::session_ended(&Err("Administrator run declined".into()));
+                        let _ = context.window().request_close();
+                    }
+                }
+            }
+            Message::AllowAdmin(on) => {
+                if tmr::home::elevated() {
+                    if let Err(e) = tmr::home::set_window_consent(on) {
+                        self.model.errors.push(e);
+                    }
+                    self.settings.allow_admin = tmr::home::window_consent();
+                }
+            }
             Message::StartOnOpen(on) => {
                 self.settings.start_on_open = on;
                 self.save_settings();
@@ -720,6 +760,7 @@ impl Component for Window {
                 self.tab_view(3, context),
                 self.large_page_dialog(context),
                 self.broad_dialog(context),
+                self.admin_dialog(context),
                 self.about_dialog(context),
                 self.settings_dialog(context),
                 self.sanitized_dialog(context),
@@ -1260,6 +1301,24 @@ impl Window {
             .content(content)
     }
 
+    fn admin_dialog(&self, context: &ViewContext<Self>) -> View {
+        ContentDialog::new()
+            .title("Run as Administrator?")
+            .primary_button_text("No")
+            .secondary_button_text("Yes")
+            .is_open(self.admin_answer.is_some())
+            .on_closed(context.callback(Message::AdminAnswer))
+            .content(
+                TextBlock::new()
+                    .text(if self.admin_answer.is_some() {
+                        format!("Run memory tests as Administrator using {}?", tmr::home::dir().display())
+                    } else {
+                        String::new()
+                    })
+                    .text_wrapping(TextWrapping::Wrap),
+            )
+    }
+
     /// The second dialog after a broad pick in the first (TODO 113): what the group reaches and risks, its secondary button the grant,
     /// its primary button No, as Esc is, which goes back to the first. The first button is No because WinUI focuses it when the text has
     /// nothing to focus, so Enter or Space pressed on, and a double-click's second click, which lands where the first dialog's grant was,
@@ -1280,7 +1339,7 @@ impl Window {
     /// Settings (TODO 105, the owner 2026-11-04): what the window keeps in window.json that a user sets, each saved as it changes; not open
     /// while the large-page question is, as WinUI opens one dialog at a time
     fn settings_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.settings_open && !self.model.large_pages_pending();
+        let open = self.settings_open && !self.model.large_pages_pending() && self.admin_answer.is_none();
         let dialog = ContentDialog::new()
             .title("Settings")
             .close_button_text("Close")
@@ -1293,6 +1352,8 @@ impl Window {
             &self.settings,
             context.callback(Message::StartOnOpen),
             context.callback(Message::KeepSerials),
+            tmr::home::elevated(),
+            context.callback(Message::AllowAdmin),
             context.callback(Message::Theme),
         ))
     }
@@ -1301,7 +1362,11 @@ impl Window {
     /// wrote nothing, the text selectable for the copies' paths. Not open while the large-page question, About or Settings is, as WinUI
     /// opens one dialog at a time.
     fn sanitized_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.sanitized.is_some() && !self.model.large_pages_pending() && !self.about && !self.settings_open;
+        let open = self.sanitized.is_some()
+            && !self.model.large_pages_pending()
+            && self.admin_answer.is_none()
+            && !self.about
+            && !self.settings_open;
         let (title, text) = match &self.sanitized {
             Some(Ok(text)) => ("Sanitized", text.clone()),
             Some(Err(e)) => ("Not sanitized", format!("Nothing was written: {e}")),
@@ -1319,7 +1384,7 @@ impl Window {
     /// is open, so the logo isn't decoded at each redraw; and it isn't open while the large-page question is, as WinUI opens one dialog at
     /// a time. In the dialog's own colours, as the large-page dialog's.
     fn about_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.about && !self.model.large_pages_pending();
+        let open = self.about && !self.model.large_pages_pending() && self.admin_answer.is_none();
         let dialog = ContentDialog::new()
             .title("About TMR")
             .close_button_text("Close")
@@ -1695,7 +1760,7 @@ fn dialog_content(text: TextBlock, words: &crate::model::LargePageDialog, on_sel
 /// inside a dialog fails reactor 0.100.0 (`a_tooltip_in_a_dialog_still_fails`).
 fn settings_content(
     settings: &crate::settings::Settings, on_start: impl IntoPayloadCallback<bool>, on_serials: impl IntoPayloadCallback<bool>,
-    on_theme: impl IntoPayloadCallback<Option<usize>>,
+    elevated: bool, on_admin: impl IntoPayloadCallback<bool>, on_theme: impl IntoPayloadCallback<Option<usize>>,
 ) -> View {
     let row = |words: &str, switch: ToggleSwitch| -> View {
         Grid::new().columns([GridLength::STAR, GridLength::Auto]).column_spacing(12.0).children((
@@ -1720,8 +1785,17 @@ fn settings_content(
             .selected_index(settings.theme.index())
             .on_selection_changed(on_theme),
     ));
-    let kept = TextBlock::new().text("Kept in window.json, in TMR's settings folder, as each changes").text_wrapping(TextWrapping::Wrap);
-    StackPanel::new().spacing(14.0).children((start, serials, theme, kept))
+    let kept = TextBlock::new().text("Saved in TMR's settings folder as each setting changes").text_wrapping(TextWrapping::Wrap);
+    let panel = StackPanel::new().spacing(14.0);
+    if elevated {
+        let admin = row(
+            "Allow administrator runs for my account on future window launches",
+            ToggleSwitch::new().is_on(settings.allow_admin).on_toggled(on_admin),
+        );
+        panel.children((start, serials, admin, theme, kept))
+    } else {
+        panel.children((start, serials, theme, kept))
+    }
 }
 
 /// The Sanitize dialog's content: what `tmr::sanitize::sanitize` (or `sanitize_single`) said, selectable
@@ -1839,8 +1913,9 @@ mod tests {
     #[test]
     fn the_settings_dialog_opens_and_closes() {
         let mut settings = crate::settings::Settings::default();
-        let content =
-            |settings: &crate::settings::Settings| super::settings_content(settings, |_: bool| {}, |_: bool| {}, |_: Option<usize>| {});
+        let content = |settings: &crate::settings::Settings| {
+            super::settings_content(settings, |_: bool| {}, |_: bool| {}, true, |_: bool| {}, |_: Option<usize>| {})
+        };
         let mut pump = Pump::new(RecordingRuntime::default());
         pump.mount_view(dialog(false, TextBlock::new().text("closed").into())).unwrap();
         pump.update_view(dialog(true, content(&settings))).unwrap();

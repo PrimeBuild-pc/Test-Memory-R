@@ -284,6 +284,7 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     entry(out, "calibrate=recheck", "  ...and a stored one probed first, about 15 s, measured again if it has drifted")?;
     entry(out, "calibrate=always", "  ...measured before every run's tests")?;
     entry(out, "calibrate=off", "  ...none: sizes from CPUID, and the seal's width from its rule")?;
+    entry(out, "--allow-admin", "Start an elevated test without the confirmation prompt (required for unattended runs)")?;
     entry(out, "--serials", "Keep the DIMMs' serials, the system's UUID and the machine's fingerprints in the")?;
     more(out, "  output, log and results (left out by default)")?;
     writeln!(out)?;
@@ -298,7 +299,11 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     more(out, "Use debug for detailed per-thread logs")?;
     writeln!(out, "  Logs saved to: logs\\TMR_YYYY-MM-DD_HH-MM-SS.log      (local time)")?;
     writeln!(out, "  Results saved to: results\\TMR_YYYY-MM-DD_HH-MM-SS.json (same name as the log)")?;
-    writeln!(out, "  Both beside tmr.exe, as are configs\\ and settings\\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there")?;
+    writeln!(
+        out,
+        "  Ordinary runs: both beside tmr.exe, as are configs\\ and settings\\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there"
+    )?;
+    writeln!(out, "  Administrator runs keep these files separately in Program Files\\TMR Admin.")?;
     writeln!(out)?;
     writeln!(out, "RESULT COMPARISON:")?;
     writeln!(out, "  Each run's results are saved as a JSON file in the results folder, as it goes")?;

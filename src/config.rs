@@ -2832,8 +2832,7 @@ impl LegacyConfig {
 // Configuration loader that handles both formats. `path` as typed, from the current folder; a relative one not there, from the configs
 // folder in TMR's home (`home::find`, TODO 104).
 pub fn load_config(path: &str) -> Result<ModernConfig, String> {
-    let found =
-        crate::home::find(path, &crate::home::configs()).map_err(|looked| format!("Config file does not exist: {path} ({looked})"))?;
+    let found = crate::home::config_path(path).map_err(|looked| format!("Config file does not exist: {path} ({looked})"))?;
     let found = found.display().to_string();
     let path = found.as_str();
 

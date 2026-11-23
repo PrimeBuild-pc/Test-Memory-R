@@ -73,6 +73,10 @@ pub trait Frontend: Send + Sync {
     /// can't ask answers `Quit`, as an empty answer does (TODO 113, decision 5a): nothing is granted, and nothing runs on 4 KiB pages
     /// unasked.
     fn ask_large_pages(&self, question: &LargePageQuestion) -> LargePageAnswer;
+    /// Explicit consent to start a workload in an elevated process. Unattended frontends decline by default.
+    fn confirm_admin_run(&self) -> bool {
+        false
+    }
 }
 
 /// The answer to `Frontend::ask_large_pages`.

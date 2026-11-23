@@ -31,11 +31,11 @@ pub(crate) const CACHE_LATENCY_FILTER: &str =
 /// The flags that pick a mode's defaults, which `run` takes out before it looks for a one-shot command (`logfile::wanted` too)
 pub(crate) const MODE_FLAGS: [&str; 3] = ["--ram-latency", "--cache-latency", "--quick-test"];
 /// Every flag a session takes, exactly: any other is refused before anything runs (`Stopped::UnknownFlags`); `--help` names each
-pub(crate) const KNOWN_FLAGS: [&str; 28] = [
+pub(crate) const KNOWN_FLAGS: [&str; 29] = [
     "--ram-latency", "--cache-latency", "--quick-test", "--calibrate-cache", "--calibrate-curve", "--calibrate-seal", "--calibrate-all",
     "--show-calibration", "--output", "--yes", "--no-save", "--create-demo-configs", "--compare-results", "--show-results", "--sanitize",
     "--sanitize-single", "--debug-topology", "--show-topology", "--setup-large-pages", "--remove-large-pages", "--startup-debug",
-    "--disable-pinning", "--serials", "--help", "-h", "-?", "--version", "-v",
+    "--allow-admin", "--disable-pinning", "--serials", "--help", "-h", "-?", "--version", "-v",
 ];
 
 /// How a session ended. An error that stops it is `run`'s `Err`.
@@ -97,6 +97,22 @@ pub fn stored_calibration() -> Option<StoredCalibration> {
     config.calibration.map(|cal| StoredCalibration { at: cal.timestamp, cpu, shared: cal.shared.is_some() })
 }
 
+/// Consume the process flag before positional commands and config processing.
+pub fn take_admin_flag(args: &mut Vec<String>) -> bool {
+    let len = args.len();
+    args.retain(|arg| arg != "--allow-admin");
+    args.len() != len
+}
+
+/// The final consent check, shared by sessions and the window's standalone calibration.
+pub fn authorize_run(allow_admin: bool, fe: &dyn Frontend) -> crate::Result<()> {
+    crate::home::initialize()?;
+    if crate::home::elevated() && !allow_admin && !fe.confirm_admin_run() {
+        return Err("Administrator run declined. For an unattended elevated run, pass --allow-admin.".into());
+    }
+    Ok(())
+}
+
 /// A session: `command_line` (the exe's name first) set up, then run, its events to `fe`. Returns how it ended.
 pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<SessionEnd> {
     // A frontend checks first (tmr.exe does), and this is for one that didn't: the kernels would fault on a CPU without them
@@ -105,6 +121,7 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     }
     // The command line as typed, for the results file (`RunConfigSnapshot::command_line`): `args` gains the defaults the modes below add
     let mut args = command_line.clone();
+    let allow_admin = take_admin_flag(&mut args);
 
     // core-priority= first: it decides how the topology is typed, which `--show-topology` and
     // `--debug-topology` print before any other parameter is read (TODO 96)
@@ -252,6 +269,9 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
 
     // Check for special commands
     if let Some(command) = Command::parse(&args) {
+        if matches!(command, Command::Calibrate(_)) {
+            authorize_run(allow_admin, &*fe)?;
+        }
         return Ok(SessionEnd::Command(command));
     }
     // One named later, where parse doesn't look, is refused, not dropped for a run of the tests (tmr memory=50% --help ran them)
@@ -568,6 +588,11 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     let right_held = crate::memory::privileges::in_token();
     fe.event(Setup::LargePageStatus { usable, min_page: alloc_config.min_page_size.clone(), min_needs_large, right_held }.into());
 
+    let plan_only = args.iter().any(|a| a == "--startup-debug");
+    if !plan_only {
+        authorize_run(allow_admin, &*fe)?;
+    }
+
     // Serials out of what the run shows and keeps unless `--serials`, before SMBIOS is first read and logged (TODO 105)
     crate::smbios::hide_serials_unless_kept(&args);
 
@@ -708,9 +733,6 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     } else {
         None
     };
-
-    // --startup-debug: run the startup sequence and print the test plan, but allocate no test memory and run no test
-    let plan_only = args.iter().any(|a| a == "--startup-debug");
 
     let start_time = std::time::Instant::now();
 
@@ -1042,6 +1064,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unattended_elevated_calibration_needs_the_process_flag_but_setup_does_not() {
+        let session = |tail: &[&str]| run(std::iter::once("tmr").chain(tail.iter().copied()).map(str::to_owned).collect(), Arc::new(Quiet));
+        // Session setup dispatches these commands; the test never executes them or changes an account right.
+        for command in ["--setup-large-pages", "--remove-large-pages"] {
+            assert!(matches!(session(&[command]), Ok(SessionEnd::Command(_))));
+        }
+        if crate::home::elevated() {
+            assert!(session(&["--calibrate-seal", "--yes"]).is_err_and(|e| e.to_string().contains("--allow-admin")));
+        }
+        assert!(matches!(session(&["--calibrate-seal", "--allow-admin"]), Ok(SessionEnd::Command(Command::Calibrate(_)))));
+    }
+
     /// errors= on the command line (and so the window's) takes every form `ErrorMode::parse` does: halt:N stops after N errors, as a JSON
     /// config's error_mode always did
     #[test]
@@ -1129,7 +1164,10 @@ mod tests {
         }
         let line = ["tmr", "--calibrate-cache", "--calibration-file", "my.json"];
         assert!(matches!(session(&line), SessionEnd::Stopped(Stopped::UnknownFlags(f)) if f == ["--calibration-file"]));
-        assert!(matches!(session(&["tmr", "--calibrate-cache", "--output", "x.json"]), SessionEnd::Command(Command::Calibrate(_))));
+        assert!(matches!(
+            session(&["tmr", "--allow-admin", "--calibrate-cache", "--output", "x.json"]),
+            SessionEnd::Command(Command::Calibrate(_))
+        ));
         // A command is a flag the session takes: --sanitize wasn't one, and the console refused it as unknown before it was parsed
         assert!(matches!(session(&["tmr", "--sanitize", "x.json"]), SessionEnd::Command(Command::Sanitize(_))));
     }

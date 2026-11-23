@@ -77,7 +77,8 @@ plan, 3 cycles: any setting starts a run, `tmr` alone lists every setting, and `
 
 TMR keeps its files beside `tmr.exe`: `configs\`, `results\` (one JSON file a run, saved as it
 goes), `logs\` and `settings\` (`tmr-cfg.json`, its calibrations, and `window.json`, the window's
-settings, each with a `.bak` copy of its last save). `TMR_HOME` puts them in another folder. A
+settings, each with a `.bak` copy of its last save). `TMR_HOME` puts ordinary runs in another folder. Elevated runs keep separate files
+in `%ProgramFiles%\TMR Admin` and ask before testing. Unattended elevated runs take `--allow-admin`. A
 results file describes the system it came from; see [Privacy](#privacy) below for what that includes
 and how to leave identifiers out before you post one.
 

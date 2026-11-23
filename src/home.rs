@@ -1,35 +1,96 @@
-//! TMR's home (TODO 104): the one folder that holds what it reads and writes of its own, `configs\`, `results\`, `logs\` and
-//! `settings\`, which holds `tmr-cfg.json` and the window's `window.json` (its settings and colours, TODO 109), each with its last good
-//! copy (`settings_file.rs`, the owner, 2026-11-23). It is the real exe's folder (the owner, 2026-10-25), so an unzipped tmr.exe keeps
-//! them beside it as TM5 did, and so does an installed one: for all users, in Program Files, the installer makes those four folders
-//! writable by users, never the exe's folder (`dist/tmr.iss`). `TMR_HOME` puts the home elsewhere, `settings\` and all: for `cargo run`,
-//! whose exe is under `target\`, which `cargo clean` empties, and for scripts.
-//!
-//! Not the current folder, as it was: that is wherever TMR started, the shell's folder, System32 for an Explorer-style launch or an
-//! elevated prompt, Documents over WinRM. A path the user types (`config=`, `--compare-results`) still means the current folder first.
+//! Ordinary launches use the executable's folder or TMR_HOME for configs, results, logs and settings. Elevated launches use a separate
+//! administrator-controlled home, established before either frontend opens those files. An explicitly named input is resolved from the
+//! working directory first.
 
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+mod admin;
+
+pub use crate::memory::privileges::elevation;
+
+struct Home {
+    path: PathBuf,
+    admin_sid: Option<String>,
+}
+static HOME: OnceLock<Result<Home, String>> = OnceLock::new();
+
+fn selected() -> Result<&'static Home, String> {
+    HOME.get_or_init(|| {
+        let elevated = elevation().map_err(|e| format!("Cannot determine process elevation: {e}"))?;
+        let path = if elevated { admin::open()? } else { ordinary_home() };
+        let admin_sid = if elevated { Some(crate::memory::lsa::Token::read()?.user.to_string()) } else { None };
+        Ok(Home { path, admin_sid })
+    })
+    .as_ref()
+    .map_err(Clone::clone)
+}
+
+/// Called before either frontend reads settings or opens a log. Failure stops startup.
+pub fn initialize() -> Result<(), String> {
+    selected().map(drop)
+}
+
+/// Whether this process selected protected storage for an elevated run.
+pub fn elevated() -> bool {
+    selected().expect("TMR home must be available before use").admin_sid.is_some()
+}
+
+/// Each administrator consents for their own account. The rest of the elevated home is shared on this machine.
+pub fn window_settings_name() -> String {
+    selected()
+        .expect("TMR home must be available before use")
+        .admin_sid
+        .as_ref()
+        .map_or_else(|| "window.json".into(), |sid| format!("window-{sid}.json"))
+}
+
+fn consent_path() -> Option<PathBuf> {
+    let home = selected().ok()?;
+    Some(home.path.join("settings").join(format!("allow-window-{}", home.admin_sid.as_ref()?)))
+}
+
+/// Read the per-account administrator-window switch afresh. An absent or invalid record requires a prompt.
+pub fn window_consent() -> bool {
+    consent_path().is_some_and(|p| admin::consent(&p))
+}
+
+/// Only an explicit change in the elevated Settings dialog writes this switch. Other window saves cannot restore a revoked decision.
+pub fn set_window_consent(on: bool) -> Result<(), String> {
+    let path = consent_path().ok_or("Administrator window settings require an elevated launch")?;
+    admin::set_consent(&path, on)
+}
+
+/// Settings files belonging to the elevated home are read with their security descriptor checked on the open handle.
+pub(crate) fn protected_setting(path: &Path) -> bool {
+    selected().is_ok_and(|h| h.admin_sid.is_some() && path.parent() == Some(h.path.join("settings").as_path()))
+}
+
+/// Read the same handle whose permissions were checked for protected settings, including their backup.
+pub fn read_settings(path: &Path) -> std::io::Result<Vec<u8>> {
+    if protected_setting(path) { admin::read_setting(path) } else { std::fs::read(path) }
+}
+
 /// The environment variable that names another home
 pub const HOME_VAR: &str = "TMR_HOME";
 
-/// TMR's home, worked out once: `TMR_HOME` when it is set (a relative one from the current folder), else the folder of the real exe.
+/// The protected home when elevated. Otherwise, `TMR_HOME` when it is set (a relative one from the current folder), else the folder of the real exe.
 /// `current_exe` gives the path the exe was started by, which can be a symlink or a short (8.3) name, so it is resolved first, and taken
 /// as it is when it can't be. The current folder only when even `current_exe` fails.
 pub fn dir() -> &'static Path {
-    static HOME: OnceLock<PathBuf> = OnceLock::new();
-    HOME.get_or_init(|| {
-        if let Some(home) = from_var() {
-            return std::path::absolute(&home).unwrap_or(home);
-        }
-        std::env::current_exe()
-            .ok()
-            .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
-            .and_then(|exe| exe.parent().map(without_verbatim_prefix))
-            .unwrap_or_else(|| std::path::absolute(".").unwrap_or_else(|_| PathBuf::from(".")))
-    })
+    &selected().expect("TMR home must be available before use").path
+}
+
+fn ordinary_home() -> PathBuf {
+    if let Some(home) = from_var() {
+        return std::path::absolute(&home).unwrap_or(home);
+    }
+    std::env::current_exe()
+        .ok()
+        .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe))
+        .and_then(|exe| exe.parent().map(without_verbatim_prefix))
+        .unwrap_or_else(|| std::path::absolute(".").unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 /// `TMR_HOME`, when it is set and not empty
@@ -95,6 +156,9 @@ fn probe(folder: &Path) -> std::io::Result<()> {
 }
 
 fn cant_write(path: &Path, e: &std::io::Error) -> String {
+    if elevated() {
+        return format!("TMR couldn't write to its administrator home at {}: {e}", path.display());
+    }
     match from_var() {
         Some(home) => format!(
             "TMR can't write to {} ({e}). {HOME_VAR} is {}: set it to a folder you can write to, or unset it to keep TMR's files beside \
@@ -108,6 +172,25 @@ fn cant_write(path: &Path, e: &std::io::Error) -> String {
             path.display()
         ),
     }
+}
+
+/// Resolve a test config the same way for the loader and a window's saved invocation.
+pub fn config_path(name: &str) -> Result<PathBuf, String> {
+    find(name, &configs()).or_else(|looked| {
+        // The installer stages its examples beside the executable, outside the shared writable data folders.
+        let typed = Path::new(name);
+        if !elevated()
+            && typed.components().count() == 1
+            && let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            let example = dir.join("examples").join(typed);
+            if example.is_file() {
+                return Ok(example);
+            }
+        }
+        Err(looked)
+    })
 }
 
 /// The file `path` names, and where it was looked for when it isn't found: as typed, from the current folder; then, when `path` is

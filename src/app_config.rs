@@ -350,7 +350,7 @@ impl AppConfig {
     /// The config at `path`; none when there is no file. Read as bytes, so a file that isn't text (what a crash can leave) isn't a
     /// config, rather than unread.
     fn parse(path: &Path) -> Result<Option<Self>, ReadError> {
-        match std::fs::read(path) {
+        match crate::home::read_settings(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| ReadError::NotAConfig(e.to_string())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(ReadError::Unread(e.to_string())),
@@ -363,6 +363,7 @@ impl AppConfig {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         match Self::parse(path) {
             Err(ReadError::Unread(why)) => return Err(unread(path, &why)),
+            Err(ReadError::NotAConfig(why)) if crate::home::protected_setting(path) => return Err(unread(path, &why)),
             Err(ReadError::NotAConfig(_)) => drop(settings_file::keep_aside(path)),
             Ok(_) => {}
         }
