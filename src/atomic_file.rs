@@ -5,16 +5,16 @@
 //! it is in the file's place (`make_temp`), so two saves of one file at once, by two TMRs, take turns.
 //!
 //! The file is written in place instead, flushed as well, but no longer whole if the system goes down mid-write, when the temp can't be
-//! made or the replace is refused (a viewer holding the file without letting it be deleted). The two settings files are in a folder of
-//! their own, `settings\` (`settings_file`), which an install for all users makes writable by users (`dist/tmr.iss`), so their saves
-//! are whole there too; beside tmr.exe, in Program Files, a user's TMR could make no temp and wrote every save in place. In place stays
-//! for a home whose `settings\` takes no temp: a share, read-only media, an old install's files beside tmr.exe that couldn't be taken
-//! into it. Saves are rare (a setting changed, a calibration saved, Start, the window closing, a cycle's results), and none is in a
-//! test's loop.
+//! made or the replace is refused (a viewer holding the file without letting it be deleted); never through a link (`in_place`). The two
+//! settings files are in a folder of their own, `settings\` (`settings_file`), which an install for all users makes writable by users
+//! (`dist/tmr.iss`), so their saves are whole there too; beside tmr.exe, in Program Files, a user's TMR could make no temp and wrote
+//! every save in place. In place stays for a home whose `settings\` takes no temp: a share, read-only media, an old install's files
+//! beside tmr.exe that couldn't be taken into it. Saves are rare (a setting changed, a calibration saved, Start, the window closing, a
+//! cycle's results), and none is in a test's loop.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
-use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -28,8 +28,10 @@ use windows::Win32::Security::{
     SetSecurityDescriptorControl,
 };
 use windows::Win32::Storage::FileSystem::{
-    DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_RENAME_INFO, FILE_SHARE_READ, FileRenameInfo, FileRenameInfoEx,
-    GetVolumeInformationByHandleW, READ_CONTROL, SetFileInformationByHandle, WRITE_DAC,
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_INFO, FILE_RENAME_INFO, FILE_SHARE_READ, FileIdInfo, FileRenameInfo, FileRenameInfoEx, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetVolumeInformationByHandleW, READ_CONTROL, SECURITY_IDENTIFICATION, SetFileInformationByHandle,
+    WRITE_DAC,
 };
 use windows::Win32::System::SystemServices::FILE_PERSISTENT_ACLS;
 
@@ -54,9 +56,47 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<Written, String> {
     write_by(path, bytes, open)
 }
 
-/// `path` opened to be written from its start: `new`, the temp (`make_temp`); else the file itself, in place
+/// `path` opened to be written from its start: `new`, the temp (`make_temp`); else the file itself, in place (`in_place`)
 fn open(path: &Path, new: bool) -> io::Result<File> {
-    if new { make_temp(path) } else { OpenOptions::new().write(true).create(true).truncate(true).open(path) }
+    if new { make_temp(path) } else { in_place(path) }
+}
+
+/// `path` opened to be written in place, from its start, only when the file is the name's own, never through a link (review). In an
+/// install for all users `settings\` and `results\` are writable by every user, and TMR may run elevated, so a symbolic link there, or a
+/// hard link (another name of a file elsewhere), had a save written over a file the user can't write; and any user can have a save
+/// written in place, with a folder where its temp goes, or a program holding the file. Opened as the name holds it, not what a link
+/// there names, so a link to no file makes none, and a link, symbolic or hard, refuses the save, the file it names left as it was. A
+/// reparse point that names no other file, as OneDrive's files are, is opened through it again, with no right to act as TMR given to
+/// what it opens (a named pipe's server), and must be the same file.
+fn in_place(path: &Path) -> io::Result<File> {
+    let named = OpenOptions::new().write(true).create(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0).open(path)?;
+    let (kind, mut info) = (named.metadata()?, BY_HANDLE_FILE_INFORMATION::default());
+    // SAFETY: the file's handle, open for the call, and a struct of the size the call fills, which outlives it
+    unsafe { GetFileInformationByHandle(handle(&named), &mut info) }.map_err(os_error)?;
+    let link = || io::Error::other("it is a link, and a save writes no file through one");
+    if kind.file_type().is_symlink() || info.nNumberOfLinks > 1 {
+        return Err(link());
+    }
+    let file = if kind.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0 {
+        named
+    } else {
+        let through = OpenOptions::new().write(true).security_qos_flags(SECURITY_IDENTIFICATION.0).open(path)?;
+        if id(&through)? != id(&named)? {
+            return Err(link());
+        }
+        through
+    };
+    file.set_len(0)?;
+    Ok(file)
+}
+
+/// The file `file` is: its volume and its ID in it (all 128 bits: ReFS's don't fit `nFileIndex`'s 64)
+fn id(file: &File) -> io::Result<FILE_ID_INFO> {
+    let mut id = FILE_ID_INFO::default();
+    // SAFETY: the file's handle, open for the call, and a struct of the size given, which outlives it
+    unsafe { GetFileInformationByHandleEx(handle(file), FileIdInfo, (&raw mut id).cast(), size_of::<FILE_ID_INFO>() as u32) }
+        .map_err(os_error)?;
+    Ok(id)
 }
 
 /// `temp` made new, never one already there (a link among them), and the save's alone until it is in the file's place: others may read
@@ -287,6 +327,20 @@ fn icacls(target: &Path, args: &[&str]) {
     assert!(done.status.success(), "icacls {} {args:?}: {said}", target.display());
 }
 
+/// A symbolic link at `link` to `target`; false where this account may make none (no Developer Mode, not run as administrator), and
+/// the test does without
+#[cfg(test)]
+pub(crate) fn symlink(target: &Path, link: &Path) -> bool {
+    match std::os::windows::fs::symlink_file(target, link) {
+        Ok(()) => true,
+        Err(e) if e.raw_os_error() == Some(windows::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD.0 as i32) => {
+            eprintln!("No symbolic link made ({e}): its part of the test is skipped");
+            false
+        }
+        Err(e) => panic!("{}: {e}", link.display()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,5 +488,76 @@ mod tests {
             assert!(seen.is_empty(), "of {reads} reads, {} not of a whole file: {:?}", seen.len(), &seen[..seen.len().min(8)]);
         }
         assert!(!temp_of(path).exists(), "no temp left");
+    }
+
+    /// A link at the file is replaced by the save, never written through (review: in an install for all users `settings\` and `results\`
+    /// are writable by every user, and a link there had a save by TMR run as administrator written over the file it names): a hard link,
+    /// another name of a file elsewhere, and a symbolic link, one to no file too, through which a save makes none
+    #[test]
+    fn a_link_at_the_file_is_replaced_not_written_through() {
+        let dir = TempDir::new("atomic-links");
+        let victim = PathBuf::from(dir.file("victim.txt"));
+        fs::write(&victim, b"not TMR's").unwrap();
+        let hard = PathBuf::from(dir.file("tmr-cfg.json"));
+        fs::hard_link(&victim, &hard).unwrap();
+        assert_eq!(write(&hard, b"{}"), Ok(Written::Replaced));
+        assert_eq!((fs::read(&hard).unwrap(), fs::read(&victim).unwrap()), (b"{}".to_vec(), b"not TMR's".to_vec()));
+
+        let symbolic = PathBuf::from(dir.file("window.json"));
+        if symlink(&victim, &symbolic) {
+            assert_eq!(write(&symbolic, b"{}"), Ok(Written::Replaced));
+            assert!(!fs::symlink_metadata(&symbolic).unwrap().file_type().is_symlink(), "the link replaced");
+            assert_eq!((fs::read(&symbolic).unwrap(), fs::read(&victim).unwrap()), (b"{}".to_vec(), b"not TMR's".to_vec()));
+            let (nowhere, named) = (PathBuf::from(dir.file("result.json")), PathBuf::from(dir.file("named.txt")));
+            assert!(symlink(&named, &nowhere));
+            assert_eq!(write(&nowhere, b"{}"), Ok(Written::Replaced));
+            assert!(!named.exists(), "no file made through the link");
+        }
+        assert!([&hard, &symbolic].iter().all(|path| !temp_of(path).exists()));
+    }
+
+    /// Written in place, a save writes no file through a link (review): where its temp can't be made, as any user can stop it with a
+    /// folder of its name, or the file can't be replaced, as a program can hold its own file, a link at the file, hard or symbolic,
+    /// refuses the save, the file it names as it was, and a link to no file has none made; a file of its own is written in place
+    #[test]
+    fn in_place_a_save_writes_no_file_through_a_link() {
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
+        let dir = TempDir::new("atomic-links-in-place");
+        let victim = PathBuf::from(dir.file("victim.txt"));
+        fs::write(&victim, b"not TMR's").unwrap();
+        let no_temp = |path: &Path| fs::create_dir(temp_of(path)).unwrap();
+        let refused = |path: &Path| {
+            let error = write(path, b"{}").unwrap_err();
+            assert!(error.contains("a link"), "{error}");
+            assert_eq!(fs::read(&victim).unwrap(), b"not TMR's", "{}", path.display());
+        };
+        let hard = PathBuf::from(dir.file("tmr-cfg.json"));
+        fs::hard_link(&victim, &hard).unwrap();
+        no_temp(&hard);
+        refused(&hard);
+
+        // Held by a program that lets it be read and written, not deleted, so it can't be replaced
+        let held = PathBuf::from(dir.file("window.json"));
+        fs::hard_link(&victim, &held).unwrap();
+        let holder = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0).open(&held).unwrap();
+        refused(&held);
+        drop(holder);
+
+        let symbolic = PathBuf::from(dir.file("result.json"));
+        if symlink(&victim, &symbolic) {
+            no_temp(&symbolic);
+            refused(&symbolic);
+            let (nowhere, named) = (PathBuf::from(dir.file("other.json")), PathBuf::from(dir.file("named.txt")));
+            assert!(symlink(&named, &nowhere));
+            no_temp(&nowhere);
+            assert!(write(&nowhere, b"{}").is_err());
+            assert!(!named.exists(), "no file made through the link");
+        }
+
+        let own = PathBuf::from(dir.file("own.json"));
+        fs::write(&own, b"as it was, and longer than the save").unwrap();
+        no_temp(&own);
+        assert_eq!(write(&own, b"{\"saved\": 1}"), Ok(Written::InPlace));
+        assert_eq!(fs::read(&own).unwrap(), b"{\"saved\": 1}", "written from its start, the rest cut");
     }
 }

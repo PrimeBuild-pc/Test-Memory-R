@@ -103,17 +103,19 @@ pub fn backup_of(path: &Path) -> PathBuf {
 /// user's to look at, or delete. Where, or why it couldn't be: where the folder takes no new file (a file still in the old place of an
 /// install for all users, `in_home`), and then a calibration's save writes over it, the window's not (`settings.rs`). A copy, not a
 /// rename: a rename in its own folder needs no right to make a file there, so it would work there, and leave no file the user could
-/// write, nor make, to save in.
+/// write, nor make, to save in. Written as a save is (`atomic_file::write`), never through a link at `<path>.unreadable` (review: a copy
+/// wrote through one, so TMR run as administrator, at a setup or the window's start, wrote the bad file's bytes, which any user can
+/// choose, over the file a link there named).
 pub fn keep_aside(path: &Path) -> Result<PathBuf, String> {
     let kept = with_suffix(path, ".unreadable");
-    match fs::copy(path, &kept) {
+    match fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| atomic_file::write(&kept, &bytes)) {
         Ok(_) => {
             log::warn!("{} is unreadable: kept as {}", path.display(), kept.display());
             Ok(kept)
         }
         Err(e) => {
             log::warn!("{} is unreadable, and couldn't be kept as {} ({e})", path.display(), kept.display());
-            Err(e.to_string())
+            Err(e)
         }
     }
 }
@@ -280,5 +282,37 @@ mod tests {
         assert_eq!(fs::read(dir.file("window.json.unreadable")).unwrap(), b"{\"chart\": ");
         assert!(path.exists());
         assert!(keep_aside(&PathBuf::from(dir.file("absent.json"))).is_err());
+    }
+
+    /// A link at `<file>.unreadable`, or at its last good copy, is replaced, never written through (review: in an install for all users
+    /// `settings\` is writable by every user, and a file kept aside, or a copy written in place, went over the file a link there named,
+    /// with what the bad file held, which that user can write): the kept file, or the save, is written whole, and where the copy can only
+    /// be written in place, it isn't, and the save is done
+    #[test]
+    fn a_link_where_a_settings_file_is_kept_aside_or_copied_isnt_written_through() {
+        let dir = TempDir::new("settings-links");
+        let victim = PathBuf::from(dir.file("victim.txt"));
+        fs::write(&victim, b"not TMR's").unwrap();
+        let path = PathBuf::from(dir.file("tmr-cfg.json"));
+        fs::write(&path, b"what any user wrote here, not a config").unwrap();
+        fs::hard_link(&victim, with_suffix(&path, ".unreadable")).unwrap();
+        assert!(keep_aside(&path).is_ok());
+        assert_eq!(fs::read(with_suffix(&path, ".unreadable")).unwrap(), b"what any user wrote here, not a config");
+        assert_eq!(fs::read(&victim).unwrap(), b"not TMR's");
+
+        let other = PathBuf::from(dir.file("window.json"));
+        fs::write(&other, b"{\"chart\": ").unwrap();
+        if atomic_file::symlink(&victim, &with_suffix(&other, ".unreadable")) {
+            assert!(keep_aside(&other).is_ok());
+            assert!(!fs::symlink_metadata(with_suffix(&other, ".unreadable")).unwrap().file_type().is_symlink());
+            assert_eq!(fs::read(&victim).unwrap(), b"not TMR's");
+        }
+
+        // The copy's temp stopped by a folder of its name, so it could only be written in place
+        let (copied, copy) = (PathBuf::from(dir.file("third.json")), with_suffix(&PathBuf::from(dir.file("third.json")), ".bak"));
+        fs::hard_link(&victim, &copy).unwrap();
+        fs::create_dir(with_suffix(&copy, ".tmp")).unwrap();
+        assert_eq!(save(&copied, b"{}"), Ok(Written::Replaced));
+        assert_eq!((fs::read(&copied).unwrap(), fs::read(&victim).unwrap()), (b"{}".to_vec(), b"not TMR's".to_vec()));
     }
 }
