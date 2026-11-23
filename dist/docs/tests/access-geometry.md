@@ -138,9 +138,11 @@ without depending on the run's channel setting.
 
 The checked community configs all use `Interleave Type=1`, matching the one-line visit.
 `Interleave Type=0` on two or more channels is TM5's 128-bit mode: each visit is 128 bytes,
-two lines, and the period is `2 × Parameter` lines whatever the Channels. An import translates
-it into that geometry, `period_lines` 2 × Parameter and `group_lines` 2 (a Parameter of 1 or
-less is sequential); with `patterns=legacy` it keeps group 1, with a warning.
+two lines, and the period is `2 × Parameter` lines whatever the Channels. An import runs it as
+that geometry, a period of 2 × Parameter lines and a group of 2 (a Parameter of 1 or less is
+sequential). TMR's numbered modes have no grouped walk, so under `patterns=legacy` or a numbered
+`pattern-mode=` it keeps group 1, with a warning. `channels=` on the command line picks the walk
+again: one channel is type 1's walk, two or more TM5's 128-bit one.
 
 Existing plans and TM5 imports retain their current walks. Even `plan=all` runs each
 registered test with its settings, rather than generating every period/group combination.

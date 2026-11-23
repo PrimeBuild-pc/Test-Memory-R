@@ -273,18 +273,25 @@ Otherwise TMR reads a `.cfg` as TM5 does:
 - **Tests and Test Sequence.** Only `[Test0]` to `[Test(Tests-1)]` are read (Tests is 6 when
   missing), and a Test Sequence entry at or above Tests is skipped. Without a Test Sequence, TM5's
   default one runs: `6,12,14,2,15,10,5,1,4,3,0,13,9,7,8,1,11`. Anything but a digit separates the
-  numbers (a letter is refused as a typo); the first 127 characters and the first 32 numbers count.
-- **Missing values.** A missing or empty key, and a missing section, take TM5's default: Cycles 3,
-  Tests 6, Channels 2, Testing Window Size 1024 MB, Lock Memory Granularity 16 MB.
+  numbers (a letter is refused as a typo); the first 127 characters and the first 32 numbers count,
+  and a number keeps its lowest byte, as TM5 stores it, so 258 is test 2.
+- **Missing values.** A missing key, an empty number and a missing section take TM5's default:
+  Cycles 3, Tests 6, Channels 2, Testing Window Size 1024 MB, Lock Memory Granularity 16 MB. An
+  empty text value stays empty, as TM5 0.12.3 reads it: an empty `Function=` on an enabled test is
+  refused, as any function TMR doesn't know is, and an empty `Test Sequence=` runs every enabled
+  test once.
 - **Numbers.** Hex is written with `0x`, an `h` after it, or a letter A-F in it; anything else is
   decimal, and a fraction is dropped. Pattern Param0 and Param1 written as digits only are decimal.
   Only a number's low 32 bits count, so 1usmus_v3's 9-digit Pattern Param1 values run as their
   last 8 digits. Quotes around a value and a `;` comment after it are dropped.
 - **Odd values.** A SimpleTest Pattern Mode TMR doesn't have runs as TM5 runs it, by its lowest
-  byte (1 or 2, else 0); TMR's own mode numbers keep their meaning. A negative Parameter runs as
-  0, a negative Test Block Size as the window. Interleave Type 0 on two or more channels walks
-  each strided SimpleTest in 128-byte visits, as TM5's 128-bit mode does. A disabled test's
-  Function isn't checked, Test0's included.
+  byte (1 or 2, else 0); TMR's own mode numbers (10, 11, 13, 15-17, 20, 21, 30-33) keep their
+  meaning. A negative Parameter runs as 0, and a negative Test Block Size as TM5's shift to bytes
+  in 32 bits leaves it: -1 to -2048 the window, -3584 512 MB, -4096 1 MB. Interleave Type 0 on two
+  or more channels walks each strided SimpleTest in 128-byte visits, as TM5's 128-bit mode does;
+  `channels=` and `pattern-mode=` on the command line pick that walk again (one channel is type
+  1's walk, and a numbered mode visits one line). A disabled test's Function isn't checked,
+  Test0's included.
 - **Wider ranges.** TMR takes any Channels from 1, a Lock Memory Granularity of 1-1024 MB and a
   Tests of 1-16, where TM5 takes 1-3, 1-512 MB and 2-16.
 
@@ -293,11 +300,12 @@ about NUL bytes (what a crash leaves), a line that is neither a `[section]` nor 
 key or section TM5 doesn't read, a key before the first section, a header without its `]`, a
 repeated section or key, text that isn't UTF-8, a missing section, a `[TestN]` at or above Tests,
 a number wider than 32 bits, a negative Parameter or Test Block Size, an unusual Test Sequence
-separator, and a Tests, Channels or Lock Memory Granularity outside what TMR takes. These are
-warnings, not errors: the file loads, read as TM5 reads it. The first of a repeated key or section
-counts, a header without its `]` still starts its section, and NULs and spaces around a name or a
-value are ignored. A value that isn't a number in TM5's form stops the run, and so does a negative
-one where TM5 gives it no meaning (Cores, Cycles and the like).
+separator or a number of 256 or more in it, and a Tests, Channels or Lock Memory Granularity
+outside what TMR takes. These are warnings, not errors: the file loads, read as TM5 reads it. The
+first of a repeated key or section counts, a header without its `]` still starts its section, and
+NULs and spaces around a name or a value are ignored. A value that isn't a number in TM5's form
+stops the run, and so does a negative Cores, Cycles or the like: TM5 checks such a number without
+its `-` and then stores it negated, so `Cycles=-3` would run 253 cycles.
 
 ### TMR JSON configs
 

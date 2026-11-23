@@ -452,6 +452,26 @@ fn apply_pattern_mode(defs: &mut [TestDefinition], mode: u32) {
     }
 }
 
+/// A TM5 import's Interleave Type 0 walks, picked again after the command line's `channels=` and `pattern-mode=`, which they follow
+/// (`config::interleave_0_walk`): channels=1 is type 1's walk, and a numbered mode has no grouped kernel, so visits a line, said.
+fn repick_interleave_0_walks(defs: &mut [TestDefinition], channels: u32) {
+    for def in defs.iter_mut() {
+        let native = def.config.native_program().is_some();
+        let Some(ctx) = def.config.parameter_context.as_mut().filter(|c| c.interleave_0) else { continue };
+        let before = ctx.access;
+        crate::config::interleave_0_walk(ctx, channels, native);
+        // Said once: the import already said it of a walk that hasn't changed
+        if let Some(access) = ctx.access.filter(|&access| !native && before != Some(access)) {
+            let period = access.period_lines;
+            log::warn!(
+                "{}: TM5's Interleave Type=0 visits 128 B, two lines, every {period} lines; TMR's numbered modes have no grouped walk, so \
+                 this one visits one line every {period}",
+                def.display_name
+            );
+        }
+    }
+}
+
 /// The command line's `sequence=` and `order=`, on every Mem-Sequence step: `sequence=` replaces its passes, `order=` the order its steps
 /// take when they name none. Checked as a config's are.
 fn apply_sequence(defs: &mut [TestDefinition], sequence: Option<&str>, order: Option<&str>) -> Result<(), String> {
@@ -1018,8 +1038,8 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
         log::info!("Applying CLI channels override: {} channel(s)", channels);
         for def in test_definitions.iter_mut() {
             if let Some(ref mut ctx) = def.config.parameter_context {
-                // Recompute stride if this test has stride_cachelines (SimpleTest)
-                if ctx.access.is_none() && ctx.stride_cachelines.is_some() && ctx.raw_parameter > 0 {
+                // Recompute stride if this test has stride_cachelines (SimpleTest); an Interleave Type 0 walk is picked below
+                if !ctx.interleave_0 && ctx.access.is_none() && ctx.stride_cachelines.is_some() && ctx.raw_parameter > 0 {
                     let stride_cl = crate::config::tm5_stride_lines(channels, ctx.raw_parameter);
                     ctx.stride_cachelines = Some(stride_cl);
                     ctx.stride_elements = Some(stride_cl * (def.config.cache_line_bytes / 8));
@@ -1033,6 +1053,14 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
                 }
             }
         }
+    }
+
+    // After both: a numbered pattern-mode= changes the walk too
+    if channels_override.is_some() || pattern_mode_override.is_some() {
+        repick_interleave_0_walks(
+            &mut test_definitions,
+            channels_override.or(config.map(crate::config::ModernConfig::channels)).unwrap_or(2),
+        );
     }
 
     pair_native_rounds(&mut test_definitions);
@@ -7373,6 +7401,39 @@ mod tests {
         let older: ModernConfig = serde_json::from_value(exported).unwrap();
         let (defs, _) = create_test_definitions_from_config(&older, cache_info).unwrap();
         assert!(notes(&defs).is_empty());
+    }
+
+    /// TODO 135: a TM5 import's Interleave Type 0 walk is picked again after the command line's channels= and pattern-mode=: a numbered
+    /// mode visits a line every 2 x Parameter, as it has no grouped kernel (the run was refused), channels=1 is type 1's walk, and
+    /// channels=2 gives a Channels=1 .cfg TM5's 128-bit one. It survives an export to JSON.
+    #[test]
+    fn interleave_0_walks_follow_the_command_line() {
+        let imported = |channels: u32| {
+            let cfg = format!(
+                "[Main Section]\nTest Sequence=1\n[Global Memory Setup]\nChannels={channels}\nInterleave Type=0\n\
+                 [Test1]\nFunction=SimpleTest\nParameter=8\n"
+            );
+            let modern = crate::config::LegacyConfig::parse_legacy_format(&cfg).unwrap().to_modern_config().unwrap();
+            let exported: crate::config::ModernConfig = serde_json::from_value(serde_json::to_value(modern).unwrap()).unwrap();
+            create_test_definitions_from_config(&exported, crate::tests::get_cache_info()).unwrap().0
+        };
+        let walk = |defs: &[TestDefinition]| {
+            let ctx = defs[0].config.parameter_context.as_ref().unwrap();
+            (ctx.access.map(|a| (a.period_lines, a.group_lines)), ctx.stride_cachelines)
+        };
+        let mut defs = imported(2);
+        assert_eq!(walk(&defs), (Some((16, 2)), Some(15)));
+        apply_pattern_mode(&mut defs, 0);
+        assert!(crate::config::validate_access(&defs[0].config).is_err());
+        repick_interleave_0_walks(&mut defs, 2);
+        assert_eq!(walk(&defs), (Some((16, 1)), Some(15)));
+        crate::config::validate_access(&defs[0].config).unwrap();
+        repick_interleave_0_walks(&mut defs, 1);
+        assert_eq!(walk(&defs), (None, Some(7)));
+        let mut defs = imported(1);
+        assert_eq!(walk(&defs), (None, Some(7)));
+        repick_interleave_0_walks(&mut defs, 3);
+        assert_eq!(walk(&defs), (Some((16, 2)), Some(15)));
     }
 
     /// A dependent native Bench-Verify follows its own family's Bench-Init and no other (Astra's review: the Verify's identity was its
