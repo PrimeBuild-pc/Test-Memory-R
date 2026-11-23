@@ -70,7 +70,8 @@ use windows::Win32::System::Memory::{
     GetProcessWorkingSetSizeEx, MEM_ADDRESS_REQUIREMENTS, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_EXTENDED_PARAMETER_TYPE, MEM_LARGE_PAGES,
     MEM_PRESERVE_PLACEHOLDER, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER, MEM_RESERVE, MEM_RESERVE_PLACEHOLDER,
     MemExtendedParameterAddressRequirements, MemExtendedParameterAttributeFlags, MemExtendedParameterNumaNode, PAGE_NOACCESS,
-    PAGE_READWRITE, QUOTA_LIMITS_HARDWS_MAX_DISABLE, QUOTA_LIMITS_HARDWS_MIN_DISABLE, SetProcessWorkingSetSizeEx, VIRTUAL_ALLOCATION_TYPE,
+    PAGE_READWRITE, QUOTA_LIMITS_HARDWS_MAX_DISABLE, QUOTA_LIMITS_HARDWS_MAX_ENABLE, QUOTA_LIMITS_HARDWS_MIN_DISABLE,
+    QUOTA_LIMITS_HARDWS_MIN_ENABLE, SETPROCESSWORKINGSETSIZEEX_FLAGS, SetProcessWorkingSetSizeEx, VIRTUAL_ALLOCATION_TYPE,
     VIRTUAL_FREE_TYPE, VirtualAlloc2, VirtualFree, VirtualLock,
 };
 use windows::Win32::System::SystemServices::{
@@ -124,12 +125,13 @@ impl CommitMethod {
 /// short (TODO 131's report: 0.70 GiB over seven threads), little enough that the run stays on large pages.
 pub const TAIL_PERCENT: usize = 5;
 
-/// The most a thread with `target` bytes may take as its locked 4 KiB tail: `TAIL_PERCENT` of it, in whole 4 KiB pages. A thread short by
-/// more stops the run before testing, as does any short thread of a run with no 4 KiB pages (`minpage=large`): a run tests every
-/// thread's whole share or none. `minpage=reg-page` takes 4 KiB pages for whatever is left, uncapped and pageable, and has no tail.
+/// The most a thread with `target` bytes may take as its locked 4 KiB tail: `TAIL_PERCENT` of its 4 KiB pages, counted in pages so that
+/// only the result rounds down (a 320 MiB thread may take 16 MiB, not a page less). A thread short by more stops the run before testing,
+/// as does any short thread of a run with no 4 KiB pages (`minpage=large`): a run tests every thread's whole share or none.
+/// `minpage=reg-page` takes 4 KiB pages for whatever is left, uncapped and pageable, and has no tail.
 pub fn tail_cap(target: usize) -> usize {
     let page = crate::constants::PAGE_SIZE_4KB;
-    target / 100 * TAIL_PERCENT / page * page
+    target / page * TAIL_PERCENT / 100 * page
 }
 
 /// Added to the working-set minimum beyond a locked tail: Windows locks at most the minimum less a small overhead of its own
@@ -757,37 +759,42 @@ impl VmOps for Win32Vm {
 }
 
 impl Win32Vm {
-    /// The working-set minimum and maximum, both raised (`up`) or lowered by `bytes`, soft limits as Windows' default: the minimum is what
-    /// the process may lock, the maximum only has to stay above it.
+    /// The working-set minimum and maximum, both raised (`up`) or lowered by `bytes`: the minimum is what the process may lock, the
+    /// maximum only has to stay above it. Each limit keeps the enforcement the process had, hard or soft (Windows' default), passed back
+    /// as read: TMR doesn't own that policy, and the window runs sessions in one process, so a run must leave it as it found it. Hard
+    /// limits are safe while raised: both rise by the same bytes, so the process keeps the headroom it had beside the locked tail.
     fn adjust_working_set(bytes: usize, up: bool) -> Result<(), u32> {
         // SAFETY: `GetCurrentProcess` is a pseudo-handle with every right, closed by nobody. The three out-params are locals passed
         // directly, so no pointer outlives the call.
-        let (min, max) = unsafe {
+        let (min, max, flags) = unsafe {
             let (mut min, mut max, mut flags) = (0usize, 0usize, 0u32);
             if !GetProcessWorkingSetSizeEx(GetCurrentProcess(), &mut min, &mut max, &mut flags).as_bool() {
                 return Err(Self::last_error());
             }
-            (min, max)
+            (min, max, flags)
         };
         let (new_min, new_max) = if up {
             (min.saturating_add(bytes), max.saturating_add(bytes))
         } else {
             (min.saturating_sub(bytes), max.saturating_sub(bytes).max(min.saturating_sub(bytes)))
         };
-        os_call(format!("SetProcessWorkingSetSizeEx({new_min:#x}, {new_max:#x}) [was {min:#x}, {max:#x}]"), || {
+        // One bit of each pair, as Windows reports them; 0 for a pair would leave it unchanged, both bits are refused (87)
+        let enforcement = flags & WORKING_SET_ENFORCEMENT.0;
+        os_call(format!("SetProcessWorkingSetSizeEx({new_min:#x}, {new_max:#x}, {enforcement:#x}) [was {min:#x}, {max:#x}]"), || {
             // SAFETY: plain values on the current process's pseudo-handle; nothing of ours is dereferenced.
-            unsafe {
-                SetProcessWorkingSetSizeEx(
-                    GetCurrentProcess(),
-                    new_min,
-                    new_max,
-                    QUOTA_LIMITS_HARDWS_MIN_DISABLE | QUOTA_LIMITS_HARDWS_MAX_DISABLE,
-                )
-            }
-            .map_err(|e| win32_code(&e))
+            unsafe { SetProcessWorkingSetSizeEx(GetCurrentProcess(), new_min, new_max, SETPROCESSWORKINGSETSIZEEX_FLAGS(enforcement)) }
+                .map_err(|e| win32_code(&e))
         })
     }
 }
+
+/// The four bits that say whether the working-set minimum and maximum are hard limits (`ENABLE`) or soft (`DISABLE`)
+const WORKING_SET_ENFORCEMENT: SETPROCESSWORKINGSETSIZEEX_FLAGS = SETPROCESSWORKINGSETSIZEEX_FLAGS(
+    QUOTA_LIMITS_HARDWS_MIN_ENABLE.0
+        | QUOTA_LIMITS_HARDWS_MIN_DISABLE.0
+        | QUOTA_LIMITS_HARDWS_MAX_ENABLE.0
+        | QUOTA_LIMITS_HARDWS_MAX_DISABLE.0,
+);
 
 fn win32_code(e: &windows::core::Error) -> u32 {
     // HRESULT_FROM_WIN32 puts the Win32 code in the low word under facility 7.
@@ -2387,8 +2394,58 @@ mod tests {
         let err = StitchedArena::build_with(vm.clone(), &req).unwrap_err();
         assert!(err.contains("isn't built yet"), "{err}");
         assert!(vm.state().commits.is_empty());
-        assert_eq!(tail_cap(2 * GIB), 2 * GIB / 100 * 5 / 4096 * 4096);
+        assert_eq!(tail_cap(2 * GIB), 2 * GIB / 4096 * 5 / 100 * 4096);
         assert_eq!(tail_cap(16 * MIB) % 4096, 0);
+    }
+
+    /// The cap is 5% of a thread's pages, not of its bytes rounded first: a 320 MiB thread 16 MiB short, exactly 5%, takes its tail
+    #[test]
+    fn a_thread_short_by_exactly_five_percent_takes_its_tail() {
+        let vm = FakeVm::default();
+        vm.state().huge_pages.insert(None, 0);
+        vm.state().large_bytes.insert(None, 304 * MIB);
+        let mut req = StitchRequest::new(threads(&[320 * MIB], &[None]));
+        req.regular = RegularPages::Locked;
+        let arena = StitchedArena::build_with(vm.clone(), &req).unwrap();
+        assert_well_formed(&arena);
+        assert_eq!(arena.spans()[0].bytes_at(PageSizeLevel::Regular), 16 * MIB);
+        assert_eq!(vm.state().locked.values().sum::<usize>(), 16 * MIB);
+        assert_eq!(tail_cap(320 * MIB), 16 * MIB);
+    }
+
+    /// The real calls, on this test's own process: the tail's raise and its lowering keep the process's working-set enforcement, so a hard
+    /// minimum (a 200 KiB-odd one, harmless to the other tests) stays hard while raised and after, never left soft by a run
+    #[test]
+    fn the_working_set_keeps_the_enforcement_it_had() {
+        let read = || {
+            let (mut min, mut max, mut flags) = (0usize, 0usize, 0u32);
+            // SAFETY: the current process's pseudo-handle; the out-params are locals passed directly.
+            assert!(unsafe { GetProcessWorkingSetSizeEx(GetCurrentProcess(), &mut min, &mut max, &mut flags) }.as_bool());
+            (min, max, flags & WORKING_SET_ENFORCEMENT.0)
+        };
+        fn set((min, max, flags): (usize, usize, u32)) -> windows::core::Result<()> {
+            // SAFETY: plain values on the current process's pseudo-handle.
+            unsafe { SetProcessWorkingSetSizeEx(GetCurrentProcess(), min, max, SETPROCESSWORKINGSETSIZEEX_FLAGS(flags)) }
+        }
+        /// Puts the process's limits back however the test ends
+        struct Restore((usize, usize, u32));
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = set(self.0);
+            }
+        }
+        let original = read();
+        let _restore = Restore(original);
+        let min_bits = QUOTA_LIMITS_HARDWS_MIN_ENABLE.0 | QUOTA_LIMITS_HARDWS_MIN_DISABLE.0;
+        let hard_min = original.2 & !min_bits | QUOTA_LIMITS_HARDWS_MIN_ENABLE.0;
+        set((original.0, original.1, hard_min)).unwrap();
+        let mut vm = Win32Vm;
+        vm.raise_working_set(16 * MIB).unwrap();
+        let raised = read();
+        vm.lower_working_set(16 * MIB).unwrap();
+        let lowered = read();
+        assert_eq!((raised.2, lowered.2), (hard_min, hard_min), "flags {raised:x?} while raised, {lowered:x?} after");
+        assert_eq!(lowered.0, original.0, "the minimum back where it was");
     }
 
     #[test]

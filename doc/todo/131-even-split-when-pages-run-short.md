@@ -104,7 +104,8 @@ Phase 2: the live check of locking an all-4 KiB run, then its lock.
 - **The setting**: `tail4k=locked|pageable|off` (JSON `regular_tail`), default `locked`; only with `minpage=` above 4 KiB. The
   cap is `stitched::TAIL_PERCENT` (5%) of each thread's target; every short thread must be within it, else no tail is taken.
 - **Locking**: `VmOps` gained `raise_working_set`, `lower_working_set` and `lock`. The tail raises the working-set minimum
-  (and maximum) by the whole shortfall plus 16 MiB of slack, soft limits, after enabling `SeIncreaseWorkingSetPrivilege` (held
+  (and maximum) by the whole shortfall plus 16 MiB of slack, each limit kept hard or soft as the process had it (soft is
+  Windows' default; it was forced soft until Astra's review, 2026-11-23), after enabling `SeIncreaseWorkingSetPrivilege` (held
   by every user, disabled by default, as `whoami /priv` shows on the dev box); each 4 KiB commit is then `VirtualLock`ed as it
   is made. The arena lowers the minimum again on drop, since Windows charges it until then and the window runs sessions in one
   process. Either refusal stops the run.
