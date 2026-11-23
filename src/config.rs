@@ -1133,7 +1133,7 @@ impl ModernConfig {
     pub fn save_to_file(&self, path: &str) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-        fs::write(path, json).map_err(|e| format!("Failed to write config file: {}", e))
+        crate::atomic_file::write(std::path::Path::new(path), json.as_bytes()).map(drop)
     }
 
     // Convert to runtime allocation strategy (extent/chunk modes are now test-specific)
