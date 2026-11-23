@@ -211,6 +211,12 @@ Inno Setup 7.1 (a 64-bit setup, `SetupArchitecture=x64`, the owner 2026-10-26; t
 `{app}\configs`, `results`, `logs` and a `{}` `tmr-cfg.json` (`dist/tmr-cfg.json`, which TMR reads
 as no settings) get `users-modify`; `{app}` and `tmr.exe` keep Program Files' ACL.
 
+Since 2026-11-23 (the owner): `tmr-cfg.json` and `window.json` are in `{app}\settings\`, made
+`users-modify` as `logs\` is, so a user's TMR can make a save's temp beside them and every save is
+written whole; beside tmr.exe it could only write them in place. An upgrade moves the old two into
+`settings\` when it has none (the `[Dirs]` entry's `AfterInstall`, before `[Files]` puts the `{}`
+defaults there), and TMR copies one it still finds beside the exe (`src/settings_file.rs`).
+
 ## An installer? (weighed 2026-10-24; Inno Setup chosen 2026-10-25, above)
 
 A portable package (the bare `tmr.exe`) puts `tmr` on the PATH, which serves a console user, but

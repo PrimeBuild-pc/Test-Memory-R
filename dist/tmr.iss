@@ -6,10 +6,11 @@
 ; me only" on its first page or /CURRENTUSER, in %LOCALAPPDATA%\Programs, with no UAC. winget passes /ALLUSERS or /CURRENTUSER by the
 ; scope it picks.
 ;
-; TMR keeps its files beside tmr.exe (src/home.rs): configs\, results\, logs\, tmr-cfg.json and window.json. Users can't write in
-; Program Files, and TMR runs its tests unelevated, so for all users those are made writable by users: never the exe's folder or the
-; exe, since anyone able to replace tmr.exe could have an admin run their program. An upgrade never overwrites a config, and an uninstall leaves what TMR and
-; the user made.
+; TMR keeps its files beside tmr.exe (src/home.rs): configs\, results\, logs\ and settings\, which holds tmr-cfg.json and window.json
+; (src/settings_file.rs). Users can't write in Program Files, and TMR runs its tests unelevated, so for all users those four folders are
+; made writable by users: never the exe's folder or the exe, since anyone able to replace tmr.exe could have an admin run their program.
+; settings\ is a folder of its own so a save can write its temp beside the file, and put it in the file's place whole (src/atomic_file.rs).
+; An upgrade never overwrites a config or a setting, and an uninstall leaves what TMR and the user made.
 
 #ifndef AppVersion
   #error Pass the version: iscc /DAppVersion=0.1.0 /DStage=<folder> dist\tmr.iss
@@ -63,16 +64,19 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "{app}\configs"; Permissions: users-modify; Flags: uninsneveruninstall
 Name: "{app}\results"; Permissions: users-modify; Flags: uninsneveruninstall
 Name: "{app}\logs"; Permissions: users-modify; Flags: uninsneveruninstall
+; Before [Files]: an upgrade from a version that kept tmr-cfg.json and window.json beside tmr.exe moves them in first (MoveOldSettings)
+Name: "{app}\settings"; Permissions: users-modify; Flags: uninsneveruninstall; AfterInstall: MoveOldSettings
 
 [Files]
 Source: "{#Stage}\tmr.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\tmr.build.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs
 Source: "{#Stage}\configs\*"; DestDir: "{app}\configs"; Flags: onlyifdoesntexist uninsneveruninstall
-; The calibrations save into it, beside the exe: an empty one, writable by users, which TMR reads as no settings
-Source: "tmr-cfg.json"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall; Permissions: users-modify
-; The window's settings save into it as well (crates/tmr-gui/src/settings.rs): an empty one, writable by users, which is its defaults
-Source: "window.json"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall; Permissions: users-modify
+; The calibrations save into it (src/app_config.rs): an empty one, which TMR reads as no settings, writable by users as settings\ is.
+; Not while one is still beside tmr.exe, which couldn't be moved (MoveOldSettings): TMR takes that one into settings\ when it starts
+Source: "tmr-cfg.json"; DestDir: "{app}\settings"; Flags: onlyifdoesntexist uninsneveruninstall; Check: NoOldSetting('tmr-cfg.json')
+; The window's settings save into it as well (crates/tmr-gui/src/settings.rs): an empty one, which is its defaults
+Source: "window.json"; DestDir: "{app}\settings"; Flags: onlyifdoesntexist uninsneveruninstall; Check: NoOldSetting('window.json')
 
 [Icons]
 ; A double-click opens TMR's window (crates/tmr-app/src/launch.rs)
@@ -85,7 +89,7 @@ Name: "{autodesktop}\TMR"; Filename: "{app}\tmr.exe"; WorkingDir: "{app}"; Tasks
 Filename: "{app}\tmr.exe"; Description: "Open TMR"; Flags: nowait postinstall skipifsilent unchecked runasoriginaluser
 
 [Messages]
-FinishedLabel=TMR is installed. It keeps its configs, results and logs in its folder, beside tmr.exe.%n%nIts window needs the Windows App Runtime 2.4 or later, which TMR offers to download when it is missing; its console runs without it.
+FinishedLabel=TMR is installed. It keeps its configs, results, logs and settings in its folder, beside tmr.exe.%n%nIts window needs the Windows App Runtime 2.4 or later, which TMR offers to download when it is missing; its console runs without it.
 
 [Code]
 const
@@ -147,6 +151,39 @@ begin
     + 'Get it from https://aka.ms/vs/17/release/vc_redist.x64.exe, or with:' + #13#10
     + 'winget install Microsoft.VCRedist.2015+.x64' + #13#10#13#10
     + 'Install TMR anyway?', mbConfirmation, MB_YESNO) = IDYES;
+end;
+
+{ Name (tmr-cfg.json, window.json) where a version before settings\ kept it, beside tmr.exe }
+function OldSetting(Name: String): String;
+begin
+  Result := ExpandConstant('{app}\') + Name;
+end;
+
+{ Whether no Name is left beside tmr.exe, for [Files] to install its default into settings\ }
+function NoOldSetting(Name: String): Boolean;
+begin
+  Result := not FileExists(OldSetting(Name));
+end;
+
+{ An upgrade from a version that kept Name beside tmr.exe: moved into settings\ when settings\ has none, keeping the right to modify it
+  that the old installer gave Users on the file itself. Setup runs elevated for all users, so it can move what a user's TMR can't. One
+  that can't be moved (another program holding it) stays, and TMR takes a copy into settings\ when it next starts. }
+procedure MoveOldSetting(Name: String);
+var
+  Moved: String;
+begin
+  Moved := ExpandConstant('{app}\settings\') + Name;
+  if not FileExists(OldSetting(Name)) or FileExists(Moved) then exit;
+  if RenameFile(OldSetting(Name), Moved) then
+    Log('Moved ' + OldSetting(Name) + ' into settings\')
+  else
+    Log('Couldn''t move ' + OldSetting(Name) + ' into settings\: TMR takes a copy when it next starts');
+end;
+
+procedure MoveOldSettings;
+begin
+  MoveOldSetting('tmr-cfg.json');
+  MoveOldSetting('window.json');
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
