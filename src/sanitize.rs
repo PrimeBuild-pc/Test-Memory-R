@@ -12,7 +12,8 @@
 //! names its own values. A log alone has no results file to name them, so they are found by TMR's own lines for them (`log_values`: the
 //! console's for the system and each DIMM, the SMBIOS parse's, a calibration identity check's `current=`) and then replaced wherever else
 //! the log has them as words; its words of the hardware are those lines' (`log_part_words`). What only the other file would have named
-//! stays, and the outcome says so in a line (`RESULTS_ALONE`, `LOG_ALONE`).
+//! stays, and the outcome says so in a line (`RESULTS_ALONE`, `LOG_ALONE`); with nothing replaced, it says only that the file shows
+//! nothing to replace by itself, never that it names no one.
 //!
 //! What it replaces with `REMOVED`, each occurrence in either file (`Kind` counts them):
 //! - the values the results file records: each DIMM's serial, the system UUID, `machine_id` and `memory_id`, wherever either file has
@@ -176,8 +177,12 @@ impl Sanitized {
             text += &format!("   {}\n", copy.display());
         }
         if self.replaced.is_empty() {
-            let names = if one { "the file names" } else { "the files name" };
-            text += &format!("   Nothing to replace: the run left its serials out, and {names} no user, account or PC\n");
+            // A file alone can't say it names no one: a word of it may be a name only the other file shows (`alone` says what)
+            text += if self.alone.is_some() {
+                "   Nothing to replace that the file shows by itself\n"
+            } else {
+                "   Nothing to replace: the run left its serials out, and the files name no user, account or PC\n"
+            };
         } else {
             let kinds: Vec<String> = self.replaced.iter().map(|(kind, count)| kind.counted(*count)).collect();
             text += &format!("   Replaced with {REMOVED}: {}\n", kinds.join(", "));
@@ -1139,7 +1144,11 @@ mod tests {
         assert_eq!((read(pair(&done).0), read(pair(&done).1)), (read(&run.results), read(&run.log)));
         let back: TestRunResult = serde_json::from_str(&read(pair(&done).0)).expect("TMR reads the copy");
         assert_eq!(back.identity.machine_id, crate::smbios::LEFT_OUT);
-        assert!(done.text().contains("Nothing to replace"), "{}", done.text());
+        let text = done.text();
+        assert!(
+            text.contains("   Nothing to replace: the run left its serials out, and the files name no user, account or PC\n"),
+            "{text}"
+        );
     }
 
     /// The copies are never the originals: each its own name beside its original, never written over (a second sanitize is refused,
@@ -1270,7 +1279,26 @@ mod tests {
         let names = ["TMR_2026-11-23_11-00-03.json", "TMR_2026-11-23_11-00-03.log", "TMR_2026-11-23_11-00-03.sanitized.log"];
         assert_eq!(files(&dir), names);
         let text = done.text();
-        assert!(text.contains("Nothing to replace: the run left its serials out, and the file names no user, account or PC\n"), "{text}");
+        assert!(text.contains(&format!("\n   Nothing to replace that the file shows by itself\n   {LOG_ALONE}\n")), "{text}");
+        assert!(!text.contains("no user, account or PC"), "{text}");
+    }
+
+    /// `--sanitize-single` of a results file from a run that left its serials out, its config on a share of the PC's: nothing the file
+    /// shows by itself to replace, so the PC's name, which only the log gives, stays, and the outcome never says the file names no PC
+    #[test]
+    fn a_file_alone_with_nothing_to_replace_never_says_it_names_no_pc() {
+        let dir = TempDir::new("sanitize-single-nothing");
+        let run = Run::new(&dir, "TMR_2026-11-23_11-00-04", RUN, false, false);
+        std::fs::remove_file(&run.log).unwrap();
+        let share = read(&run.results).replace(r#""plan=quick""#, r#""config=\\\\DESKTOP-J4M13\\share\\y.cfg""#);
+        assert!(share.contains("DESKTOP-J4M13"), "{share}");
+        std::fs::write(&run.results, &share).unwrap();
+        let done = sanitize_single(run.results.to_str().unwrap()).unwrap_or_else(|e| panic!("{e}"));
+        assert!(done.replaced.is_empty(), "{:?}", done.replaced);
+        assert_eq!(read(&done.copies[0]), share, "a name only the log gives");
+        let text = done.text();
+        assert!(text.contains(&format!("\n   Nothing to replace that the file shows by itself\n   {RESULTS_ALONE}\n")), "{text}");
+        assert!(!text.contains("no user, account or PC"), "{text}");
     }
 
     /// `--sanitize-single` refuses a file that is neither kind, isn't there, isn't one TMR reads, isn't text, or is a copy already, and
