@@ -207,7 +207,8 @@ fn memory_status_table(status: &MemoryStatus) -> TableData {
         .add_row(row("Page file", status.total_page_file, status.avail_page_file))
 }
 
-/// The memory modules SMBIOS lists, one a row. Not their serial numbers: a window is shared as a screenshot, and the results file has them.
+/// The memory modules SMBIOS lists, one a row. Never their serial numbers: a window is shared as a screenshot (a run with --serials keeps
+/// them in its console text, log and results file).
 fn modules_table(modules: &[MemoryModule]) -> TableData {
     let table = TableData::new()
         .with_title("Memory modules (SMBIOS)")
