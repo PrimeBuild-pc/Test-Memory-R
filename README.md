@@ -237,8 +237,8 @@ results file. The module manufacturer and part number are always recorded. Neith
 cryptographic hash, so don't treat a file that has them, from a run with `--serials` or from the 0.1.2
 release or earlier, which kept them by default, as anonymous; a file that left them out has
 `(left out: --serials keeps it)` for its `machine_id` and `memory_id`. Without the hashes,
-`--compare-results` tells two runs' machines apart by the CPU, the BIOS and the memory modules' part
-numbers and speeds.
+`--compare-results` tells two runs' machines apart by the CPU and its cache sizes, the BIOS, and each
+memory module's part number and speed.
 
 **No results, no log.** `record=off` keeps a run from writing a results file or a log file at all; the
 console still shows the run. It doesn't reach the local calibration cache (below); add `calibrate=off`

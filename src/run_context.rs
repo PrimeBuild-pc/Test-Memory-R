@@ -863,41 +863,46 @@ fn is_uuid(uuid: &str) -> bool {
     groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12]) && groups.iter().all(|group| group.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// The modules as `compare_identity` tells them apart without the memory fingerprint: each one's maker, part number and size, which
-/// the fingerprint covers, neighbours that read the same counted once (`2 × G Skill F5-6000J3038F16G 16.0 GB`), `none listed` where
-/// SMBIOS lists none
-fn module_parts(modules: &[MemoryModule]) -> String {
+/// `labels`, one a module, in the modules' order, neighbours that read the same counted once (`2 × 6000 MT/s`), an empty one as `empty`:
+/// every module's, so one of several changed shows however the others read
+fn counted(labels: impl Iterator<Item = String>, empty: &str) -> String {
     let mut runs: Vec<(usize, String)> = Vec::new();
-    for module in modules {
-        let fields = [module.manufacturer.trim(), module.part_number.trim(), module.capacity_human.trim()];
-        let part = fields.iter().filter(|field| !field.is_empty()).copied().collect::<Vec<_>>().join(" ");
+    for label in labels {
         match runs.last_mut() {
-            Some((count, last)) if *last == part => *count += 1,
-            _ => runs.push((1, part)),
+            Some((count, last)) if *last == label => *count += 1,
+            _ => runs.push((1, label)),
         }
     }
-    if runs.is_empty() {
-        return "none listed".to_string();
-    }
-    let named = |part: &str| if part.is_empty() { "unnamed".to_string() } else { part.to_string() };
+    let named = |label: &str| if label.is_empty() { empty.to_string() } else { label.to_string() };
     runs.iter()
-        .map(|(count, part)| if *count == 1 { named(part) } else { format!("{count} × {}", named(part)) })
+        .map(|(count, label)| if *count == 1 { named(label) } else { format!("{count} × {}", named(label)) })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The modules as `compare_identity` tells them apart without the memory fingerprint: each one's maker, part number and size, which
+/// the fingerprint covers, `counted` (`2 × G Skill F5-6000J3038F16G 16.0 GB`), `none listed` where SMBIOS lists none
+fn module_parts(modules: &[MemoryModule]) -> String {
+    if modules.is_empty() {
+        return "none listed".to_string();
+    }
+    let parts = modules.iter().map(|module| {
+        let fields = [module.manufacturer.trim(), module.part_number.trim(), module.capacity_human.trim()];
+        fields.iter().filter(|field| !field.is_empty()).copied().collect::<Vec<_>>().join(" ")
+    });
+    counted(parts, "unnamed")
 }
 
 /// What `module_speeds` gives where no module has a speed, as a result from before 5c4bdfa records none
 const SPEEDS_NOT_RECORDED: &str = "not recorded";
 
-/// The modules' speeds as `compare_identity` shows them: each one's `speed_label`, neighbours that read the same once,
-/// `SPEEDS_NOT_RECORDED` where none has one
+/// The modules' speeds as `compare_identity` shows them: each one's `speed_label`, `counted` (`3 × 4800 MT/s, 5600 MT/s`), which the
+/// fingerprint covers, and without it the only record of a module retimed; `SPEEDS_NOT_RECORDED` where none has one
 fn module_speeds(modules: &[MemoryModule]) -> String {
-    let mut speeds: Vec<String> = modules.iter().map(MemoryModule::speed_label).collect();
-    speeds.dedup();
-    if speeds.iter().all(String::is_empty) {
+    if modules.iter().all(|module| module.speed_label().is_empty()) {
         return SPEEDS_NOT_RECORDED.to_string();
     }
-    speeds.iter().map(|speed| if speed.is_empty() { "unknown" } else { speed }).collect::<Vec<_>>().join(", ")
+    counted(modules.iter().map(MemoryModule::speed_label), "unknown")
 }
 
 /// Compare the identity of two runs.
@@ -997,8 +1002,17 @@ pub fn compare_identity(baseline: &RunIdentity, current: &RunIdentity) -> Vec<Ru
         diffs.push(RunDifference::new("System UUID", b, c, false));
     }
 
-    if baseline.l3_cache != current.l3_cache {
-        diffs.push(RunDifference::new("L3 cache", baseline.l3_cache.to_string(), current.l3_cache.to_string(), true));
+    // The cache sizes, which size every cache-relative extent and chunk: the machine ID covers them, and without it they are compared
+    // here alone, so each is compared whether the fingerprints were kept or not
+    let caches = [
+        ("L1d cache per core", baseline.l1d_cache_per_core, current.l1d_cache_per_core),
+        ("L2 cache per core", baseline.l2_cache_per_core, current.l2_cache_per_core),
+        ("L3 cache", baseline.l3_cache, current.l3_cache),
+    ];
+    for (cache, was, now) in caches {
+        if was != now {
+            diffs.push(RunDifference::new(cache, was.to_string(), now.to_string(), true));
+        }
     }
 
     if baseline.simd_capabilities != current.simd_capabilities {
@@ -1497,7 +1511,7 @@ mod tests {
         // same machine, a note, not another machine's
         let timed = |module: MemoryModule| MemoryModule { configured_mts: 3600, max_mts: 3600, ..module };
         let now = RunIdentity { memory_modules: base.memory_modules.iter().cloned().map(timed).collect(), ..base.clone() };
-        let speeds = ("Module speeds".to_string(), "not recorded".to_string(), "3600 MT/s".to_string(), false);
+        let speeds = ("Module speeds".to_string(), "not recorded".to_string(), "2 × 3600 MT/s".to_string(), false);
         assert_eq!(fields(compare_identity(&kept, &now)), [speeds]);
         let virtualized = RunIdentity { memory_identity_is_physical: false, ..now.clone() };
         assert_eq!(compare_identity(&kept, &virtualized).len(), 1, "a note, no cause to give for it");
@@ -1523,12 +1537,64 @@ mod tests {
         };
         let expo = with("def", &[(6000, 4800), (6000, 4800)]);
         let retuned = with("xyz", &[(6200, 4800), (6200, 4800)]);
-        assert_eq!(moved(&expo, &retuned), [("6000 MT/s (SMBIOS max 4800)".into(), "6200 MT/s (SMBIOS max 4800)".into(), true)]);
+        assert_eq!(moved(&expo, &retuned), [("2 × 6000 MT/s (SMBIOS max 4800)".into(), "2 × 6200 MT/s (SMBIOS max 4800)".into(), true)]);
         let before = with("old", &[(0, 0), (0, 0)]);
-        assert_eq!(moved(&before, &expo), [("not recorded".into(), "6000 MT/s (SMBIOS max 4800)".into(), false)]);
+        assert_eq!(moved(&before, &expo), [("not recorded".into(), "2 × 6000 MT/s (SMBIOS max 4800)".into(), false)]);
         let swapped = with("xyz", &[(6000, 4800), (0, 4800)]);
         assert_eq!(moved(&expo, &swapped)[0].1, "6000 MT/s (SMBIOS max 4800), 4800 MT/s");
         assert!(moved(&expo, &with("xyz", &[(6000, 4800), (6000, 4800)])).is_empty(), "a fingerprint moved by something else");
+    }
+
+    /// Without the fingerprint, the speeds are the only record of a module retimed, so they are every module's, in order, neighbours
+    /// that read the same counted: one of four moved shows however the other three run
+    #[test]
+    fn one_module_of_four_retimed_is_a_speed_that_moved() {
+        let at = |speeds: [u32; 4]| RunIdentity {
+            machine_id: crate::smbios::LEFT_OUT.to_string(),
+            memory_id: crate::smbios::LEFT_OUT.to_string(),
+            memory_modules: speeds.map(|configured_mts| MemoryModule { configured_mts, max_mts: 4800, ..Default::default() }).to_vec(),
+            memory_identity_is_physical: true,
+            ..identity("", "")
+        };
+        let moved = |baseline: [u32; 4], current: [u32; 4]| {
+            let diffs = compare_identity(&at(baseline), &at(current));
+            diffs.into_iter().map(|d| (d.field, d.baseline, d.current, d.invalidates)).collect::<Vec<_>>()
+        };
+        let speeds = |was: &str, now: &str| [("Module speeds".to_string(), was.to_string(), now.to_string(), true)];
+        let (base, fast) = ("4800 MT/s", "5600 MT/s (SMBIOS max 4800)");
+        assert_eq!(
+            moved([4800, 4800, 5600, 5600], [4800, 5600, 5600, 5600]),
+            speeds(&format!("2 × {base}, 2 × {fast}"), &format!("{base}, 3 × {fast}"))
+        );
+        assert_eq!(moved([4800; 4], [4800, 4800, 4800, 5600]), speeds(&format!("4 × {base}"), &format!("3 × {base}, {fast}")));
+        assert_eq!(
+            moved([4800, 5600, 4800, 5600], [5600, 4800, 5600, 4800]),
+            speeds(&format!("{base}, {fast}, {base}, {fast}"), &format!("{fast}, {base}, {fast}, {base}"))
+        );
+        assert!(moved([4800, 4800, 5600, 5600], [4800, 4800, 5600, 5600]).is_empty());
+    }
+
+    /// The cache sizes size every cache-relative extent and chunk, and the machine ID covers them: a run without the fingerprints,
+    /// compared by its parts, says which moved, as the L3's always did
+    #[test]
+    fn a_cache_size_that_moved_invalidates_without_fingerprints_too() {
+        let caches = |l1d_kib: u64, l2_kib: u64, l3_mib: u64| RunIdentity {
+            machine_id: crate::smbios::LEFT_OUT.to_string(),
+            memory_id: crate::smbios::LEFT_OUT.to_string(),
+            l1d_cache_per_core: ByteSize(l1d_kib << 10),
+            l2_cache_per_core: ByteSize(l2_kib << 10),
+            l3_cache: ByteSize(l3_mib << 20),
+            ..identity("", "")
+        };
+        let moved = |current: RunIdentity| {
+            let diffs = compare_identity(&caches(48, 512, 32), &current);
+            diffs.into_iter().map(|d| (d.field, d.baseline, d.current, d.invalidates)).collect::<Vec<_>>()
+        };
+        let cache = |field: &str, was: &str, now: &str| [(field.to_string(), was.to_string(), now.to_string(), true)];
+        assert!(moved(caches(48, 512, 32)).is_empty());
+        assert_eq!(moved(caches(48, 2048, 32)), cache("L2 cache per core", "512 KiB", "2 MiB"));
+        assert_eq!(moved(caches(32, 512, 32)), cache("L1d cache per core", "48 KiB", "32 KiB"));
+        assert_eq!(moved(caches(48, 512, 96)), cache("L3 cache", "32 MiB", "96 MiB"));
     }
 
     #[test]
