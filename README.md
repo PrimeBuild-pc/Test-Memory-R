@@ -228,13 +228,14 @@ self-update of any kind. Nothing it does ever leaves the machine it runs on.
 
 **What TMR records.** Every run's console output, log and results file include the system it ran on:
 the CPU, the BIOS, the motherboard, and each memory module's manufacturer, part number, speed and
-capacity. By default they also include each DIMM's serial number, the motherboard's system UUID, and
+capacity. They leave out, by default, each DIMM's serial number, the motherboard's system UUID, and
 two short hashes TMR computes to recognise the machine later: `machine_id` (from the CPU and BIOS) and
-`memory_id` (from the memory modules, including their serial numbers). `--no-serials` (the window's
-Settings has the same toggle) leaves all four of those, the serial numbers, the system UUID and both
-hashes, out of the console, the log and the results file, consistently. It does not touch the module
-manufacturer or part number, which TMR always records. Neither hash is a strong cryptographic hash, so
-don't treat a file that still has them, from a run without `--no-serials`, as anonymous.
+`memory_id` (from the memory modules, including their serial numbers). `--serials` (the window's
+Settings has the same toggle, off by default) keeps all four of those in the console, the log and the
+results file. The module manufacturer and part number are always recorded. Neither hash is a strong
+cryptographic hash, so don't treat a file that has them, from a run with `--serials` or from TMR 0.1.2
+or earlier, which kept them by default, as anonymous. Without the hashes, `--compare-results` tells
+two runs' machines apart by the CPU, the BIOS and the memory modules' part numbers and speeds.
 
 **No results, no log.** `record=off` keeps a run from writing a results file or a log file at all; the
 console still shows the run. It doesn't reach the local calibration cache (below); add `calibrate=off`
@@ -242,13 +243,13 @@ too if you want a run to touch no files whatsoever.
 
 **The calibration cache.** TMR keeps a small local file, `tmr-cfg.json` (beside the exe, or under
 `TMR_HOME`), with the real system UUID and the real per-DIMM serial and part numbers, so it can tell
-when the hardware has changed and a fresh calibration is needed. `--no-serials` doesn't reach it; it
-only affects what a run displays or writes out. This file stays on your machine and is never sent
-anywhere.
+when the hardware has changed and a fresh calibration is needed. Leaving the serials out doesn't reach
+it; that only affects what a run displays or writes out. This file stays on your machine and is never
+sent anywhere.
 
-**Sharing a log or results file.** Both describe your system as above. If you're posting one publicly,
-`--no-serials` leaves the DIMM serial numbers, the system UUID and both fingerprint hashes out, so the
-file no longer carries anything that ties it back to this specific machine.
+**Sharing a log or results file.** Both describe your system as above. A run's files have no DIMM
+serial numbers, system UUID or fingerprint hashes unless it was given `--serials`, so they carry nothing
+that ties them back to this specific machine.
 
 ## License
 

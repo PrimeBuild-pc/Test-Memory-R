@@ -145,7 +145,7 @@ The Memory report's 4 KB column says which kind a run took.
   | `errors=halt` | stop at the first error |
   | `errors=halt:100` | go on past errors, and stop once the run has found 100 (about: it is counted twice a second) |
   | `calibrate=recheck` | probe the stored cache calibration before the tests (about 15 s) and measure it again if the cache has changed; `calibrate=always` measures every run, `calibrate=off` takes none (by default the first run on a machine measures one) |
-  | `--no-serials` | leave the memory modules' serial numbers and the system's UUID out of the output, the log and the results file |
+  | `--serials` | keep the memory modules' serial numbers, the system's UUID and the machine's fingerprints in the output, the log and the results file (left out by default) |
 
   `tmr --help` explains every setting.
 
@@ -304,12 +304,12 @@ errors, with its verdict; or it never finished, killed or crashed, and its figur
 last saved cycle), which run it was, then the final summary as the console showed it. A file from
 another version of TMR is shown in this version's layout, and TMR says so above it.
 
-A results file describes the system it came from, so runs can be told apart: the CPU, the BIOS,
-the memory modules (their part numbers and serial numbers) and the motherboard's system UUID.
-Use `--no-serials` when starting a run whose results you intend to share, for example
-`tmr plan=stability --no-serials`. It leaves DIMM serial numbers and the system UUID out of the
-output, log and results. In the window, turn off serial numbers in Settings before starting.
-This does not remove identifiers from older files.
+A results file describes the system it came from, so runs can be told apart: the CPU, the BIOS
+and the memory modules' part numbers and speeds. A run leaves out the DIMMs' serial numbers, the
+motherboard's system UUID and the two fingerprints TMR makes of the machine and its memory, unless
+it is given `--serials` (`tmr plan=stability --serials`), which keeps them in the output, log and
+results; in the window, Settings has the same switch, off by default. Files from TMR 0.1.2 or
+earlier have them: it kept them by default.
 
 To keep the files somewhere else, set the `TMR_HOME` environment variable to that folder
 (`setx TMR_HOME D:\tmr`, then open a new console).

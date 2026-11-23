@@ -506,7 +506,7 @@ pub fn parse_and_validate_args(args: &[String]) -> Result<HashMap<String, ParamV
             || arg.starts_with("--quick-test")
             || arg.starts_with("--ram-latency")
             || arg.starts_with("--cache-latency")
-            || arg == "--no-serials"
+            || arg == "--serials"
             || arg.starts_with("--startup-debug")
         {
             continue;

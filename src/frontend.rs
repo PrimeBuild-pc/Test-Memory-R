@@ -159,7 +159,7 @@ pub enum Setup {
     /// The CPU, its caches and TSC, and the memory modules SMBIOS lists
     SystemInfo {
         report: Box<SystemInfoReport>,
-        /// The DIMMs SMBIOS lists, and the system and its BIOS, as the run shows and keeps them: without serials under `--no-serials`
+        /// The DIMMs SMBIOS lists, and the system and its BIOS, as the run shows and keeps them: without serials unless `--serials`
         memory_modules: Vec<MemoryModule>,
         system: SystemIdentity,
         bios: BiosInfo,

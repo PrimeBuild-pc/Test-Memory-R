@@ -146,7 +146,8 @@ COMMAND LINE PARAMETERS:
   calibrate=recheck                   #   ...and a stored one probed first, about 15 s, measured again if it has drifted
   calibrate=always                    #   ...measured before every run's tests
   calibrate=off                       #   ...none: sizes from CPUID, and the seal's width from its rule
-  --no-serials                        # Leave the DIMMs' serials and the system's UUID out of the output, log and results
+  --serials                           # Keep the DIMMs' serials, the system's UUID and the machine's fingerprints in the
+                                      #   output, log and results (left out by default)
 
 CONFIG FILE OVERRIDES:
   All parameters can override config file values:

@@ -6,7 +6,8 @@
 //! | `chart`         | the throughput chart shows; its ▾ hides it, leaving its title line             | `true`    |
 //! | `theme`         | `"system"`, `"light"` or `"dark"`                                              | `system`  |
 //! | `start_on_open` | the run starts as the window opens, as `--start` does                          | `false`   |
-//! | `serials`       | the DIMMs' serials and the system's UUID in the run's output, log and results   | `true`    |
+//! | `keep_serials`  | the DIMMs' serials, the system's UUID and fingerprints in the run's output, log | `false`   |
+//! |                 | and results, as `--serials` keeps them                                         |           |
 //! | `parameters`    | the parameters box's text when tmr.exe is given none: the last run's           | none      |
 //! | `size`          | the window's size, `[width, height]`, as it last closed                         | 860 × 960 |
 //! | `position`      | its frame's top-left, `[x, y]` in screen pixels, as it last closed             | Windows'  |
@@ -15,10 +16,11 @@
 //!
 //! `position` and `maximized` are put back only onto the screens there now: mostly off them, the window opens where Windows puts it
 //! (`placement.rs`). The window writes `chart` as it changes, `parameters` at Start, `size`, `position` and `maximized` as it closes (and
-//! with any other save), and its Settings dialog's (`start_on_open`, `serials`, `theme`) as they change, keeping the rest of the file (the
-//! colours, any notes) as it was. Keys starting with `_` are notes. A missing file is the defaults; a bad key or value goes in the errors
-//! list and keeps its default; a file that isn't JSON says so, and the window doesn't write over it. `crates/tmr-gui/window.example.json`
-//! has every key at its default, a test keeping it so: copy it into TMR's folder as `window.json` and edit it.
+//! with any other save), and its Settings dialog's (`start_on_open`, `keep_serials`, `theme`) as they change, keeping the rest of the file
+//! (the colours, any notes) as it was, but for `serials`, which windows before `keep_serials` wrote (on, their default), dropped unread.
+//! Keys starting with `_` are notes. A missing file is the defaults; a bad key or value goes in the errors list and keeps its default; a
+//! file that isn't JSON says so, and the window doesn't write over it. `crates/tmr-gui/window.example.json` has every key at its default,
+//! a test keeping it so: copy it into TMR's folder as `window.json` and edit it.
 
 use std::path::PathBuf;
 
@@ -60,8 +62,9 @@ pub struct Settings {
     pub chart: bool,
     pub theme: Theme,
     pub start_on_open: bool,
-    /// The run's output, log and results keep the DIMMs' serials and the system's UUID; off, the window runs with `--no-serials`
-    pub serials: bool,
+    /// The run's output, log and results keep the DIMMs' serials, the system's UUID and the machine's fingerprints: the window runs with
+    /// `--serials`. Off by default, as a run without `--serials` leaves them out (the owner, 2026-11-23)
+    pub keep_serials: bool,
     pub parameters: Option<String>,
     pub size: Option<(f64, f64)>,
     /// Its frame's top-left in screen pixels, and whether it was maximized, as it last closed (`placement.rs`)
@@ -79,7 +82,7 @@ impl Default for Settings {
             chart: true,
             theme: Theme::System,
             start_on_open: false,
-            serials: true,
+            keep_serials: false,
             parameters: None,
             size: None,
             position: None,
@@ -89,6 +92,9 @@ impl Default for Settings {
         }
     }
 }
+
+/// The serials' setting as windows before `keep_serials` wrote it, on by default
+const RETIRED_SERIALS: &str = "serials";
 
 /// `window.json`, in TMR's home
 fn path() -> PathBuf {
@@ -119,7 +125,7 @@ impl Settings {
     /// `text`'s settings and colours over the defaults; what it gets wrong into `problems`, each keeping its default
     fn parse(text: &str, problems: &mut Vec<String>) -> (Self, Palettes) {
         let mut settings = Self::default();
-        let file = match serde_json::from_str::<Value>(text) {
+        let mut file = match serde_json::from_str::<Value>(text) {
             Ok(Value::Object(file)) => file,
             Ok(_) => {
                 problems.push("not a JSON object: the defaults, and the window won't write over it".to_string());
@@ -130,6 +136,9 @@ impl Settings {
                 return (Settings { unreadable: true, ..settings }, Palettes::DEFAULT);
             }
         };
+        // The setting before `keep_serials`, which every window.json has had (`true`, its default, as the window wrote it): not read, so a
+        // file written then doesn't keep the serials, and gone from the next save
+        file.remove(RETIRED_SERIALS);
         let mut palettes = Palettes::DEFAULT;
         for (key, value) in &file {
             let wrong = |what: &str| format!("{key} = {value} is not {what}");
@@ -143,8 +152,8 @@ impl Settings {
                     Some(start) => settings.start_on_open = start,
                     None => problems.push(wrong("true or false")),
                 },
-                "serials" => match value.as_bool() {
-                    Some(serials) => settings.serials = serials,
+                "keep_serials" => match value.as_bool() {
+                    Some(keep) => settings.keep_serials = keep,
                     None => problems.push(wrong("true or false")),
                 },
                 "theme" => match Theme::NAMES.iter().find(|(name, _)| value.as_str() == Some(name)) {
@@ -182,7 +191,7 @@ impl Settings {
         file.insert("chart".to_string(), Value::Bool(self.chart));
         file.insert("theme".to_string(), Value::String(self.theme.name().to_string()));
         file.insert("start_on_open".to_string(), Value::Bool(self.start_on_open));
-        file.insert("serials".to_string(), Value::Bool(self.serials));
+        file.insert("keep_serials".to_string(), Value::Bool(self.keep_serials));
         file.insert("parameters".to_string(), self.parameters.clone().map_or(Value::Null, Value::String));
         if let Some((width, height)) = self.size {
             file.insert("size".to_string(), serde_json::json!([width.round(), height.round()]));
@@ -218,13 +227,14 @@ mod tests {
              \"It is read when the window opens. Keys starting with _ are notes.\",\n    \
              \"chart: the throughput chart shows. theme: system, light or dark.\",\n    \
              \"start_on_open: the run starts as the window opens, as --start does.\",\n    \
-             \"serials: the DIMMs' serials and the system's UUID in the run's output, log and results; false runs with --no-serials.\",\n    \
+             \"keep_serials: the DIMMs' serials, the system's UUID and fingerprints in the run's output, log and results, as --serials \
+             keeps them; false, the default, leaves them out.\",\n    \
              \"parameters: the parameters box's text when tmr.exe is given none; the window keeps the last run's.\",\n    \
              \"size: [width, height], as it last closed.\",\n    \
              \"position: [x, y], its top-left in screen pixels, as it last closed; off the screens now, Windows places it.\",\n    \
              \"maximized: it closed maximized, and opens so; size and position are what it restores to.\",\n    \
              \"colours: #RRGGBB or #AARRGGBB (alpha first). Leave a key out to keep its default.\"\n  ],\n  \
-             \"chart\": true,\n  \"theme\": \"system\",\n  \"start_on_open\": false,\n  \"serials\": true,\n  \"parameters\": null,\n  \
+             \"chart\": true,\n  \"theme\": \"system\",\n  \"start_on_open\": false,\n  \"keep_serials\": false,\n  \"parameters\": null,\n  \
              \"maximized\": false,\n  \"colours\": {colours}\n}}\n"
         )
     }
@@ -305,5 +315,20 @@ mod tests {
 
         let saved: Value = serde_json::from_str(&Settings::default().text()).expect("JSON");
         assert_eq!((saved.get("position"), &saved["maximized"]), (None, &Value::from(false)));
+    }
+
+    /// The serials are left out unless `keep_serials` (the owner, 2026-11-23). `serials`, which a window before it wrote to every
+    /// window.json as `true`, its default then, isn't read, so such a file doesn't keep them, and the next save drops it; it is no problem
+    /// to show
+    #[test]
+    fn the_serials_are_kept_only_when_asked_and_the_old_key_is_dropped() {
+        let mut problems = Vec::new();
+        let (settings, _) = Settings::parse(r#"{"serials": true, "chart": false}"#, &mut problems);
+        assert_eq!((settings.keep_serials, settings.chart, problems.len()), (false, false, 0), "{problems:?}");
+        let saved: Value = serde_json::from_str(&settings.text()).expect("JSON");
+        assert_eq!((saved.get("serials"), &saved["keep_serials"]), (None, &Value::from(false)));
+        let (settings, _) = Settings::parse(r#"{"keep_serials": true}"#, &mut problems);
+        assert!(settings.keep_serials && problems.is_empty(), "{problems:?}");
+        assert!(!Settings::default().keep_serials);
     }
 }

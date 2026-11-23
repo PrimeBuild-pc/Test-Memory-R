@@ -35,7 +35,7 @@ pub(crate) const KNOWN_FLAGS: [&str; 26] = [
     "--ram-latency", "--cache-latency", "--quick-test", "--calibrate-cache", "--calibrate-curve", "--calibrate-seal", "--calibrate-all",
     "--show-calibration", "--output", "--yes", "--no-save", "--create-demo-configs", "--compare-results", "--show-results",
     "--debug-topology", "--show-topology", "--setup-large-pages", "--remove-large-pages", "--startup-debug", "--disable-pinning",
-    "--no-serials", "--help", "-h", "-?", "--version", "-v",
+    "--serials", "--help", "-h", "-?", "--version", "-v",
 ];
 
 /// How a session ended. An error that stops it is `run`'s `Err`.
@@ -568,8 +568,8 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
             == crate::memory::allocator::RegularPages::Locked;
     fe.event(Setup::LargePageStatus { usable, min_page: alloc_config.min_page_size.clone(), min_needs_large }.into());
 
-    // Serials out of what the run shows and keeps (`--no-serials`), before SMBIOS is first read and logged (TODO 105)
-    crate::smbios::hide_serials(args.iter().any(|a| a == "--no-serials"));
+    // Serials out of what the run shows and keeps unless `--serials`, before SMBIOS is first read and logged (TODO 105)
+    crate::smbios::hide_serials_unless_kept(&args);
 
     // Get system info for later use (formatted output comes via reporter below)
     let system_info = crate::tests::get_system_info();
@@ -1086,7 +1086,8 @@ mod tests {
                 "{first} {command}"
             );
         }
-        for flag in ["--helpme", "--versions", "--quick-tests"] {
+        // --no-serials is gone: leaving them out is the default, and --serials keeps them (the owner, 2026-11-23)
+        for flag in ["--helpme", "--versions", "--quick-tests", "--no-serials"] {
             assert!(matches!(session(&["tmr", flag]), SessionEnd::Stopped(Stopped::UnknownFlags(f)) if f == [flag]), "{flag}");
         }
         let line = ["tmr", "--calibrate-cache", "--calibration-file", "my.json"];

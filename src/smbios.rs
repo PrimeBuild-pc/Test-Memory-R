@@ -65,44 +65,58 @@ pub struct MemoryModule {
     pub capacity_human: String,
 }
 
-/// Whether the run leaves serial numbers out of what it shows and keeps (`--no-serials`, TODO 105, the owner 2026-11-04; the
-/// `machine_id`/`memory_id` fingerprints too, 2026-11-15): the DIMMs' serials, the system's UUID, and those two fingerprints,
-/// from the console, the log and the results file. `AppConfig` still reads the real values to know the machine when checking
-/// calibration validity; only what a run displays or writes out is affected.
+/// Whether the run leaves serial numbers out of what it shows and keeps (TODO 105, the owner 2026-11-04; the `machine_id`/`memory_id`
+/// fingerprints too, 2026-11-15): the DIMMs' serials, the system's UUID, and those two fingerprints, from the console, the log and the
+/// results file. Left out unless the command line says `--serials` (the owner, 2026-11-23, from the forum's feedback). Every command
+/// line that reads SMBIOS sets it as it starts, before SMBIOS is first read and logged (a session, the calibrations,
+/// `--show-calibration`); until then, as for the tests' fixed models, nothing is left out. `AppConfig` still reads the real values to know
+/// the machine when checking calibration validity; only what a run displays or writes out is affected. A results file's stand-ins are
+/// `LEFT_OUT`, which its readers tell from a fingerprint (`run_context::compare_identity`).
 static SERIALS_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// `--no-serials`, set as a session starts, before SMBIOS is read
-pub fn hide_serials(hidden: bool) {
-    SERIALS_HIDDEN.store(hidden, std::sync::atomic::Ordering::Relaxed);
+/// The flag that keeps the serials in what a run shows and keeps: without it they are left out
+pub(crate) const KEEP_SERIALS: &str = "--serials";
+
+/// Sets whether the serials are left out, from command line `args`: unless it has `--serials`, before SMBIOS is read
+pub(crate) fn hide_serials_unless_kept(args: &[String]) {
+    SERIALS_HIDDEN.store(hides_serials(args), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether command line `args` leaves the serials out: unless it has `--serials`
+fn hides_serials(args: &[String]) -> bool {
+    !args.iter().any(|arg| arg == KEEP_SERIALS)
 }
 
 pub fn serials_hidden() -> bool {
     SERIALS_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// `modules` as the run shows and keeps them: without their serials under `--no-serials`
+/// What a run shows, logs and keeps in place of a system UUID or a fingerprint it leaves out
+pub const LEFT_OUT: &str = "(left out: --serials keeps it)";
+
+/// `modules` as the run shows and keeps them: without their serials unless `--serials`
 pub fn shown_modules(modules: &[MemoryModule]) -> Vec<MemoryModule> {
     modules_shown(modules, serials_hidden())
 }
 
-/// The system as the run shows and keeps it: without its UUID under `--no-serials`
+/// The system as the run shows and keeps it: without its UUID unless `--serials`
 pub fn shown_system(system: &SystemIdentity) -> SystemIdentity {
     system_shown(system, serials_hidden())
 }
 
-/// A system UUID or a `machine_id`/`memory_id` fingerprint, as the run shows, logs and keeps it: left out under `--no-serials`
+/// A system UUID or a `machine_id`/`memory_id` fingerprint, as the run shows, logs and keeps it: `LEFT_OUT` unless `--serials`
 pub fn shown_identifier(id: &str) -> &str {
     identifier_shown(id, serials_hidden())
 }
 
 fn identifier_shown(id: &str, hidden: bool) -> &str {
-    if hidden { "(left out: --no-serials)" } else { id }
+    if hidden { LEFT_OUT } else { id }
 }
 
-/// A structure's string table as the parse's debug line shows it: under `--no-serials` only how many, since it holds the serials (Type
+/// A structure's string table as the parse's debug line shows it: unless `--serials` only how many, since it holds the serials (Type
 /// 1's, 2's, 3's and 17's; on EC2 Type 1's serial is the system UUID)
 fn strings_shown(strings: &[String], hidden: bool) -> String {
-    if hidden { format!("({} left out: --no-serials)", strings.len()) } else { format!("{strings:?}") }
+    if hidden { format!("({} left out: --serials keeps them)", strings.len()) } else { format!("{strings:?}") }
 }
 
 fn modules_shown(modules: &[MemoryModule], hidden: bool) -> Vec<MemoryModule> {
@@ -469,7 +483,7 @@ fn parse_smbios(raw: &[u8]) -> SmbiosData {
         format!("{} {}", data.system.manufacturer, data.system.product_name).trim().to_string()
     };
     let uuid_str = match (serials_hidden(), data.system.uuid.is_empty()) {
-        (true, _) => "(left out: --no-serials)",
+        (true, _) => LEFT_OUT,
         (false, true) => "(none)",
         (false, false) => &data.system.uuid,
     };
@@ -826,10 +840,10 @@ impl MemoryModule {
 mod tests {
     use super::*;
 
-    /// TODO 105: `--no-serials` leaves out the DIMMs' serials, the system's UUID, and the `machine_id`/`memory_id` fingerprints,
-    /// and nothing else; without it, all three stay
+    /// TODO 105: a run leaves out the DIMMs' serials, the system's UUID, and the `machine_id`/`memory_id` fingerprints, and nothing
+    /// else, unless `--serials` keeps all three (the owner, 2026-11-23)
     #[test]
-    fn no_serials_leaves_out_the_serials_the_uuid_and_the_fingerprints_only() {
+    fn hidden_serials_leave_out_the_serials_the_uuid_and_the_fingerprints_only() {
         let module = MemoryModule {
             locator: "DIMM_A2".to_string(),
             manufacturer: "G Skill".to_string(),
@@ -851,18 +865,22 @@ mod tests {
         assert_eq!((without.uuid.as_str(), without.product_name.as_str()), ("", "PRIME"));
         assert_eq!(system_shown(&system, false).uuid, "03000200-0400");
         // And the calibration's UUID/machine_id/memory_id mismatch lines (`MachineFingerprint::matches`)
-        assert_eq!(identifier_shown("03000200-0400", true), "(left out: --no-serials)");
+        assert_eq!(identifier_shown("03000200-0400", true), "(left out: --serials keeps it)");
         assert_eq!(identifier_shown("03000200-0400", false), "03000200-0400");
-        assert_eq!(identifier_shown("a1b2c3d4", true), "(left out: --no-serials)");
+        assert_eq!(identifier_shown("a1b2c3d4", true), "(left out: --serials keeps it)");
         assert_eq!(identifier_shown("a1b2c3d4", false), "a1b2c3d4");
+        // A plain command line leaves them out, the window's and a calibration's too; `--serials` keeps them, wherever it is
+        let line = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert!(hides_serials(&line(&["tmr.exe"])) && hides_serials(&line(&["tmr.exe", "plan=quick", "--calibrate-all", "--yes"])));
+        assert!(!hides_serials(&line(&["tmr.exe", "plan=quick", "--serials"])) && !hides_serials(&line(&["tmr.exe", "--serials"])));
     }
 
-    /// TODO 105: the parse's debug line (`RUST_LOG=debug`) shows a structure's string table, Type 17's serial among it, only without
-    /// `--no-serials`; with it, only how many strings there are
+    /// TODO 105: the parse's debug line (`RUST_LOG=debug`) shows a structure's string table, Type 17's serial among it, only with
+    /// `--serials`; without it, only how many strings there are
     #[test]
-    fn no_serials_leaves_the_string_tables_out_of_the_debug_lines() {
+    fn hidden_serials_leave_the_string_tables_out_of_the_debug_lines() {
         let strings = vec!["DIMM_A2".to_string(), "G Skill".to_string(), "12345678".to_string()];
-        assert_eq!(strings_shown(&strings, true), "(3 left out: --no-serials)");
+        assert_eq!(strings_shown(&strings, true), "(3 left out: --serials keeps them)");
         assert_eq!(strings_shown(&strings, false), r#"["DIMM_A2", "G Skill", "12345678"]"#);
     }
 

@@ -101,7 +101,7 @@ pub(crate) enum Message {
     /// The Settings dialog (TODO 105): closed; its switches and the theme, each saved to window.json as it changes
     SettingsClosed,
     StartOnOpen(bool),
-    Serials(bool),
+    KeepSerials(bool),
     Theme(Option<usize>),
     Scheme(ColorScheme),
     Size(WindowSize),
@@ -244,9 +244,9 @@ impl Window {
         });
         let (tx, rx) = mpsc::channel();
         let fe = Arc::new(GuiFrontend { feed: tx.clone(), transcript: Some(log.transcript()) });
-        // Serials off in the Settings dialog: the run leaves them out, as --no-serials does (TODO 105)
-        if !self.settings.serials && !args.iter().any(|arg| arg == "--no-serials") {
-            args.push("--no-serials".to_string());
+        // Serials kept in the Settings dialog: the run keeps them, as --serials does; off, the default, it leaves them out (TODO 105)
+        if self.settings.keep_serials && !args.iter().any(|arg| arg == "--serials") {
+            args.push("--serials".to_string());
         }
         let session = std::thread::Builder::new().name("tmr-engine".to_string()).spawn(move || {
             let result = tmr::session::run(args, fe).map_err(|e| {
@@ -286,9 +286,9 @@ impl Window {
         let transcript = log.transcript();
         let exe = self.model.command().first().cloned().unwrap_or_else(|| "tmr.exe".to_string());
         let mut line = vec![exe, "--calibrate-all".to_string(), "--yes".to_string()];
-        // Serials off in the Settings dialog: left out of what it shows and logs, as start()'s run has it (TODO 105)
-        if !self.settings.serials {
-            line.push("--no-serials".to_string());
+        // Serials kept in the Settings dialog: in what it shows and logs, as start()'s run has them (TODO 105)
+        if self.settings.keep_serials {
+            line.push("--serials".to_string());
         }
         let calibration = std::thread::Builder::new().name("tmr-calibrate".to_string()).spawn(move || {
             let command = tmr::commands::Command::Calibrate(line);
@@ -600,8 +600,8 @@ impl Component for Window {
                 self.settings.start_on_open = on;
                 self.save_settings();
             }
-            Message::Serials(on) => {
-                self.settings.serials = on;
+            Message::KeepSerials(on) => {
+                self.settings.keep_serials = on;
                 self.save_settings();
             }
             Message::Theme(Some(index)) => {
@@ -1238,7 +1238,7 @@ impl Window {
         dialog.content(settings_content(
             &self.settings,
             context.callback(Message::StartOnOpen),
-            context.callback(Message::Serials),
+            context.callback(Message::KeepSerials),
             context.callback(Message::Theme),
         ))
     }
@@ -1636,8 +1636,9 @@ fn settings_content(
         ToggleSwitch::new().is_on(settings.start_on_open).on_toggled(on_start),
     );
     let serials = row(
-        "Keep serial numbers, the DIMMs' and the system's UUID, in the run's output, log and results file (off: --no-serials)",
-        ToggleSwitch::new().is_on(settings.serials).on_toggled(on_serials),
+        "Keep the DIMMs' serial numbers, the system's UUID and the machine's fingerprints in the run's output, log and results file, \
+         as --serials does (off: left out)",
+        ToggleSwitch::new().is_on(settings.keep_serials).on_toggled(on_serials),
     );
     let theme = StackPanel::new().spacing(4.0).children((
         TextBlock::new().text("Theme"),
@@ -1766,7 +1767,7 @@ mod tests {
         let mut pump = Pump::new(RecordingRuntime::default());
         pump.mount_view(dialog(false, TextBlock::new().text("closed").into())).unwrap();
         pump.update_view(dialog(true, content(&settings))).unwrap();
-        (settings.serials, settings.start_on_open) = (false, true);
+        (settings.keep_serials, settings.start_on_open) = (true, true);
         pump.update_view(dialog(true, content(&settings))).unwrap();
         pump.update_view(dialog(false, content(&settings))).unwrap();
     }

@@ -220,7 +220,7 @@ pub(super) fn text(setup: &Setup) -> String {
 
 /// The machine as SMBIOS and CPUID give it (TODO 105, the owner 2026-11-04): a line for the system, its BIOS, its UUID and its memory; one,
 /// indented, for each DIMM, its serial too; one for Windows' version and build (TODO 123); and one for a hypervisor, a VM's or the one VBS
-/// runs on (TODO 115). Under `--no-serials` the serials and the UUID aren't there, and the system's line says so.
+/// runs on (TODO 115). Without `--serials` the serials and the UUID aren't there, and the system's line says so.
 fn machine_text(
     text: &mut String, system: &tmr::frontend::SystemIdentity, bios: &tmr::frontend::BiosInfo, modules: &[tmr::frontend::MemoryModule],
     hypervisor: Option<&tmr::frontend::Hypervisor>, os: Option<&tmr::frontend::WindowsVersion>,
@@ -248,7 +248,7 @@ fn machine_text(
         n => format!("{n} modules, {}", gib(total)),
     });
     if tmr::frontend::serials_hidden() {
-        parts.push("serials left out (--no-serials)".to_string());
+        parts.push("serials left out (--serials keeps them)".to_string());
     }
     let _ = writeln!(text, "🖥️  System: {}", parts.join(" · "));
     for module in modules {

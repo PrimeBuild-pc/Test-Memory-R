@@ -270,7 +270,8 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     entry(out, "calibrate=recheck", "  ...and a stored one probed first, about 15 s, measured again if it has drifted")?;
     entry(out, "calibrate=always", "  ...measured before every run's tests")?;
     entry(out, "calibrate=off", "  ...none: sizes from CPUID, and the seal's width from its rule")?;
-    entry(out, "--no-serials", "Leave the DIMMs' serials and the system's UUID out of the output, log and results")?;
+    entry(out, "--serials", "Keep the DIMMs' serials, the system's UUID and the machine's fingerprints in the")?;
+    more(out, "  output, log and results (left out by default)")?;
     writeln!(out)?;
     writeln!(out, "CONFIG FILE OVERRIDES:")?;
     writeln!(out, "  All parameters can override config file values:")?;
@@ -688,8 +689,8 @@ fn checks_the_save(command: &str, choice: SaveChoice) -> bool {
 /// it found and saves it to tmr-cfg.json if `confirm` (or `--yes` / `--no-save`) says to; a failure stops it before any more runs.
 /// `maxpage=` sets the page size both ask for.
 fn calibrate(args: &[String], out: &mut dyn Write, confirm: &mut dyn FnMut(&str) -> bool) -> io::Result<RunStatus> {
-    // Serials out of what it shows and logs (`--no-serials`), before SMBIOS is first read and logged, as a session has it (TODO 105)
-    crate::smbios::hide_serials(args.iter().any(|a| a == "--no-serials"));
+    // Serials out of what it shows and logs unless `--serials`, before SMBIOS is first read and logged, as a session has it (TODO 105)
+    crate::smbios::hide_serials_unless_kept(args);
     let mut save = match SaveChoice::of(args) {
         Ok(choice) => Save { choice, confirm },
         Err(e) => {
@@ -865,8 +866,8 @@ fn calibrate_seal(
 /// machine as a run checks it (`AppConfig::is_calibration_valid`, `valid_seal_calibration`). It reads CPUID, the TSC's rate and SMBIOS,
 /// which the check compares, and measures nothing.
 fn show_calibration(args: &[String], out: &mut dyn Write) -> io::Result<()> {
-    // Serials out of what it logs (`--no-serials`), before SMBIOS is first read and logged, as a session has it (TODO 105)
-    crate::smbios::hide_serials(args.iter().any(|a| a == "--no-serials"));
+    // Serials out of what it logs unless `--serials`, before SMBIOS is first read and logged, as a session has it (TODO 105)
+    crate::smbios::hide_serials_unless_kept(args);
     let path = crate::app_config::AppConfig::default_path();
     let config = crate::app_config::AppConfig::load(&path);
     let (system_info, smbios) = (crate::tests::get_system_info(), crate::smbios::get_smbios());
@@ -1349,7 +1350,7 @@ mod tests {
         assert!(crate::logfile::wanted(&args(&line)), "--remove-large-pages keeps a log file");
         let line = ["tmr.exe", "--calibrate-all", "maxpage=reg-page"];
         assert!(matches!(parse(&line), Some(Command::Calibrate(given)) if given == args(&line)));
-        let line = ["tmr.exe", "--show-calibration", "--no-serials"];
+        let line = ["tmr.exe", "--show-calibration", "--serials"];
         assert!(matches!(parse(&line), Some(Command::ShowCalibration(given)) if given == args(&line)));
         assert!(!crate::logfile::wanted(&args(&line)), "--show-calibration keeps no log file: it changes nothing");
         let line = ["tmr.exe", "--compare-results", "a.json", "b.json"];

@@ -849,6 +849,43 @@ fn differs_materially(baseline: f64, current: f64) -> bool {
     ((current - baseline).abs() / reference) * 100.0 > SIZE_TOLERANCE_PERCENT
 }
 
+/// Whether `baseline` and `current`, two runs' `machine_id`s or `memory_id`s, are both the fingerprint itself, 16 hex digits
+/// (`AppConfig::generate_machine_id`, `SmbiosData::memory_fingerprint`), not a stand-in: `smbios::LEFT_OUT`, the `(left out:
+/// --no-serials)` of earlier builds, or `--sanitize`'s `sanitize::REMOVED`
+fn fingerprints(baseline: &str, current: &str) -> bool {
+    let fingerprint = |id: &str| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit());
+    fingerprint(baseline) && fingerprint(current)
+}
+
+/// Whether `uuid` is a system UUID as SMBIOS gives it, 32 hex digits in five groups (`8-4-4-4-12`), not a stand-in for one
+fn is_uuid(uuid: &str) -> bool {
+    let groups: Vec<&str> = uuid.split('-').collect();
+    groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12]) && groups.iter().all(|group| group.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The modules as `compare_identity` tells them apart without the memory fingerprint: each one's maker, part number and size, which
+/// the fingerprint covers, neighbours that read the same counted once (`2 × G Skill F5-6000J3038F16G 16.0 GB`), `none listed` where
+/// SMBIOS lists none
+fn module_parts(modules: &[MemoryModule]) -> String {
+    let mut runs: Vec<(usize, String)> = Vec::new();
+    for module in modules {
+        let fields = [module.manufacturer.trim(), module.part_number.trim(), module.capacity_human.trim()];
+        let part = fields.iter().filter(|field| !field.is_empty()).copied().collect::<Vec<_>>().join(" ");
+        match runs.last_mut() {
+            Some((count, last)) if *last == part => *count += 1,
+            _ => runs.push((1, part)),
+        }
+    }
+    if runs.is_empty() {
+        return "none listed".to_string();
+    }
+    let named = |part: &str| if part.is_empty() { "unnamed".to_string() } else { part.to_string() };
+    runs.iter()
+        .map(|(count, part)| if *count == 1 { named(part) } else { format!("{count} × {}", named(part)) })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The modules' speeds as `compare_identity` shows them: each one's `speed_label`, neighbours that read the same once, `not recorded`
 /// where none has one
 fn module_speeds(modules: &[MemoryModule]) -> String {
@@ -867,24 +904,32 @@ fn module_speeds(modules: &[MemoryModule]) -> String {
 pub fn compare_identity(baseline: &RunIdentity, current: &RunIdentity) -> Vec<RunDifference> {
     let mut diffs = Vec::new();
 
-    if baseline.machine_id != current.machine_id {
+    // A run that left the fingerprints out (unless `--serials`, TODO 105) wrote a stand-in in their place, and `--sanitize` writes
+    // another: two stand-ins match whatever the machines were, and a stand-in differs from every fingerprint. Where either run has one,
+    // the machine and its memory are compared by their parts alone, which are then the comparison's lines rather than notes under it.
+    let machine_ids = fingerprints(&baseline.machine_id, &current.machine_id);
+    if machine_ids && baseline.machine_id != current.machine_id {
         diffs.push(RunDifference::new("Machine ID (CPU/cache/BIOS)", &baseline.machine_id, &current.machine_id, true));
+    }
+    if !machine_ids || baseline.machine_id != current.machine_id {
         // The hash is opaque, so name the fields that actually moved.
+        let part = |name: &str| if machine_ids { format!("  {name}") } else { name.to_string() };
         let m = (&baseline.machine, &current.machine);
         if m.0.cpu_brand != m.1.cpu_brand {
-            diffs.push(RunDifference::new("  CPU", &m.0.cpu_brand, &m.1.cpu_brand, true));
+            diffs.push(RunDifference::new(&part("CPU"), &m.0.cpu_brand, &m.1.cpu_brand, true));
         }
         if m.0.cpu_microcode != m.1.cpu_microcode {
-            diffs.push(RunDifference::new("  Microcode", &m.0.cpu_microcode, &m.1.cpu_microcode, true));
+            diffs.push(RunDifference::new(&part("Microcode"), &m.0.cpu_microcode, &m.1.cpu_microcode, true));
         }
         if m.0.bios_version != m.1.bios_version {
-            diffs.push(RunDifference::new("  BIOS version", &m.0.bios_version, &m.1.bios_version, true));
+            diffs.push(RunDifference::new(&part("BIOS version"), &m.0.bios_version, &m.1.bios_version, true));
         }
         if m.0.system_product != m.1.system_product {
-            diffs.push(RunDifference::new("  System product", &m.0.system_product, &m.1.system_product, true));
+            diffs.push(RunDifference::new(&part("System product"), &m.0.system_product, &m.1.system_product, true));
         }
         if m.0.physical_cores != m.1.physical_cores {
-            diffs.push(RunDifference::new("  Physical cores", m.0.physical_cores.to_string(), m.1.physical_cores.to_string(), true));
+            let cores = (m.0.physical_cores.to_string(), m.1.physical_cores.to_string());
+            diffs.push(RunDifference::new(&part("Physical cores"), cores.0, cores.1, true));
         }
     }
 
@@ -896,13 +941,18 @@ pub fn compare_identity(baseline: &RunIdentity, current: &RunIdentity) -> Vec<Ru
         diffs.push(RunDifference::new("Windows", b.label(), c.label(), false));
     }
 
-    if baseline.memory_id != current.memory_id {
+    let memory_ids = fingerprints(&baseline.memory_id, &current.memory_id);
+    if !memory_ids || baseline.memory_id != current.memory_id {
         // Deliberately separate from machine_id: RAM can change with the CPU untouched, and for a memory tester that is the more
         // consequential half.
-        diffs.push(RunDifference::new("Memory fingerprint", &baseline.memory_id, &current.memory_id, true));
+        if memory_ids {
+            diffs.push(RunDifference::new("Memory fingerprint", &baseline.memory_id, &current.memory_id, true));
+        }
+        let part = |name: &str| if memory_ids { format!("  {name}") } else { name.to_string() };
+        let parts_before = diffs.len();
         if baseline.memory_reported_gib != current.memory_reported_gib {
             diffs.push(RunDifference::new(
-                "  Reported capacity",
+                &part("Reported capacity"),
                 format!("{:.1} GiB", baseline.memory_reported_gib),
                 format!("{:.1} GiB", current.memory_reported_gib),
                 true,
@@ -912,11 +962,18 @@ pub fn compare_identity(baseline: &RunIdentity, current: &RunIdentity) -> Vec<Ru
         // speed (5c4bdfa) records none
         let (was, now) = (module_speeds(&baseline.memory_modules), module_speeds(&current.memory_modules));
         if was != now {
-            diffs.push(RunDifference::new("  Module speeds", was, now, true));
+            diffs.push(RunDifference::new(&part("Module speeds"), was, now, true));
         }
-        if !baseline.memory_identity_is_physical || !current.memory_identity_is_physical {
+        // Without the fingerprint, the modules it covers besides: their makers, part numbers and sizes (not their serials, which a run
+        // leaves out with it)
+        let (was, now) = (module_parts(&baseline.memory_modules), module_parts(&current.memory_modules));
+        if !memory_ids && was != now {
+            diffs.push(RunDifference::new("Memory modules", was, now, true));
+        }
+        let moved = memory_ids || diffs.len() > parts_before;
+        if moved && (!baseline.memory_identity_is_physical || !current.memory_identity_is_physical) {
             diffs.push(RunDifference::new(
-                "  (virtualized)",
+                &part("(virtualized)"),
                 "SMBIOS memory detail is a firmware view, not DIMM identity",
                 "instance retype is the likely cause",
                 false,
@@ -924,15 +981,15 @@ pub fn compare_identity(baseline: &RunIdentity, current: &RunIdentity) -> Vec<Ru
         }
     }
 
-    if baseline.system_uuid != current.system_uuid {
+    // Only between two runs that both kept it: a run that left it out has none (unless `--serials`), and `--sanitize` writes a stand-in
+    if let (Some(b), Some(c)) = (&baseline.system_uuid, &current.system_uuid)
+        && b != c
+        && is_uuid(b)
+        && is_uuid(c)
+    {
         // Same hardware model, different machine or VM instance. Not invalidating by itself — two identical hosts are a fair comparison —
         // but it explains run-to-run noise.
-        diffs.push(RunDifference::new(
-            "System UUID",
-            baseline.system_uuid.clone().unwrap_or_else(|| "none".into()),
-            current.system_uuid.clone().unwrap_or_else(|| "none".into()),
-            false,
-        ));
+        diffs.push(RunDifference::new("System UUID", b, c, false));
     }
 
     if baseline.l3_cache != current.l3_cache {
@@ -1329,10 +1386,15 @@ pub fn render_differences(diffs: &[RunDifference]) -> String {
 mod tests {
     use super::*;
 
+    /// A fingerprint for `name`, 16 hex digits as a run's are: each name its own (FNV-1a)
+    fn fingerprint(name: &str) -> String {
+        format!("{:016x}", name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, b| (hash ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)))
+    }
+
     fn identity(machine: &str, memory: &str) -> RunIdentity {
         RunIdentity {
-            machine_id: machine.to_string(),
-            memory_id: memory.to_string(),
+            machine_id: fingerprint(machine),
+            memory_id: fingerprint(memory),
             simd_capabilities: "AVX2".to_string(),
             tsc_frequency_ghz: 3.0,
             ..Default::default()
@@ -1383,6 +1445,49 @@ mod tests {
         let diffs = compare_identity(&base, &ram_swapped);
         assert!(diffs.iter().any(|d| d.field.starts_with("Memory fingerprint") && d.invalidates));
         assert!(!diffs.iter().any(|d| d.field.starts_with("Machine ID")));
+    }
+
+    /// A run leaves its fingerprints and its UUID out unless `--serials` (the owner, 2026-11-23), so two runs without them are compared
+    /// by the machine's and the memory's parts: the same parts are the same machine, and a CPU or DIMMs swapped invalidate it. A run
+    /// without them against one with them (an earlier build's file), or an earlier build's stand-in, reads the same way, not as another
+    /// machine; a UUID only one run kept is no note.
+    #[test]
+    fn runs_without_fingerprints_are_compared_by_their_parts() {
+        let module = |part: &str| MemoryModule {
+            manufacturer: "G Skill".to_string(),
+            part_number: part.to_string(),
+            capacity_human: "16.0 GB".to_string(),
+            ..Default::default()
+        };
+        let without = |stand_in: &str, cpu: &str, part: &str| RunIdentity {
+            machine_id: stand_in.to_string(),
+            memory_id: stand_in.to_string(),
+            machine: MachineIdentity { cpu_brand: cpu.to_string(), ..Default::default() },
+            memory_modules: vec![module(part), module(part)],
+            memory_identity_is_physical: true,
+            ..identity("", "")
+        };
+        let left_out = crate::smbios::LEFT_OUT;
+        let base = without(left_out, "AMD Ryzen 5 8600G", "F5-6000J3038F16G");
+        assert!(compare_identity(&base, &base.clone()).is_empty());
+        assert!(compare_identity(&base, &without("(left out: --no-serials)", "AMD Ryzen 5 8600G", "F5-6000J3038F16G")).is_empty());
+        let kept = RunIdentity {
+            machine_id: fingerprint("pc"),
+            memory_id: fingerprint("kit"),
+            system_uuid: Some("03000200-0400-0500-0006-000700080009".to_string()),
+            ..base.clone()
+        };
+        assert!(compare_identity(&kept, &base).is_empty(), "the same parts, one run's fingerprints and UUID kept");
+        let removed = RunIdentity { system_uuid: Some("<removed>".to_string()), ..base.clone() };
+        assert!(compare_identity(&kept, &removed).is_empty(), "a stand-in for the UUID");
+
+        let fields =
+            |diffs: Vec<RunDifference>| diffs.into_iter().map(|d| (d.field, d.baseline, d.current, d.invalidates)).collect::<Vec<_>>();
+        let cpu = compare_identity(&base, &without(left_out, "AMD Ryzen 7 9700X", "F5-6000J3038F16G"));
+        assert_eq!(fields(cpu), [("CPU".to_string(), "AMD Ryzen 5 8600G".to_string(), "AMD Ryzen 7 9700X".to_string(), true)]);
+        let dimms = compare_identity(&kept, &without(left_out, "AMD Ryzen 5 8600G", "F5-6400J3239G16G"));
+        let (was, now) = ("2 × G Skill F5-6000J3038F16G 16.0 GB".to_string(), "2 × G Skill F5-6400J3239G16G 16.0 GB".to_string());
+        assert_eq!(fields(dimms), [("Memory modules".to_string(), was, now, true)]);
     }
 
     /// The fingerprint covers the configured speed (5c4bdfa), so an XMP/EXPO change moves it: the comparison says what moved, and of a
