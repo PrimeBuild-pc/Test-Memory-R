@@ -234,7 +234,8 @@ mod tests {
              \"position: [x, y], its top-left in screen pixels, as it last closed; off the screens now, Windows places it.\",\n    \
              \"maximized: it closed maximized, and opens so; size and position are what it restores to.\",\n    \
              \"colours: #RRGGBB or #AARRGGBB (alpha first). Leave a key out to keep its default.\"\n  ],\n  \
-             \"chart\": true,\n  \"theme\": \"system\",\n  \"start_on_open\": false,\n  \"keep_serials\": false,\n  \"parameters\": null,\n  \
+             \"chart\": true,\n  \"theme\": \"system\",\n  \"start_on_open\": false,\n  \"keep_serials\": false,\n  \
+             \"parameters\": null,\n  \
              \"maximized\": false,\n  \"colours\": {colours}\n}}\n"
         )
     }

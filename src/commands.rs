@@ -1,4 +1,4 @@
-//! The one-shot commands (TODO 29): `--help`, `--version`, `--create-demo-configs`, `--compare-results`, `--show-results`,
+//! The one-shot commands (TODO 29): `--help`, `--version`, `--create-demo-configs`, `--compare-results`, `--show-results`, `--sanitize`,
 //! `--debug-topology`, `--show-topology`, `--setup-large-pages`, `--remove-large-pages`, the calibrations and `--show-calibration`, what
 //! they stored. A session that is handed one returns it (`session::SessionEnd::Command`), past the parameters every session reads first
 //! (`core-priority=` types the topology the topology commands show); its caller runs it here, writing to a writer of its own. The CLI does,
@@ -25,6 +25,9 @@ pub enum Command {
     Compare(Vec<String>),
     /// `--show-results <results.json>`: the command line, the exe's name first
     ShowResults(Vec<String>),
+    /// `--sanitize <results.json | log>`: copies of a run's results file and its log without its serials, accounts and names
+    /// (`sanitize::sanitize`): the command line, the exe's name first
+    Sanitize(Vec<String>),
     /// `--debug-topology`: every topology detector, alone and as Auto's cascade
     DebugTopology,
     /// `--show-topology`: each core's type, scheduling class, NUMA node and CPUs
@@ -56,6 +59,7 @@ impl Command {
                 "--create-demo-configs" => return Some(Command::DemoConfigs),
                 "--compare-results" => return Some(Command::Compare(args.to_vec())),
                 "--show-results" => return Some(Command::ShowResults(args.to_vec())),
+                "--sanitize" => return Some(Command::Sanitize(args.to_vec())),
                 "--debug-topology" => return Some(Command::DebugTopology),
                 "--show-topology" => return Some(Command::ShowTopology),
                 // --cache-latency and --ram-latency are no commands: they pick tests for the run
@@ -92,6 +96,7 @@ pub fn run(
         Command::DemoConfigs => return demo_configs(out),
         Command::Compare(args) => return compare(args, out),
         Command::ShowResults(args) => return show_results(args, out, text),
+        Command::Sanitize(args) => return sanitize(args, out),
         Command::DebugTopology => {
             writeln!(out, "🔍 Debugging CPU Topology Detection")?;
             crate::cpu_topology::debug_topology_detection(out)?;
@@ -139,6 +144,8 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     writeln!(out, "  {} --compare-results baseline.json current.json [output.json]", program_name)?;
     more(out, "Compare two test results (here, or in the results folder)")?;
     cmd(out, "--show-results results.json", "How a run ended, then its final summary (here, or in the results folder)")?;
+    cmd(out, "--sanitize results.json", "Copies of a run's results file and its log, to post: no serials, UUID,")?;
+    more(out, "  fingerprints, SIDs, or user, account and PC names; either file names the pair")?;
     cmd(out, "--setup-large-pages", "Grant 'Lock pages in memory' to you (as administrator), then sign out and in")?;
     writeln!(out, "  {} --setup-large-pages Group:Administrators", program_name)?;
     more(out, "  ...or to a group or another user: Group:<name>, User:<name>")?;
@@ -548,6 +555,25 @@ fn show_results(args: &[String], out: &mut dyn Write, text: &dyn Fn(&Event) -> S
         }
         Err(e) => {
             writeln!(out, "❌ Couldn't show the results: {e}")?;
+            Ok(RunStatus::NotRun)
+        }
+    }
+}
+
+/// `--sanitize <results.json | log>`, `args` the command line: sanitized copies of the run's results file and its log, beside them
+/// (`sanitize::sanitize`), and what was replaced; or why not, with nothing written.
+fn sanitize(args: &[String], out: &mut dyn Write) -> io::Result<RunStatus> {
+    let [_, _, file] = args else {
+        writeln!(out, "❌ Usage: {} --sanitize <results.json | log>", args[0])?;
+        return Ok(RunStatus::NotRun);
+    };
+    match crate::sanitize::sanitize(file) {
+        Ok(done) => {
+            out.write_all(done.text().as_bytes())?;
+            Ok(RunStatus::Passed)
+        }
+        Err(e) => {
+            writeln!(out, "❌ Not sanitized, nothing written: {e}")?;
             Ok(RunStatus::NotRun)
         }
     }
@@ -1182,8 +1208,8 @@ mod tests {
     /// The commands that read and change nothing on this machine, as they write, each after a `## case` line with how it ended (TODO 29):
     /// `--version`, `--help`, `--compare-results` without its files, of one that isn't there, and of a results file with itself (its time
     /// masked, and TMR's home, which is the test binary's folder), `--show-results` without its file, with two, and of one that isn't
-    /// there (TODO 72; the CLI's golden has one shown), and the large-page commands' refusals of their target (TODO 113), which come before
-    /// anything is read. None asks a question, nor has an event rendered.
+    /// there (TODO 72; the CLI's golden has one shown), `--sanitize`'s refusals before it reads anything, and the large-page commands'
+    /// refusals of their target (TODO 113), which come before anything is read. None asks a question, nor has an event rendered.
     #[test]
     fn commands_write_as_their_golden() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata").join("result_files").join("before_todo_72.json");
@@ -1200,6 +1226,10 @@ mod tests {
             ("--show-results without its file", Command::ShowResults(args(&["tmr.exe", "--show-results"]))),
             ("--show-results of two files", Command::ShowResults(args(&["tmr.exe", "--show-results", fixture, fixture]))),
             ("--show-results of a file that isn't there", Command::ShowResults(args(&["tmr.exe", "--show-results", "nowhere.json"]))),
+            // The owner, 2026-11-23: refused before anything is read (its pairs are `sanitize::tests`')
+            ("--sanitize without its file", Command::Sanitize(args(&["tmr.exe", "--sanitize"]))),
+            ("--sanitize of a file that isn't there", Command::Sanitize(args(&["tmr.exe", "--sanitize", "nowhere.json"]))),
+            ("--sanitize of a file neither kind", Command::Sanitize(args(&["tmr.exe", "--sanitize", "notes.txt"]))),
             // TODO 113: each refusal before anything is looked up, the target's type missing, unknown or with no name, or two targets
             ("--setup-large-pages without a type", Command::SetupLargePages(args(&["tmr.exe", "--setup-large-pages", "witches"]))),
             ("--setup-large-pages with an unknown type", Command::SetupLargePages(args(&["tmr.exe", "--setup-large-pages", "Team:x"]))),
@@ -1358,6 +1388,9 @@ mod tests {
         let line = ["tmr.exe", "--show-results", "a.json"];
         assert!(matches!(parse(&line), Some(Command::ShowResults(given)) if given == args(&line)));
         assert!(!crate::logfile::wanted(&args(&line)), "--show-results keeps no log file, as --compare-results");
+        let line = ["tmr.exe", "--sanitize", r"logs.log"];
+        assert!(matches!(parse(&line), Some(Command::Sanitize(given)) if given == args(&line)));
+        assert!(!crate::logfile::wanted(&args(&line)), "--sanitize keeps no log file: it would have the paths it leaves out");
         for none in [&["tmr.exe"][..], &["tmr.exe", "memory=50%", "--help"], &["tmr.exe", "--startup-debug"]] {
             assert!(parse(none).is_none(), "{none:?}");
         }

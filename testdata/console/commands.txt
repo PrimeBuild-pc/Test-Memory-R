@@ -16,6 +16,8 @@ USAGE:
   tmr --compare-results baseline.json current.json [output.json]
                                       # Compare two test results (here, or in the results folder)
   tmr --show-results results.json     # How a run ended, then its final summary (here, or in the results folder)
+  tmr --sanitize results.json         # Copies of a run's results file and its log, to post: no serials, UUID,
+                                      #   fingerprints, SIDs, or user, account and PC names; either file names the pair
   tmr --setup-large-pages             # Grant 'Lock pages in memory' to you (as administrator), then sign out and in
   tmr --setup-large-pages Group:Administrators
                                       #   ...or to a group or another user: Group:<name>, User:<name>
@@ -227,6 +229,12 @@ Per-Test Performance Changes:
 ❌ Usage: tmr.exe --show-results <results.json>
 ## --show-results of a file that isn't there: NotRun
 ❌ Couldn't show the results: Test result file does not exist: nowhere.json (looked in the current folder, <home>\results and <home>)
+## --sanitize without its file: NotRun
+❌ Usage: tmr.exe --sanitize <results.json | log>
+## --sanitize of a file that isn't there: NotRun
+❌ Not sanitized, nothing written: nowhere.json isn't there (looked in the current folder, <home>\results and <home>)
+## --sanitize of a file neither kind: NotRun
+❌ Not sanitized, nothing written: notes.txt is neither a results file (.json) nor a log (.log)
 ## --setup-large-pages without a type: NotRun
 🔧 TMR Large Page Setup Tool
 =============================

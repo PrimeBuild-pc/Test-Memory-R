@@ -48,6 +48,7 @@ pub mod cpu_check; // whether this CPU has the features TMR is built for (TODO 1
 pub mod frontend; // the engine's interface to whoever shows a session: its events (TODO 29)
 pub mod home; // the folder TMR keeps its configs, results, logs and settings in: beside the exe, or TMR_HOME (TODO 104)
 pub mod logfile; // the log file, which every frontend's logger writes (TODO 29)
+pub mod sanitize; // copies of a run's results file and log without its serials, accounts and names, to post (--sanitize)
 pub mod session; // a command line's setup, then its run, through a frontend (TODO 29)
 pub use build_info::BUILD;
 pub use runner::request_stop;

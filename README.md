@@ -248,8 +248,16 @@ it; that only affects what a run displays or writes out. This file stays on your
 sent anywhere.
 
 **Sharing a log or results file.** Both describe your system as above. A run's files have no DIMM
-serial numbers, system UUID or fingerprint hashes unless it was given `--serials`, so they carry nothing
-that ties them back to this specific machine.
+serial numbers, system UUID or fingerprint hashes unless it was given `--serials`, but the log names
+the Windows account TMR ran as (`PC\name`), and paths in either file can have your user folder in them
+(`C:\Users\<name>\...`). `tmr --sanitize <results file or log>` (the window's `•••` menu has it as
+Sanitize a results file and its log) writes copies of the pair beside them, `<name>.sanitized.json`
+and `<name>.sanitized.log`, with each of those replaced by `<removed>`: the DIMM serials, the system
+UUID, both hashes, the user folders, account, PC and user names, and the machine's SIDs. Either file
+names the pair; the other must be beside it (in TMR's `results\` and `logs\`, or in the same folder) and
+carry the same run ID, or nothing is written. The originals stay as they were. It can't know a name
+TMR didn't write, such as a config's name or a folder outside `C:\Users\`, so read the copies before
+you post them.
 
 ## License
 

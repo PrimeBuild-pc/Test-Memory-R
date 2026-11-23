@@ -311,6 +311,14 @@ it is given `--serials` (`tmr plan=stability --serials`), which keeps them in th
 results; in the window, Settings has the same switch, off by default. Files from TMR 0.1.2 or
 earlier have them: it kept them by default.
 
+To share a run's files, `tmr --sanitize <results file or log>` (in the window, Sanitize a results
+file and its log, in the `•••` menu) writes copies of both beside them, `<name>.sanitized.json` and
+`<name>.sanitized.log`, without the serials, the UUID and the fingerprints, nor your user folder in
+paths, the Windows account and PC names, or SIDs: each is `<removed>`. Either file names the pair,
+by its path or its name in `results\` or `logs\`; the other must be there (or in the same folder) with
+the same run ID, or nothing is written. Read the copies before posting them: a name TMR didn't write,
+in a config's name or a folder outside `C:\Users\`, is still there.
+
 To keep the files somewhere else, set the `TMR_HOME` environment variable to that folder
 (`setx TMR_HOME D:\tmr`, then open a new console).
 

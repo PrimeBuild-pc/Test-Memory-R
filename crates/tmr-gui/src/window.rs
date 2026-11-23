@@ -97,6 +97,11 @@ pub(crate) enum Message {
     Menu(String),
     /// A file or a folder opened, or why the shell couldn't
     Opened(Result<(), String>),
+    /// The ••• menu's Sanitize: the results file or the log the Open dialog gave, none when it was cancelled
+    SanitizeChosen(Result<Vec<PathBuf>, String>),
+    /// The pair sanitized, on a pool thread: what it wrote and replaced, or why it wrote nothing (`tmr::sanitize::sanitize`)
+    Sanitized(Result<String, String>),
+    SanitizedClosed,
     AboutClosed,
     /// The Settings dialog (TODO 105): closed; its switches and the theme, each saved to window.json as it changes
     SettingsClosed,
@@ -145,6 +150,8 @@ pub(crate) struct Window {
     about: bool,
     /// The Settings dialog is open
     settings_open: bool,
+    /// The ••• menu's Sanitize came back: its dialog is open with what it wrote, or why it wrote nothing, until it closes
+    sanitized: Option<Result<String, String>>,
     /// `window.json`'s (TODO 109): the chart shown or hidden, the theme, the parameters, the size and where the window is
     settings: Settings,
     dark: bool,
@@ -420,6 +427,17 @@ impl Window {
                 self.calibrate(context);
                 None
             }
+            MENU_SANITIZE => {
+                let ask = Open {
+                    title: "Sanitize: a run's results file or its log, either names the pair",
+                    filter: ("TMR results and logs", "*.json;*.log"),
+                    folder: tmr::home::results(),
+                    multiple: false,
+                };
+                let owner = dialogs::owner();
+                context.spawn_background(move |_| Message::SanitizeChosen(dialogs::open(owner, ask)));
+                None
+            }
             MENU_SETTINGS => {
                 self.settings_open = true;
                 None
@@ -445,6 +463,7 @@ const MENU_LOGS: &str = "Open the logs folder";
 const MENU_RESULTS: &str = "Open the results file";
 const MENU_RESULTS_FOLDER: &str = "Open the results folder";
 const MENU_CALIBRATE: &str = "Calibrate the caches and the seal";
+const MENU_SANITIZE: &str = "Sanitize a results file and its log…";
 const MENU_SETTINGS: &str = "Settings";
 const MENU_ABOUT: &str = "About TMR";
 
@@ -478,8 +497,19 @@ impl Component for Window {
         model.errors.extend(problems.into_iter().map(|problem| format!("window.json: {problem}")));
         let (width, dark) = (settings.size.map_or(WIDTH, |(width, _)| width), settings.theme == Theme::Dark);
         let priority = ThreadPriority::Normal;
-        let mut window =
-            Self { model, log: None, tab: Tab::Run, about: false, settings_open: false, settings, dark, width, palettes, priority };
+        let mut window = Self {
+            model,
+            log: None,
+            tab: Tab::Run,
+            about: false,
+            settings_open: false,
+            sanitized: None,
+            settings,
+            dark,
+            width,
+            palettes,
+            priority,
+        };
         if start {
             window.start(context);
         }
@@ -594,6 +624,16 @@ impl Component for Window {
             Message::Menu(label) => self.menu(&label, context),
             Message::Opened(Ok(())) => {}
             Message::Opened(Err(e)) => self.model.errors.push(e),
+            // Copies of the pair the file names, beside it, on a pool thread: reading and scrubbing a long run's pair takes a moment
+            Message::SanitizeChosen(Ok(paths)) => {
+                if let Some(path) = paths.into_iter().next() {
+                    let file = path.display().to_string();
+                    context.spawn_background(move |_| Message::Sanitized(tmr::sanitize::sanitize(&file).map(|done| done.text())));
+                }
+            }
+            Message::SanitizeChosen(Err(e)) => self.model.errors.push(format!("Sanitize: the Open dialog failed: {e}")),
+            Message::Sanitized(outcome) => self.sanitized = Some(outcome),
+            Message::SanitizedClosed => self.sanitized = None,
             Message::AboutClosed => self.about = false,
             Message::SettingsClosed => self.settings_open = false,
             Message::StartOnOpen(on) => {
@@ -672,6 +712,7 @@ impl Component for Window {
                 self.broad_dialog(context),
                 self.about_dialog(context),
                 self.settings_dialog(context),
+                self.sanitized_dialog(context),
             ))
     }
 }
@@ -915,6 +956,8 @@ impl Window {
             MenuItem::separator(2usize),
             item(self.model.results_path().is_some(), 3, MENU_RESULTS),
             MenuItem::item(4usize, MENU_RESULTS_FOLDER),
+            // Copies of a run's pair to post, beside it (the owner, 2026-11-23)
+            MenuItem::item(9usize, MENU_SANITIZE),
             MenuItem::separator(5usize),
             // A calibration of its own, before a run or after one, never during (TODO 110): they'd measure each other
             item(self.model.takes_parameters() && !self.model.calibrating(), 8, MENU_CALIBRATE),
@@ -1241,6 +1284,24 @@ impl Window {
             context.callback(Message::KeepSerials),
             context.callback(Message::Theme),
         ))
+    }
+
+    /// The ••• menu's Sanitize, once it has run: the copies it wrote beside the pair and what it replaced, or why it wrote nothing, the
+    /// text selectable for the copies' paths. Not open while the large-page question, About or Settings is, as WinUI opens one dialog at a
+    /// time.
+    fn sanitized_dialog(&self, context: &ViewContext<Self>) -> View {
+        let open = self.sanitized.is_some() && !self.model.large_pages_pending() && !self.about && !self.settings_open;
+        let (title, text) = match &self.sanitized {
+            Some(Ok(text)) => ("Sanitized", text.clone()),
+            Some(Err(e)) => ("Not sanitized", format!("Nothing was written: {e}")),
+            None => ("Sanitized", String::new()),
+        };
+        ContentDialog::new()
+            .title(title)
+            .close_button_text("Close")
+            .is_open(open)
+            .on_closed(context.callback(|_: ContentDialogResult| Message::SanitizedClosed))
+            .content(sanitized_content(&text))
     }
 
     /// About (TODO 109): the logo, what TMR is, its version and build, its licence and its GitHub page. Its content is built only while it
@@ -1652,6 +1713,11 @@ fn settings_content(
     StackPanel::new().spacing(14.0).children((start, serials, theme, kept))
 }
 
+/// The Sanitize dialog's content: what `tmr::sanitize::sanitize` said, selectable
+fn sanitized_content(text: &str) -> View {
+    TextBlock::new().text(text).text_wrapping(TextWrapping::Wrap).is_text_selection_enabled(true).into()
+}
+
 fn card_title(title: String, p: &Palette) -> TextBlock {
     TextBlock::new().text(title).font_weight(FontWeight::SEMI_BOLD).foreground(brush(p.text_primary))
 }
@@ -1770,6 +1836,17 @@ mod tests {
         (settings.keep_serials, settings.start_on_open) = (true, true);
         pump.update_view(dialog(true, content(&settings))).unwrap();
         pump.update_view(dialog(false, content(&settings))).unwrap();
+    }
+
+    /// The Sanitize dialog opens with what it wrote, then with a refusal, and closes, through reactor's planner, as the Settings dialog's
+    #[test]
+    fn the_sanitize_dialog_opens_and_closes() {
+        let mut pump = Pump::new(RecordingRuntime::default());
+        pump.mount_view(dialog(false, TextBlock::new().text("closed").into())).unwrap();
+        let done = "🧹 Sanitized copies written, the originals as they were:\n   C:\\tmr\\results\\x.sanitized.json\n";
+        pump.update_view(dialog(true, super::sanitized_content(done))).unwrap();
+        pump.update_view(dialog(true, super::sanitized_content("Nothing was written: x.json's log isn't there"))).unwrap();
+        pump.update_view(dialog(false, super::sanitized_content(""))).unwrap();
     }
 
     /// Reactor 0.100.0 can't plan a tooltip inside a dialog's content, so the dialogs have none. When this fails, a reactor upgrade
