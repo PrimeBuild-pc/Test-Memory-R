@@ -240,3 +240,10 @@ step) and the seal "off" for a sealed run (its config's `execution.seal` now, "o
 "none invalidate the comparison" above throughput changes of -100% (its "Results file" row invalidates now) and, with it as the
 baseline, "+0.0%" (a percentage of a baseline of 0 is "from 0"); and the head said "from the end of setup" for a file a first cycle
 stopped before its first step can also leave, when a second Ctrl+C ends TMR before the final save.
+
+Astra's review of the unpublished commits (2026-11-23) found the same for a finished file with no cycle, a run stopped before its
+first step: compared with a finished run, it had no "Results file" row, as neither was saved mid-run, so "none invalidate the
+comparison" sat above "Throughput: +756.0 MiB/s (from 0)". Now a comparison with a file with no cycle, saved mid-run or finished,
+has the row ("finished with no cycle, so no figures"), which invalidates it, and no overall changes at all
+(`TestComparison::overall_comparison` is `None`; the text says "None: a run with no cycle has no figures"): a run's figures against
+none are only its own. Its steps' lines still say the run stopped before them.

@@ -421,7 +421,9 @@ pub struct TestComparison {
     /// What differs between the two runs' plans, their steps matched by test (`run_context::compare_plans`): the steps only one has, and
     /// the settings that differ of the tests both have. When they differ, the overall figures cover different work.
     pub plan_changes: crate::run_context::PlanChanges,
-    pub overall_comparison: OverallComparison,
+    /// `None` when either run has no figures, a run with no cycle, saved mid-run or finished (its `Results file` row in
+    /// `run_differences` says which): its changes would be the other run's figures whole
+    pub overall_comparison: Option<OverallComparison>,
     /// The steps both plans have, in the current run's order
     pub per_test_comparisons: Vec<TestComparisonResult>,
     /// Hardware and configuration differences between the two runs (TODO #67). Non-empty means the percentages above are at least partly
@@ -942,18 +944,24 @@ impl TestComparison {
     pub fn of(baseline: TestRunResult, current: TestRunResult) -> Self {
         let comparison_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
 
+        // A run with no cycle has no figures, so nothing in it compares, whether it was saved mid-run or finished: its first save is at
+        // the end of setup, and a first cycle stopped before its first step saves none either, the final save included
         let (b, c) = (&baseline.overall_stats, &current.overall_stats);
-        let runtime_diff_secs = c.total_runtime_secs as i64 - b.total_runtime_secs as i64;
-        let throughput_diff_mib_s = c.overall_throughput_mib_s - b.overall_throughput_mib_s;
-        let overall_comparison = OverallComparison {
-            runtime_diff_secs,
-            runtime_diff_percent: (b.total_runtime_secs > 0).then_some((runtime_diff_secs as f64 / b.total_runtime_secs as f64) * 100.0),
-            throughput_diff_mib_s,
-            throughput_diff_percent: (b.overall_throughput_mib_s > 0.0)
-                .then_some((throughput_diff_mib_s / b.overall_throughput_mib_s) * 100.0),
-            data_processed_diff_gib: c.total_data_processed_gib - b.total_data_processed_gib,
-            errors_diff: c.total_errors as i64 - b.total_errors as i64,
-        };
+        let figureless = b.cycles_completed == 0 || c.cycles_completed == 0;
+        let overall_comparison = (!figureless).then(|| {
+            let runtime_diff_secs = c.total_runtime_secs as i64 - b.total_runtime_secs as i64;
+            let throughput_diff_mib_s = c.overall_throughput_mib_s - b.overall_throughput_mib_s;
+            OverallComparison {
+                runtime_diff_secs,
+                runtime_diff_percent: (b.total_runtime_secs > 0)
+                    .then_some((runtime_diff_secs as f64 / b.total_runtime_secs as f64) * 100.0),
+                throughput_diff_mib_s,
+                throughput_diff_percent: (b.overall_throughput_mib_s > 0.0)
+                    .then_some((throughput_diff_mib_s / b.overall_throughput_mib_s) * 100.0),
+                data_processed_diff_gib: c.total_data_processed_gib - b.total_data_processed_gib,
+                errors_diff: c.total_errors as i64 - b.total_errors as i64,
+            }
+        });
 
         // Each step both plans have, matched by test, with its figures from each run's averages for its step there: a run that stopped
         // before a step has none for it, or none that ran
@@ -981,20 +989,18 @@ impl TestComparison {
             .collect();
 
         // A file saved mid-run first (TODO 72): its figures are only the cycles that had finished, of a run that was killed or lost, or is
-        // still going. One with no cycle has no figures, so nothing in it compares: its first save is at the end of setup, and a first
-        // cycle stopped before its first step saves none either. Then identity, then configuration: a hardware change is the more
-        // fundamental explanation, and on a new machine the config differences are usually downstream of it.
+        // still going; and a file with no figures, saved mid-run or finished. Then identity, then configuration: a hardware change is the
+        // more fundamental explanation, and on a new machine the config differences are usually downstream of it.
         let mut run_differences = Vec::new();
-        if b.in_progress || c.in_progress {
+        if b.in_progress || c.in_progress || figureless {
             let saved = |stats: &OverallStats| {
                 let cycles = stats.cycles_completed;
-                if stats.in_progress && cycles == 0 {
-                    return "saved mid-run with no cycle, so no figures".to_string();
-                }
                 let state = if stats.in_progress { "saved mid-run" } else { "finished" };
+                if cycles == 0 {
+                    return format!("{state} with no cycle, so no figures");
+                }
                 format!("{state} after {cycles} cycle{}", if cycles == 1 { "" } else { "s" })
             };
-            let figureless = b.cycles_completed == 0 || c.cycles_completed == 0;
             run_differences.push(crate::run_context::RunDifference::new("Results file", saved(b), saved(c), figureless));
         }
         run_differences.extend(crate::run_context::compare_identity(&baseline.identity, &current.identity));
@@ -1043,6 +1049,10 @@ impl TestComparison {
         report.push_str(&self.plan_text());
 
         report.push_str("Overall Performance Changes:\n");
+        let Some(overall) = &self.overall_comparison else {
+            report.push_str("  None: a run with no cycle has no figures (Results file, above)\n\n");
+            return report;
+        };
         if self.plan_changes.differ() {
             report.push_str("  ⚠️  The plans differ (Plan Changes, above): these totals cover different work\n");
         }
@@ -1050,24 +1060,24 @@ impl TestComparison {
         let percent = |change: Option<f64>| change.map_or("from 0".to_string(), |change| format!("{change:+.1}%"));
         report.push_str(&format!(
             "  Runtime: {}{} seconds ({})\n",
-            if self.overall_comparison.runtime_diff_secs >= 0 { "+" } else { "" },
-            self.overall_comparison.runtime_diff_secs,
-            percent(self.overall_comparison.runtime_diff_percent)
+            if overall.runtime_diff_secs >= 0 { "+" } else { "" },
+            overall.runtime_diff_secs,
+            percent(overall.runtime_diff_percent)
         ));
 
         report.push_str(&format!(
             "  Throughput: {:+.1} MiB/s ({})\n",
-            self.overall_comparison.throughput_diff_mib_s,
-            percent(self.overall_comparison.throughput_diff_percent)
+            overall.throughput_diff_mib_s,
+            percent(overall.throughput_diff_percent)
         ));
 
-        report.push_str(&format!("  Data Processed: {:+.2} GiB\n", self.overall_comparison.data_processed_diff_gib));
+        report.push_str(&format!("  Data Processed: {:+.2} GiB\n", overall.data_processed_diff_gib));
 
-        if self.overall_comparison.errors_diff != 0 {
+        if overall.errors_diff != 0 {
             report.push_str(&format!(
                 "  Errors: {:+} ({})\n",
-                self.overall_comparison.errors_diff,
-                if self.overall_comparison.errors_diff > 0 { "WORSE" } else { "BETTER" }
+                overall.errors_diff,
+                if overall.errors_diff > 0 { "WORSE" } else { "BETTER" }
             ));
         } else {
             report.push_str("  Errors: No change\n");
@@ -1493,6 +1503,32 @@ mod tests {
         assert!(report.find("Results file").unwrap() < report.find("Overall Performance Changes").unwrap(), "{report}");
         let both_finished = compare_test_results(&baseline, &baseline).unwrap();
         assert!(both_finished.run_differences.iter().all(|d| d.field != "Results file"));
+    }
+
+    /// A run with no cycle has no figures, saved mid-run (at the end of setup) or finished (stopped before its first step): a comparison
+    /// with it, either way round, says so in its Results file row, which invalidates it, and has no overall changes, which would be the
+    /// other run's figures whole ("+756.0 MiB/s (from 0)")
+    #[test]
+    fn a_comparison_with_a_run_with_no_figures_has_no_overall_changes() {
+        let (_, finished) = written_before_todo_72();
+        let mut stopped = finished.clone();
+        stopped.cycles.clear();
+        stopped.finalize(std::time::Duration::from_secs(4));
+        stopped.overall_stats.outcome = Some("interrupted".to_string());
+        let mut setup = stopped.clone();
+        (setup.overall_stats.in_progress, setup.overall_stats.outcome) = (true, None);
+        for (none, state) in [(&stopped, "finished with no cycle, so no figures"), (&setup, "saved mid-run with no cycle, so no figures")] {
+            for (baseline, current) in [(none, &finished), (&finished, none)] {
+                let comparison = TestComparison::of(baseline.clone(), current.clone());
+                let rows: Vec<_> = comparison.run_differences.iter().filter(|d| d.field == "Results file").collect();
+                let [row] = rows[..] else { panic!("one Results file row: {:?}", comparison.run_differences) };
+                let figures = if std::ptr::eq(baseline, none) { &row.baseline } else { &row.current };
+                assert_eq!((figures.as_str(), row.invalidates), (state, true));
+                let head = comparison.head_text();
+                let overall = &head[head.find("Overall Performance Changes").unwrap()..];
+                assert_eq!(overall, "Overall Performance Changes:\n  None: a run with no cycle has no figures (Results file, above)\n\n");
+            }
+        }
     }
 
     /// A step of a plan, for the comparisons' tests: the test as its plan or config names it, its config id, the name it ran as, the width
