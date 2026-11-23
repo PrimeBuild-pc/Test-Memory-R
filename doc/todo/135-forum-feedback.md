@@ -2,7 +2,8 @@
 
 The thread "TMR (Test Memory R): an open-source TM5-style memory tester, looking for testers" drew feedback from three users
 (igor_kavinski, Veii, Bam_Bam). Each suggestion was checked against the code on 2026-11-23, every claim re-checked by a second agent.
-This file keeps the ones still waiting on the owner's call; what was built or decided is listed at the end.
+The owner decided them on 2026-11-23 (below the table); item 6 waits on the owner's call. What was built or decided is listed at
+the end.
 
 ## Still to decide
 
@@ -18,6 +19,36 @@ This file keeps the ones still waiting on the owner's call; what was built or de
 | 8 | A per-user key so only the owner sees their serials in shared data (igor_kavinski) | Serials, the UUID and both fingerprints are left out by default (742a707); `--sanitize` removes what a file still has | HMAC-SHA256 pseudonyms under a per-install key in `tmr-cfg.json`, so the owner can match their own DIMMs across shared files | Medium | Whether at all, given the default; stable pseudonyms (match across files, but a forum reader can link one person's posts) or one per file |
 | 9 | Read temperatures and timings natively rather than through HWiNFO, ZenTimings or CPU-Z (Veii) | Nothing yet; TODO 122 plans ZenTimings and LibreHardwareMonitor | Feeds TODO 122's decision: temperatures look doable natively; timings need a driver for the memory controller's registers, which ZenTimings has | (TODO 122) | TODO 122's approach |
 | 10 | A misleading compare line (found while checking, not raised on the forum) | `--compare-results` says "(virtualized) · instance retype is the likely cause" on Hyper-V/VBS desktops too, where it isn't | Say it only on a cloud VM (the hypervisor's vendor), not under Hyper-V on a desktop | Small | None: a fix |
+
+## The owner's calls on the table (2026-11-23)
+
+1. Not taken: "overkill, given the work just done" (the crash-safety batch).
+2. Not taken: TM5 doesn't default to a stop on errors, nor should TMR: a run goes to its end or a crash.
+3, 4, 5. With the Reactor/WinUI 3 update TMR is waiting on (TODO 111), bundled with the monospaced font and the rest. (Neither the
+   slider, which Reactor 0.100.0 has, nor the window size strictly needs the update, nor a "Copy the log" menu item; the owner keeps
+   the window's work together.)
+6. Open: explained to the owner (below); the call is whether to build either part.
+7. Kept for a future version, low priority: TODO 136.
+8. Not taken: "a file either includes the serials or doesn't, the user's choice"; a key to decode them is complication, dangerous if
+   the scheme is weak, and most would lose the key.
+9. TODO 122 already covers it.
+10. No fix: the note shows only when a run is compared with a results file from before TODO 115 (2026-11-04), which recorded the
+   desktops with VBS as VMs (the 2026-11-03 baselines do); a run since records them as no VM, and new baselines retire the note.
+
+### Item 6 in plain terms
+
+TM5 shares free memory among its testers (its worker threads) in one of two ways:
+- **As administrator (its normal way, AWE), and how TMR imports every config:** one tester a CPU thread, each with an equal share of
+  all the free memory (16 testers of about 3.6 GB on 58 GB free), walking it one Testing Window (880 MB in 1usmus_v3) at a time.
+- **Without administrator rights, or when a config sets Capable bit 0x2:** each tester gets about one window of memory (768 MB) and
+  TM5 runs as many testers as it takes to cover the free memory, several a CPU (about 75 on 16 CPUs).
+Veii asked that a config written for the second way keep it rather than be turned into the first. TMR can't run it today. Building it
+would be an opt-in mode (medium); it changes the block sizes each step uses, not how much memory is tested. The shipped community
+configs (1usmus_v3, absolut) have Capable=0x0, the first way.
+The small fidelity fixes are four places TMR reads an odd config differently from TM5: a value outside TM5's range is set to TM5's
+default (TMR clamps it to the nearest allowed); block size code 0 is floored to the Lock Granularity (TMR keeps the window, which
+differs only when the window isn't a multiple of it); a config with no Testing Window Size gets 1024 MB; and a Cores above the CPU
+count should at least warn. Small; they only matter for configs outside the common ones.
 
 ## Built or decided (2026-11-20 to 23)
 
