@@ -1713,53 +1713,206 @@ fn id_ranges(mut ids: Vec<u32>) -> String {
     parts.join(", ")
 }
 
-impl LegacyConfig {
-    pub fn load_from_file(path: &str) -> Result<Self, String> {
-        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read legacy config file: {}", e))?;
+/// A structural problem in a TM5 `.cfg` (`LegacyConfig::parse_reporting`). Never an error: TM5 reads such a file, and community configs
+/// must keep loading. But a crash can damage a `.cfg` with no visible sign, and each of these changes what the file runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CfgWarning {
+    /// From 1, as an editor counts
+    pub line: usize,
+    pub message: String,
+}
 
-        Self::parse_legacy_format(&content)
+/// How many of a `.cfg`'s warnings are logged one by one; one line counts the rest (a file of garbage would fill the window's errors list)
+const MAX_CFG_WARNINGS: usize = 20;
+
+/// The keys TM5 reads in each of its `.cfg` sections (`TM5/mt_ini.inc`), lowercase, as TMR looks them up; TMR reads some of them
+const TM5_MAIN_KEYS: &[&str] = &["config name", "config author", "cores", "tests", "time (%)", "cycles", "language", "test sequence"];
+const TM5_MEMORY_KEYS: &[&str] = &[
+    "channels", "interleave type", "single dimm width, bits", "operation block, byts", "testing window size (mb)",
+    "lock memory granularity (mb)", "reserved memory for windows (mb)", "capable", "debug level",
+];
+const TM5_WINDOW_KEYS: &[&str] = &["windowposx", "windowposy"];
+const TM5_TEST_KEYS: &[&str] = &[
+    "enable", "time (%)", "function", "dll name", "pattern mode", "pattern param0", "pattern param1", "parameter", "test block size (mb)",
+];
+
+/// The keys TM5 reads in `section` (lowercase), `None` for a section it doesn't read. `[Test0]` to `[Test15]`, as TM5 names them
+/// (`Test%li`), so not `[Test05]`.
+fn tm5_section_keys(section: &str) -> Option<&'static [&'static str]> {
+    match section {
+        "main section" => Some(TM5_MAIN_KEYS),
+        "global memory setup" => Some(TM5_MEMORY_KEYS),
+        "window position" => Some(TM5_WINDOW_KEYS),
+        _ => {
+            let n = section.strip_prefix("test")?;
+            n.parse::<u32>().is_ok_and(|i| i < 16 && i.to_string() == n).then_some(TM5_TEST_KEYS)
+        }
+    }
+}
+
+/// A `.cfg` line as a warning quotes it: control characters escaped, so a crash's NULs show, and cut at 40 characters
+fn cfg_quoted(text: &str) -> String {
+    let mut quoted = String::new();
+    for c in text.chars().take(40) {
+        if c.is_control() {
+            quoted.extend(c.escape_debug());
+        } else {
+            quoted.push(c);
+        }
+    }
+    if text.chars().nth(40).is_some() {
+        quoted.push_str("...");
+    }
+    quoted
+}
+
+/// One `.cfg` section as TM5 reads it: each key, lowercase, with its value and line, the first of a repeated key
+#[derive(Default)]
+struct CfgSection {
+    /// As its header writes it
+    name: String,
+    keys: HashMap<String, (String, usize)>,
+    /// Its header's
+    line: usize,
+}
+
+impl CfgSection {
+    fn get(&self, key: &str) -> Option<&String> {
+        self.keys.get(&key.to_ascii_lowercase()).map(|(value, _)| value)
     }
 
-    pub(crate) fn parse_legacy_format(content: &str) -> Result<Self, String> {
-        let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
-        let mut current_section = String::new();
+    /// `key`'s line, the header's when it isn't there
+    fn line_of(&self, key: &str) -> usize {
+        self.keys.get(&key.to_ascii_lowercase()).map_or(self.line, |(_, line)| *line)
+    }
+}
 
-        for line in content.lines() {
+impl LegacyConfig {
+    /// A `.cfg` loaded, its warnings logged with its path and line (`parse_reporting`). They are logged when the load then fails too: a
+    /// damaged header can be why `[Main Section]` is missing.
+    pub fn load_from_file(path: &str) -> Result<Self, String> {
+        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read legacy config file: {}", e))?;
+        let mut warnings = Vec::new();
+        let parsed = Self::parse_reporting(&content, &mut warnings);
+        for CfgWarning { line, message } in warnings.iter().take(MAX_CFG_WARNINGS) {
+            log::warn!("{path}, line {line}: {message}");
+        }
+        if warnings.len() > MAX_CFG_WARNINGS {
+            log::warn!("{path}: {} more warnings like these, not listed", warnings.len() - MAX_CFG_WARNINGS);
+        }
+        parsed
+    }
+
+    /// `parse_reporting` without its warnings, for a test that checks only what a `.cfg`'s text loads as
+    #[cfg(test)]
+    pub(crate) fn parse_legacy_format(content: &str) -> Result<Self, String> {
+        Self::parse_reporting(content, &mut Vec::new())
+    }
+
+    /// A `.cfg`'s text read as TM5 reads it, through `GetPrivateProfileString` (as measured on Windows Server 2025, build 26100): names
+    /// ignore case and the spaces around them; a repeated key keeps its first value; a repeated section is never read, so only the first
+    /// one's keys count (they aren't merged); a header with no `]` names the section the rest of its line does, and text after the `]` is
+    /// ignored. TMR also drops a leading UTF-8 BOM, which would cost TM5 a header on the first line.
+    ///
+    /// A value must parse. The structure only warns, into `warnings`, whether the load then succeeds or not. It warns on a line that is
+    /// neither a header nor a key=value (TM5's own text before the first header aside), a key before any section, a key or section TM5
+    /// doesn't read, a header with no `]` or with a key=value after it, a repeated section or key, and a Channels or Lock Memory
+    /// Granularity TMR clamps.
+    pub(crate) fn parse_reporting(content: &str, warnings: &mut Vec<CfgWarning>) -> Result<Self, String> {
+        // Where a key=value line goes: nowhere before the first header (TM5's own text is there), into a section TM5 reads, or nowhere,
+        // in one it doesn't or a repeated one
+        enum Place {
+            Preamble,
+            Read(String),
+            Unread,
+        }
+        let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+        let mut sections: HashMap<String, CfgSection> = HashMap::new();
+        let mut place = Place::Preamble;
+        for (index, line) in content.lines().enumerate() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
+            // `;` is the INI comment. `#` has always been TMR's; TM5 reads such a line as a key it never asks for, so ignores it too.
+            if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
                 continue;
             }
-
-            if line.starts_with('[') && line.ends_with(']') {
-                // TM5 uses GetPrivateProfileString: section and key names ignore case; values (including function names) do not.
-                current_section = line[1..line.len() - 1].to_ascii_lowercase();
-                sections.insert(current_section.clone(), HashMap::new());
-            } else if let Some(eq_pos) = line.find('=') {
-                let key = line[..eq_pos].trim().to_ascii_lowercase();
-                let value = line[eq_pos + 1..].trim().to_string();
-                if let Some(section) = sections.get_mut(&current_section) {
-                    section.insert(key, value);
+            let mut warn = |message: String| warnings.push(CfgWarning { line: index + 1, message });
+            if let Some(header) = line.strip_prefix('[') {
+                let (name, after) = header.split_once(']').unwrap_or((header, ""));
+                let name = name.trim();
+                if !header.contains(']') {
+                    warn(format!("\"{}\" has no closing ']'; TM5 reads it as the header of [{name}], and so does TMR", cfg_quoted(line)));
+                } else if after.contains('=') {
+                    // A lost line break. Other text there costs nothing: anta777's three 2020 configs have "[Test6]    `"
+                    warn(format!("\"{}\" has a key=value after its ']', which TM5 ignores, and so does TMR", cfg_quoted(line)));
+                }
+                let key = name.to_ascii_lowercase();
+                place = if tm5_section_keys(&key).is_none() {
+                    warn(format!("[{name}] is not a section TM5 reads; TM5 and TMR ignore its keys"));
+                    Place::Unread
+                } else if let Some(first) = sections.get(&key) {
+                    warn(format!(
+                        "[{name}] again (first at line {}): TM5 reads only the first, so it ignores the keys under this one, and so does \
+                         TMR",
+                        first.line
+                    ));
+                    Place::Unread
+                } else {
+                    sections.insert(key.clone(), CfgSection { name: name.to_string(), keys: HashMap::new(), line: index + 1 });
+                    Place::Read(key)
+                };
+                continue;
+            }
+            let setting = line.split_once('=').map(|(key, value)| (key.trim(), value.trim())).filter(|(key, _)| !key.is_empty());
+            match (&place, setting) {
+                (Place::Preamble, None) => {}
+                (_, None) => warn(format!("\"{}\" is neither a [section] header nor a key=value; TM5 and TMR ignore it", cfg_quoted(line))),
+                (Place::Preamble, Some(_)) => warn(format!("\"{}\" comes before any [section]; TM5 and TMR ignore it", cfg_quoted(line))),
+                (Place::Unread, Some(_)) => {}
+                (Place::Read(key_of_section), Some((key, value))) => {
+                    let Some(section) = sections.get_mut(key_of_section) else { continue };
+                    let lower = key.to_ascii_lowercase();
+                    if !tm5_section_keys(key_of_section).unwrap_or_default().contains(&lower.as_str()) {
+                        warn(format!("\"{}\" in [{}]: not a key TM5 reads, so TM5 and TMR ignore it", cfg_quoted(line), section.name));
+                    } else if let Some((first, first_line)) = section.keys.get(&lower) {
+                        warn(format!(
+                            "\"{}\" in [{}] repeats the key of line {first_line}; TM5 keeps that first value, {}, and so does TMR",
+                            cfg_quoted(line),
+                            section.name,
+                            cfg_quoted(first)
+                        ));
+                    } else {
+                        section.keys.insert(lower, (value.to_string(), index + 1));
+                    }
                 }
             }
         }
 
         // A key that is there must parse: an unparsable value used to become its default silently (an unreadable Parameter made a strided
         // test sequential)
-        fn num<T: std::str::FromStr>(section: &HashMap<String, String>, name: &str, key: &str, default: T) -> Result<T, String> {
-            match section.get(&key.to_ascii_lowercase()) {
+        fn num<T: std::str::FromStr>(section: &CfgSection, name: &str, key: &str, default: T) -> Result<T, String> {
+            match section.get(key) {
                 None => Ok(default),
                 Some(s) => s.parse().map_err(|_| format!("TM5 config [{name}] {key}={s}: not a number")),
             }
         }
         // TM5 writes the pattern parameters in hex, with or without 0x
-        fn hex(section: &HashMap<String, String>, name: &str, key: &str, default: u64) -> Result<u64, String> {
-            match section.get(&key.to_ascii_lowercase()) {
+        fn hex(section: &CfgSection, name: &str, key: &str, default: u64) -> Result<u64, String> {
+            match section.get(key) {
                 None => Ok(default),
                 Some(s) => {
                     let digits = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
                     u64::from_str_radix(digits, 16).map_err(|_| format!("TM5 config [{name}] {key}={s}: not a 64-bit hex number"))
                 }
             }
+        }
+        // A value TMR takes only within `lo..=hi` is clamped into it, with a warning
+        fn clamped(section: &CfgSection, name: &str, key: &str, value: u32, (lo, hi): (u32, u32), warnings: &mut Vec<CfgWarning>) -> u32 {
+            let kept = value.clamp(lo, hi);
+            if kept != value {
+                let message = format!("[{name}] {key}={value} is outside {lo}-{hi}; TMR uses {kept}");
+                warnings.push(CfgWarning { line: section.line_of(key), message });
+            }
+            kept
         }
 
         // Parse main section
@@ -1791,8 +1944,15 @@ impl LegacyConfig {
         let memory_setup = LegacyMemorySetup {
             testing_window_size_mb: num(memory, gms, "Testing Window Size (Mb)", 880)?,
             reserved_memory_mb: num(memory, gms, "Reserved Memory for Windows (Mb)", 128)?,
-            channels: num::<u32>(memory, gms, "Channels", 2)?.clamp(1, 8),
-            lock_granularity_mb: num::<u32>(memory, gms, "Lock Memory Granularity (Mb)", 16)?.clamp(1, 512),
+            channels: clamped(memory, gms, "Channels", num(memory, gms, "Channels", 2)?, (1, 8), warnings),
+            lock_granularity_mb: clamped(
+                memory,
+                gms,
+                "Lock Memory Granularity (Mb)",
+                num(memory, gms, "Lock Memory Granularity (Mb)", 16)?,
+                (1, 512),
+                warnings,
+            ),
         };
 
         // TM5 loads its default enabled RefreshStable slot even when [Test0] is absent. Feed an empty section through the same
@@ -2722,7 +2882,7 @@ mod tests {
         let cfg = |line: &str| {
             format!(
                 "[Main Section]\nTest Sequence=1\n[Global Memory Setup]\nChannels=2\n\
-            [Test1]\nEnable=1\nFunction=SimpleTest\nPattern Mode=0\n{line}\n"
+            [Test1]\nEnable=1\nFunction=SimpleTest\n{line}\n"
             )
         };
         assert!(LegacyConfig::parse_legacy_format(&cfg("Parameter=8")).is_ok());
@@ -2739,6 +2899,126 @@ mod tests {
         }
         let seq = "[Main Section]\nTest Sequence=1,x\n[Global Memory Setup]\n";
         assert!(LegacyConfig::parse_legacy_format(seq).unwrap_err().contains("'x'"));
+    }
+
+    /// A `.cfg`'s text parsed, and its warnings as (line, message)
+    fn cfg_warnings(text: &str) -> (Result<LegacyConfig, String>, Vec<(usize, String)>) {
+        let mut warnings = Vec::new();
+        let parsed = LegacyConfig::parse_reporting(text, &mut warnings);
+        (parsed, warnings.into_iter().map(|w| (w.line, w.message)).collect())
+    }
+
+    /// A `.cfg` as TM5 writes one (`TM5/MT.cfg`'s shape) warns nothing: text before the first header, CRLF, every key TM5 reads in each
+    /// section whether TMR reads it or not, and `[Window Position]`. The warnings are for damage, not for TM5's own file.
+    #[test]
+    fn a_tm5_written_cfg_warns_nothing() {
+        let mut cfg = "Memory Test config file v0.02\r\nA line of its author's\r\nexample.org\r\n\r\n\
+            [Main Section]\r\nConfig Name=Default\r\nConfig Author=someone\r\nCores=0\r\nTests=16\r\nTime (%)=100\r\nCycles=3\r\n\
+            Language=0\r\nTest Sequence=1,2,0\r\n\r\n\
+            [Global Memory Setup]\r\nChannels=2\r\nInterleave Type=1\r\nSingle DIMM width, bits=64\r\nOperation Block, byts=64\r\n\
+            Testing Window Size (Mb)=880\r\nLock Memory Granularity (Mb)=16\r\nReserved Memory for Windows (Mb)=128\r\nCapable=0x0\r\n\
+            Debug Level=7\r\n\r\n[Window Position]\r\nWindowPosX=2179\r\nWindowPosY=4\r\n"
+            .to_string();
+        for (i, function) in ["RefreshStable", "SimpleTest", "MirrorMove"].into_iter().enumerate() {
+            cfg += &format!(
+                "\r\n[Test{i}]\r\nEnable=1\r\nTime (%)=100\r\nFunction={function}\r\nDLL Name=bin\\MT0.dll\r\nPattern Mode=0\r\n\
+                Pattern Param0=0x0\r\nPattern Param1=0x0\r\nParameter=0\r\nTest Block Size (Mb)=0\r\n"
+            );
+        }
+        let (parsed, warnings) = cfg_warnings(&cfg);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let legacy = parsed.unwrap();
+        assert_eq!((legacy.main_section.config_name.as_str(), legacy.tests.len()), ("Default", 3));
+        legacy.to_modern_config().unwrap();
+        // A UTF-8 BOM (Notepad's) is dropped, names ignore the spaces around them, and `;` and `#` lines are comments
+        let (parsed, warnings) =
+            cfg_warnings(&format!("\u{FEFF}; saved by an editor\r\n# a note\r\n{}", cfg.replace("[Test1]", "[ Test1 ]")));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(parsed.unwrap().tests.len(), 3);
+    }
+
+    /// The TM5 configs beside the repo (`../TM5_Source`, `../TM5_configs/bin`, `../TM5`) load and warn nothing. None is in git, so CI
+    /// has none to check; `a_tm5_written_cfg_warns_nothing` stands in for them. The home's `configs\` is left out: a `.cfg` there is
+    /// the owner's own, and may be one damaged on purpose.
+    #[test]
+    fn the_workspaces_tm5_configs_warn_nothing() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for dir in ["../TM5_Source", "../TM5_configs/bin", "../TM5"] {
+            let Ok(entries) = fs::read_dir(root.join(dir)) else { continue };
+            for path in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("cfg"))) {
+                let (parsed, warnings) = cfg_warnings(&fs::read_to_string(&path).unwrap());
+                assert!(parsed.is_ok() && warnings.is_empty(), "{}: {:?} {warnings:?}", path.display(), parsed.err());
+            }
+        }
+    }
+
+    /// Each kind of `.cfg` damage warns once, on its line, and the file still loads, read as TM5 reads it. Lines 1-6 are clean; the
+    /// damage is line 7 on.
+    #[test]
+    fn cfg_damage_warns_on_its_line_and_still_loads() {
+        let cfg = |damage: &str| {
+            format!("[Main Section]\nTest Sequence=1\n[Global Memory Setup]\n[Test1]\nFunction=SimpleTest\nParameter=4\n{damage}\n")
+        };
+        let test = |legacy: &LegacyConfig, id: u32| legacy.tests.iter().find(|t| t.id == id).map(|t| (t.parameter, t.pattern_mode));
+        for (damage, phrase, test1, test2) in [
+            ("Enable 1", "\"Enable 1\" is neither a [section] header nor a key=value", (4, 1), None),
+            ("\0\0\0\0", "\"\\0\\0\\0\\0\" is neither a [section] header", (4, 1), None),
+            // A misspelt key is ignored, so the setting it meant keeps TM5's default (Test1's Pattern Mode is 1)
+            ("Patern Mode=2", "\"Patern Mode=2\" in [Test1]: not a key TM5 reads", (4, 1), None),
+            // The first of a repeated key, as TM5
+            ("Parameter=8", "\"Parameter=8\" in [Test1] repeats the key of line 6; TM5 keeps that first value, 4", (4, 1), None),
+            // A repeated section is never read, not merged: its Pattern Mode doesn't reach Test1 either
+            ("[test1]\nParameter=8\nPattern Mode=2", "[test1] again (first at line 4): TM5 reads only the first", (4, 1), None),
+            // A header with no `]` is the section it names (TM5's reading), so its keys don't overwrite Test1's
+            ("[Test2\nParameter=8", "\"[Test2\" has no closing ']'; TM5 reads it as the header of [Test2]", (4, 1), Some((8, 2))),
+            // Text after the `]` is ignored, a key in it too: Test2 keeps its own default Parameter, 254
+            ("[Test2] Parameter=8", "\"[Test2] Parameter=8\" has a key=value after its ']'", (4, 1), Some((254, 2))),
+            ("[Tset2]\nParameter=8", "[Tset2] is not a section TM5 reads", (4, 1), None),
+            // TM5 names its sections `Test%li`
+            ("[Test02]\nParameter=8", "[Test02] is not a section TM5 reads", (4, 1), None),
+        ] {
+            let (parsed, warnings) = cfg_warnings(&cfg(damage));
+            let legacy = parsed.unwrap_or_else(|e| panic!("{damage:?}: {e}"));
+            assert_eq!(warnings.len(), 1, "{damage:?}: {warnings:?}");
+            assert_eq!(warnings[0].0, 7, "{damage:?}: {warnings:?}");
+            assert!(warnings[0].1.contains(phrase), "{damage:?}: {}", warnings[0].1);
+            assert_eq!((test(&legacy, 1), test(&legacy, 2)), (Some(test1), test2), "{damage:?}");
+        }
+
+        // Other text after a header's `]` costs nothing, so warns nothing (a community config has "[Test6]    `"): the header is
+        // Test2's, whose keys then don't overwrite Test1's, as they did when TMR took such a line for no header
+        let (parsed, warnings) = cfg_warnings(&cfg("[Test2]    `\nParameter=8"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let legacy = parsed.unwrap();
+        assert_eq!((test(&legacy, 1), test(&legacy, 2)), (Some((4, 1)), Some((8, 2))));
+
+        // A key before any section is ignored, though TM5's own text there isn't warned on
+        let (parsed, warnings) = cfg_warnings(&format!("Memory Test config file v0.02\nCores=4\n{}", cfg("")));
+        assert_eq!(warnings, [(2, "\"Cores=4\" comes before any [section]; TM5 and TMR ignore it".to_string())]);
+        assert_eq!(parsed.unwrap().main_section.cores, 0);
+
+        // A load that then fails has warned first: here a damaged header is why [Main Section] is missing
+        let (parsed, warnings) = cfg_warnings("Main Section]\nTest Sequence=1\n[Global Memory Setup]\n");
+        assert_eq!(parsed.unwrap_err(), "Missing [Main Section]");
+        assert_eq!(warnings.iter().map(|w| w.0).collect::<Vec<_>>(), [2]);
+    }
+
+    /// A Channels or Lock Memory Granularity TMR clamps warns with its line and the value TMR takes.
+    #[test]
+    fn clamped_cfg_values_warn() {
+        for (line, kept, warning) in [
+            ("Channels=12", (8, 16), "[Global Memory Setup] Channels=12 is outside 1-8; TMR uses 8"),
+            ("Channels=0", (1, 16), "[Global Memory Setup] Channels=0 is outside 1-8; TMR uses 1"),
+            ("Lock Memory Granularity (Mb)=0", (2, 1), "[Global Memory Setup] Lock Memory Granularity (Mb)=0 is outside 1-512; TMR uses 1"),
+            ("lock memory granularity (mb)=1024", (2, 512), "Lock Memory Granularity (Mb)=1024 is outside 1-512; TMR uses 512"),
+        ] {
+            let (parsed, warnings) = cfg_warnings(&format!("[Main Section]\n[Global Memory Setup]\nDebug Level=7\n{line}\n"));
+            let memory = parsed.unwrap().memory_setup;
+            assert_eq!((memory.channels, memory.lock_granularity_mb), kept, "{line}");
+            assert_eq!(warnings.len(), 1, "{line}: {warnings:?}");
+            assert_eq!(warnings[0].0, 4, "{line}");
+            assert!(warnings[0].1.ends_with(warning), "{line}: {}", warnings[0].1);
+        }
     }
 
     /// A field a present `[TestN]` omits takes TM5's own per-slot default (`DefTestParam.inc`), not TMR's generic 0/"Unknown":

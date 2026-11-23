@@ -324,7 +324,9 @@ effective parameters. Older configs/results without this metadata still load; TM
 or mirror test, `write_read_cycles` 0 on any `run_phased_test` test, and `test_reps` 0 on a mirror
 are refused; so is `test_reps` 0 with a mode that keys its image by the cycle (0, 1, 2, 20, 30),
 whose fill and verifies would disagree. Each knob is at most 10,000. A knob the test doesn't read is
-logged, not refused. A TM5 `.cfg` value that doesn't parse is an error naming it.
+logged, not refused. A TM5 `.cfg` value that doesn't parse is an error naming it; damage to its
+structure (a line TM5 ignores, a repeated key or section, a clamped Channels) is a warning with its
+line, and the file is read as TM5 reads it (`LegacyConfig::parse_reporting`).
 
 **A native SimpleTest's rounds come in pairs.** Each pattern is written twice in a row on a
 chunk: P, then ~P (every bit flipped), so every bit is checked holding a 0 and a 1. An odd

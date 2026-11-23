@@ -268,6 +268,13 @@ The startup report shows the pattern substitutions; the log has the original fie
 effective settings. `patterns=legacy` selects TMR's older numbered adaptations for comparison,
 not exact TM5 reproduction.
 
+A crash can damage a `.cfg` with no visible sign, so TMR warns, naming the file and the line,
+about a line that is neither a `[section]` nor a `key=value`, a key or section TM5 doesn't read,
+a key before the first section, a header without its `]`, a repeated section or key, and a
+Channels or Lock Memory Granularity outside what TMR takes. These are warnings, not errors: the
+file loads, read as TM5 reads it. The first of a repeated key or section counts, and a header
+without its `]` still starts its section. A value that doesn't parse stops the run.
+
 ### TMR JSON configs
 
 The installer includes `demo_comprehensive_test.json` and `demo_tm5_compatible.json` in
