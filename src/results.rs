@@ -18,16 +18,6 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Writes `bytes` to `path` and flushes them to the disk (`FlushFileBuffers`) before it returns (TODO 72). NTFS logs a rename at once but
-/// writes a file's data back later, so without the flush a system that went down just after a save could keep the rename and lose the data
-/// it names. `new`: only as a new file, never one already there (`save_atomic`'s temp).
-fn write_to_disk(path: &str, bytes: &[u8], new: bool) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).create_new(new).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
 /// A run's results file. Its figures are saved as the run has them, none rounded (the owner, TODO 72): the file is for tools, and a replay
 /// of what the console showed needs the raw values, which a reader rounds as it shows them. Rounded, a speed of 43122.8 MiB/s read back as
 /// 43123, and a test run twice a cycle at 100.6 and 101.6 MiB/s averaged 101.5 from the file, not the 101.1 the console showed.
@@ -915,26 +905,16 @@ impl TestRunResult {
         crate::home::dir().join(self.metadata.filename.replace('/', std::path::MAIN_SEPARATOR_STR)).display().to_string()
     }
 
-    /// Writes the file whole or not at all (TODO 72): to `<path>.tmp`, on the disk, then renamed over `path`, so a run killed mid-write, or
-    /// a system that went down, leaves its last save, not part of one. A refused rename, as when a viewer holds the file without letting it
-    /// be deleted, falls back to writing `path` in place, with a warning; the next save tries the rename again. When the viewer won't let
-    /// it be written either, the save stays in the `.tmp`, and the error names both.
+    /// Writes the file whole or not at all (TODO 72, `atomic_file::write`): to `<path>.tmp`, on the disk, then renamed over `path`, so a
+    /// run killed mid-write, or a system that went down, leaves its last save, not part of one. A refused rename, as when a viewer holds
+    /// the file without letting it be deleted, falls back to writing `path` in place, with a warning, as does a temp that can't be made;
+    /// the next save tries the rename again. When the viewer won't let it be written either, the save stays in the `.tmp`, and the error
+    /// names both.
     pub fn save_atomic(&self, path: &str) -> Result<(), String> {
         // Indented but for record=compact (TODO 105): a file that size is read by TMR, not by eye
         let json = if self.metadata.record == Record::Compact { serde_json::to_string(self) } else { serde_json::to_string_pretty(self) }
             .map_err(|e| format!("Failed to serialize test result: {}", e))?;
-        let temp = format!("{path}.tmp");
-        // A new file (TODO 104): in an install for all users results\ is writable by every user, and TMR may run elevated, so the temp is
-        // never a file someone else put there, a link among them. One a failed save left is removed first (a link, not what it names).
-        let _ = fs::remove_file(&temp);
-        write_to_disk(&temp, json.as_bytes(), true).map_err(|e| format!("Failed to write test result file {temp}: {e}"))?;
-        if let Err(refused) = fs::rename(&temp, path) {
-            log::warn!("Couldn't replace {path} with {temp} ({refused}): writing it in place");
-            write_to_disk(path, json.as_bytes(), false)
-                .map_err(|e| format!("Couldn't replace {path} ({refused}) or write it in place ({e}): this save is in {temp}"))?;
-            let _ = fs::remove_file(&temp);
-        }
-        Ok(())
+        crate::atomic_file::write(Path::new(path), json.as_bytes()).map(drop)
     }
 
     pub fn load_from_file(path: &str) -> Result<Self, String> {

@@ -2686,6 +2686,27 @@ mod tests {
         assert_eq!(m.opened_report().map(|report| report.title.as_str()), Some("Final summary"));
     }
 
+    /// A tmr-cfg.json that isn't a config: the System tab says so where it would say none is stored, with what became of the file, and
+    /// the window shows the run calibrating
+    #[test]
+    fn an_unreadable_config_is_said_where_none_stored_would_be() {
+        use tmr::frontend::CacheCalibrationState::Measuring;
+        use tmr::frontend::{MeasureWhy, UnreadableConfig};
+        let mut m = model();
+        m.start();
+        let unreadable = UnreadableConfig::NotAConfig {
+            path: r"C:\Program Files\TMR\tmr-cfg.json".into(),
+            why: "expected value at line 1 column 1".to_string(),
+            kept: Ok(r"C:\Program Files\TMR\tmr-cfg.json.unreadable".into()),
+        };
+        m.apply(Setup::CacheCalibration(Measuring(MeasureWhy::Unreadable(unreadable))).into());
+        assert_eq!(outline(&m.sections.system), [
+            "Cache calibration: tmr-cfg.json was unreadable (expected value at line 1 column 1), so its calibrations are lost; it is \
+             kept as tmr-cfg.json.unreadable, measured before the tests"
+        ]);
+        assert!(m.calibrating());
+    }
+
     /// A section's outline: each table's title, each line or heading as it is
     fn outline(blocks: &[crate::report::Block]) -> Vec<String> {
         use crate::report::Block;

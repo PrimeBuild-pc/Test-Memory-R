@@ -14,7 +14,7 @@ use tmr::frontend::{
     MeasureWhy, MemoryModule, MemoryStatus, NotRun, PageSizeLevel, ParamNote, PerformanceByCpuReport, PerformanceByPhysicalCoreReport,
     PerformanceByThreadReport, PhysicalCorePerformance, ProgressSnapshot, ProgressTracker, Run, RunOutcome, RunStatus,
     SealCalibrationState, SealOp, Selection, Setup, SkipSpec, Stage, StepConfigLine, StepReport, SystemIdentity, TestSnapshot, TestSummary,
-    ThreadPerformance, ThreadPriority, WaitLeft, WheaCounts, WorkerStart, WorkersReport,
+    ThreadPerformance, ThreadPriority, UnreadableConfig, WaitLeft, WheaCounts, WorkerStart, WorkersReport,
 };
 use tmr::session::{SessionEnd, Stopped};
 use tmr::test_support::failing_bits;
@@ -403,6 +403,13 @@ fn setup_events_print_as_their_golden() {
     let fe = CliFrontend::new();
     let at = |day| chrono::Utc.with_ymd_and_hms(2026, 10, day, 9, 5, 0).unwrap();
     let args = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let unreadable = |kept: Result<&str, &str>| {
+        Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::Unreadable(UnreadableConfig::NotAConfig {
+            path: r"C:\TMR\tmr-cfg.json".into(),
+            why: "EOF while parsing an object at line 9 column 0".to_string(),
+            kept: kept.map(Into::into).map_err(str::to_string),
+        })))
+    };
     let selection = |error_mode, pinned, skip, skipped: &[usize], avoid_smt_doubling, cycles, duration_secs| {
         Setup::Selection(Box::new(Selection {
             error_mode,
@@ -488,6 +495,17 @@ fn setup_events_print_as_their_golden() {
         ("another machine's cache calibration", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::OtherHardware))),
         ("one measured one thread only", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::OneThreadOnly))),
         ("calibrate=always", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::Always))),
+        // tmr-cfg.json there but not taken: not a config, kept aside or not (an install for all users, whose folder takes no new file
+        // from a user); unread
+        ("a tmr-cfg.json that isn't a config, kept aside", unreadable(Ok(r"C:\TMR\tmr-cfg.json.unreadable"))),
+        ("a tmr-cfg.json that isn't a config, saved over", unreadable(Err("Access is denied. (os error 5)"))),
+        (
+            "a tmr-cfg.json that can't be read",
+            Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::Unreadable(UnreadableConfig::Unread {
+                path: r"C:\TMR\tmr-cfg.json".into(),
+                why: "The process cannot access the file because it is being used by another process. (os error 32)".to_string(),
+            }))),
+        ),
         ("calibrate=recheck", Setup::CacheCalibration(CacheCalibrationState::Rechecking { at: at(20) })),
         ("the cache calibration off", Setup::CacheCalibration(CacheCalibrationState::Disabled)),
         ("the seal calibration", Setup::SealCalibration(SealCalibrationState::Loaded { bits: 256, at: at(21) })),

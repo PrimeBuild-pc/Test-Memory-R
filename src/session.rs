@@ -587,28 +587,14 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     let mut calibrate_first = None;
     if calibrate != "off" {
         let cfg_path = crate::app_config::AppConfig::default_path();
-        let app_config = crate::app_config::AppConfig::load(&cfg_path);
+        // A file there but unread is said, one that isn't a config kept aside first, before the calibration measured is saved over it
+        let (app_config, unreadable) = crate::app_config::AppConfig::load_for_setup(&cfg_path);
         let valid = app_config.is_calibration_valid(system_info, smbios);
         let stored = app_config.calibration.as_ref().filter(|_| valid);
         // The one stored, until a new one is in
         crate::set_calibration_data(stored.cloned());
-        use crate::runner::CalibrateFirst;
-        let first = match stored {
-            _ if calibrate == "always" => Some(CalibrateFirst::Measure(MeasureWhy::Always)),
-            Some(cal) if cal.shared.is_some() && calibrate == "recheck" => Some(CalibrateFirst::Recheck),
-            Some(cal) if cal.shared.is_some() => None,
-            Some(_) => Some(CalibrateFirst::Measure(MeasureWhy::OneThreadOnly)),
-            None if app_config.machine_id.is_some() && app_config.calibration.is_some() => {
-                Some(CalibrateFirst::Measure(MeasureWhy::OtherHardware))
-            }
-            None => Some(CalibrateFirst::Measure(MeasureWhy::NoneStored)),
-        };
-        let state = match (first, stored) {
-            (Some(CalibrateFirst::Measure(why)), _) => CacheCalibrationState::Measuring(why),
-            (Some(CalibrateFirst::Recheck), Some(cal)) => CacheCalibrationState::Rechecking { at: cal.timestamp },
-            (None, Some(cal)) => CacheCalibrationState::Loaded { at: cal.timestamp },
-            (_, None) => unreachable!("no stored calibration is a reason to measure"),
-        };
+        let others = app_config.machine_id.is_some() && app_config.calibration.is_some();
+        let (first, state) = cache_calibration_first(&calibrate, stored, others, unreadable);
         fe.event(Setup::CacheCalibration(state).into());
         calibrate_first = first;
         let seal = load_seal_calibration(&app_config, system_info, smbios, crate::seal::set_calibrated_width);
@@ -836,6 +822,28 @@ fn load_seal_calibration(
     }
 }
 
+/// What a run does with the cache calibration before its tests under `calibrate` (not off), and what the setup says of it: `stored`,
+/// tmr-cfg.json's when it is this machine's; `others`, whether it holds one that isn't; `unreadable`, what was wrong with a file there but
+/// unread (`AppConfig::load_for_setup`), which holds none the run can take, whatever `calibrate` says
+fn cache_calibration_first(
+    calibrate: &str, stored: Option<&crate::calibration::CalibrationResults>, others: bool,
+    unreadable: Option<crate::frontend::UnreadableConfig>,
+) -> (Option<crate::runner::CalibrateFirst>, CacheCalibrationState) {
+    use crate::runner::CalibrateFirst;
+    let measure = |why| (Some(CalibrateFirst::Measure), CacheCalibrationState::Measuring(why));
+    match (stored, unreadable) {
+        (_, Some(unreadable)) => measure(MeasureWhy::Unreadable(unreadable)),
+        _ if calibrate == "always" => measure(MeasureWhy::Always),
+        (Some(cal), None) if cal.shared.is_some() && calibrate == "recheck" => {
+            (Some(CalibrateFirst::Recheck), CacheCalibrationState::Rechecking { at: cal.timestamp })
+        }
+        (Some(cal), None) if cal.shared.is_some() => (None, CacheCalibrationState::Loaded { at: cal.timestamp }),
+        (Some(_), None) => measure(MeasureWhy::OneThreadOnly),
+        (None, None) if others => measure(MeasureWhy::OtherHardware),
+        (None, None) => measure(MeasureWhy::NoneStored),
+    }
+}
+
 /// The cache calibration the setup's cache table shows beside CPUID's sizes: the stored one the run takes, `calibrate=auto`'s or
 /// recheck's (which keeps it unless its probes find it has drifted); none when the run measures one before its tests (calibrate=always,
 /// or one thread alone measured the one stored), whose own table shows it after allocation
@@ -845,7 +853,7 @@ fn calibration_shown(
     use crate::runner::CalibrateFirst;
     match first {
         None | Some(CalibrateFirst::Recheck) => stored,
-        Some(CalibrateFirst::Measure(_)) => None,
+        Some(CalibrateFirst::Measure) => None,
     }
 }
 
@@ -1288,9 +1296,41 @@ mod tests {
         let shown = |first| calibration_shown(first, Some(&stored)).is_some();
         assert!(shown(None), "calibrate=auto takes the one stored");
         assert!(shown(Some(CalibrateFirst::Recheck)), "calibrate=recheck");
-        assert!(!shown(Some(CalibrateFirst::Measure(MeasureWhy::Always))), "calibrate=always");
-        assert!(!shown(Some(CalibrateFirst::Measure(MeasureWhy::OneThreadOnly))), "one thread alone");
+        assert!(!shown(Some(CalibrateFirst::Measure)), "calibrate=always, or one thread alone");
         assert!(calibration_shown(None, None).is_none(), "none stored, or calibrate=off");
+    }
+
+    /// What the run does with the cache calibration, by `calibrate=` and what tmr-cfg.json holds, and why it measures one: a file there
+    /// but unread is said whatever `calibrate=` (not off) says, as it holds none the run can take
+    #[test]
+    fn the_cache_calibration_is_taken_rechecked_or_measured_and_why() {
+        use crate::frontend::UnreadableConfig;
+        use crate::runner::CalibrateFirst::{Measure, Recheck};
+        let shared = crate::test_support::cache_calibration();
+        let one_thread = crate::calibration::CalibrationResults { shared: None, ..shared.clone() };
+        let unreadable = UnreadableConfig::NotAConfig {
+            path: "tmr-cfg.json".into(),
+            why: "EOF while parsing an object at line 9 column 0".to_string(),
+            kept: Ok("tmr-cfg.json.unreadable".into()),
+        };
+        let first = |calibrate, stored, others, unreadable| match cache_calibration_first(calibrate, stored, others, unreadable) {
+            (Some(Measure), CacheCalibrationState::Measuring(why)) => format!("measure: {why:?}"),
+            (Some(Recheck), CacheCalibrationState::Rechecking { at }) if at == shared.timestamp => "recheck".to_string(),
+            (None, CacheCalibrationState::Loaded { at }) if at == shared.timestamp => "take".to_string(),
+            _ => "a state that doesn't go with what it does".to_string(),
+        };
+        assert_eq!(first("auto", Some(&shared), true, None), "take");
+        assert_eq!(first("recheck", Some(&shared), true, None), "recheck");
+        assert_eq!(first("always", Some(&shared), true, None), "measure: Always");
+        assert_eq!(first("auto", Some(&one_thread), true, None), "measure: OneThreadOnly");
+        assert_eq!(first("recheck", None, true, None), "measure: OtherHardware");
+        assert_eq!(first("auto", None, false, None), "measure: NoneStored");
+        for calibrate in ["auto", "recheck", "always"] {
+            assert_eq!(
+                first(calibrate, None, false, Some(unreadable.clone())),
+                format!("measure: {:?}", MeasureWhy::Unreadable(unreadable.clone()))
+            );
+        }
     }
 
     /// The machine's sections in the owner's order (0.1.1): System Information, then Windows' memory, then the CPUs the threads take

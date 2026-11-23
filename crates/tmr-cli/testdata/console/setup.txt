@@ -124,6 +124,12 @@ TMR will exit now.
   Calibration: the one stored measured one thread only: measured again with the others running, before the tests
 ## calibrate=always
   Calibration: measured before the tests, about 2 minutes (calibrate=always)
+## a tmr-cfg.json that isn't a config, kept aside
+  Calibration: tmr-cfg.json was unreadable (EOF while parsing an object at line 9 column 0), so its calibrations are lost; it is kept as tmr-cfg.json.unreadable: measured on this run's memory before its tests, about 2 minutes
+## a tmr-cfg.json that isn't a config, saved over
+  Calibration: tmr-cfg.json is unreadable (EOF while parsing an object at line 9 column 0), so its calibrations are lost; it couldn't be kept aside (Access is denied. (os error 5)), so the new one is saved over it: measured on this run's memory before its tests, about 2 minutes
+## a tmr-cfg.json that can't be read
+  Calibration: tmr-cfg.json couldn't be read (The process cannot access the file because it is being used by another process. (os error 32)), so the new one isn't saved over it: measured on this run's memory before its tests, about 2 minutes
 ## calibrate=recheck
   Calibration: Loaded (2026-10-20 09:05), rechecked before the tests, about 15 s (calibrate=recheck)
 ## the cache calibration off

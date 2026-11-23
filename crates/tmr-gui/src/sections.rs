@@ -54,7 +54,7 @@ impl Sections {
             }
             Setup::CacheCalibration(state) => self.system.push(text(match state {
                 CacheCalibrationState::Loaded { at } => format!("Cache calibration: loaded ({})", at.format("%Y-%m-%d %H:%M")),
-                CacheCalibrationState::Measuring(why) => format!("Cache calibration: {}", measuring(*why)),
+                CacheCalibrationState::Measuring(why) => format!("Cache calibration: {}", measuring(why)),
                 CacheCalibrationState::Rechecking { at } => {
                     format!("Cache calibration: loaded ({}), rechecked before the tests (calibrate=recheck)", at.format("%Y-%m-%d %H:%M"))
                 }
@@ -141,13 +141,14 @@ impl Sections {
 
 /// The CPUs chosen, and the run's error mode, limits and SIMD: the console's selection lines
 /// Why the run measures the cache calibration before its tests (TODO 22), as the console says it
-fn measuring(why: tmr::frontend::MeasureWhy) -> &'static str {
+fn measuring(why: &tmr::frontend::MeasureWhy) -> String {
     use tmr::frontend::MeasureWhy;
     match why {
-        MeasureWhy::NoneStored => "none stored, measured before the tests",
-        MeasureWhy::OtherHardware => "the one stored is another machine's, measured before the tests",
-        MeasureWhy::OneThreadOnly => "the one stored measured one thread only, measured again before the tests",
-        MeasureWhy::Always => "measured before the tests (calibrate=always)",
+        MeasureWhy::Unreadable(unreadable) => format!("{}, measured before the tests", unreadable.text()),
+        MeasureWhy::NoneStored => "none stored, measured before the tests".to_string(),
+        MeasureWhy::OtherHardware => "the one stored is another machine's, measured before the tests".to_string(),
+        MeasureWhy::OneThreadOnly => "the one stored measured one thread only, measured again before the tests".to_string(),
+        MeasureWhy::Always => "measured before the tests (calibrate=always)".to_string(),
     }
 }
 

@@ -844,11 +844,11 @@ pub struct RunSetup<'a> {
     pub cache_info: &'a CacheInfo,
 }
 
-/// What a run does with the cache calibration before its tests (`calibrate=`, TODO 22): measures one, and why; or rechecks the stored
-/// one (TODO 116), measuring again only if it has drifted
+/// What a run does with the cache calibration before its tests (`calibrate=`, TODO 22): measures one (why is the setup's to say,
+/// `CacheCalibrationState::Measuring`); or rechecks the stored one (TODO 116), measuring again only if it has drifted
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibrateFirst {
-    Measure(crate::frontend::MeasureWhy),
+    Measure,
     Recheck,
 }
 
@@ -1212,7 +1212,7 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
             fe.event(Run::Rechecked(rechecked.map(Box::new)).into());
             (!held).then_some((on, drifted))
         }
-        Some((CalibrateFirst::Measure(_), _, on)) => on.map(|on| (on, false)),
+        Some((CalibrateFirst::Measure, _, on)) => on.map(|on| (on, false)),
         None => None,
     };
     if let Some((on, drifted)) = measure_on {

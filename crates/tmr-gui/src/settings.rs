@@ -19,8 +19,9 @@
 //! with any other save), and its Settings dialog's (`start_on_open`, `keep_serials`, `theme`) as they change, keeping the rest of the file
 //! (the colours, any notes) as it was, but for `serials`, which windows before `keep_serials` wrote (on, their default), dropped unread.
 //! Keys starting with `_` are notes. A missing file is the defaults; a bad key or value goes in the errors list and keeps its default; a
-//! file that isn't JSON says so, and the window doesn't write over it. `crates/tmr-gui/window.example.json` has every key at its default,
-//! a test keeping it so: copy it into TMR's folder as `window.json` and edit it.
+//! file that isn't JSON says so, and the window doesn't write over it. A save is written whole (`tmr::atomic_file`), so a PC that goes
+//! down mid-save keeps the last one. `crates/tmr-gui/window.example.json` has every key at its default, a test keeping it so: copy it
+//! into TMR's folder as `window.json` and edit it.
 
 use std::path::PathBuf;
 
@@ -205,12 +206,13 @@ impl Settings {
         text
     }
 
-    /// Writes `window.json`, unless the file there isn't JSON (the user's to fix); why it couldn't, otherwise
+    /// Writes `window.json`, whole (`tmr::atomic_file::write`: in place where its folder takes no new file, an install for all users),
+    /// unless the file there isn't JSON (the user's to fix); why it couldn't, otherwise
     pub fn save(&self) -> Result<(), String> {
         if self.unreadable {
             return Ok(());
         }
-        std::fs::write(path(), self.text()).map_err(|e| format!("{}: {e}", path().display()))
+        tmr::atomic_file::write(&path(), self.text().as_bytes()).map(drop)
     }
 }
 

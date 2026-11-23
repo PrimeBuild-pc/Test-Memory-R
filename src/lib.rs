@@ -40,9 +40,11 @@ compile_error!(
 
 // The engine. Its public items are what tmr.exe (`crates/tmr-app`), the CLI (`crates/tmr-cli`) and the window (`crates/tmr-gui`) call:
 // `session` (a command line's setup and run), `frontend` (the interface a session is shown through, with the types its events carry),
-// `commands` (the one-shot commands), `cpu_check` (whether this CPU can run TMR), `home` (the folder TMR keeps its files in), `logfile`,
-// `BUILD` and `request_stop`. Everything else is private, so `dead_code` checks it. While `main.rs` held the CLI and every module here
-// was `pub`, all of them counted as public API, and an uncalled `pub fn` was never reported (TODO 69 E).
+// `commands` (the one-shot commands), `cpu_check` (whether this CPU can run TMR), `home` (the folder TMR keeps its files in),
+// `atomic_file` (its files written whole), `logfile`, `BUILD` and `request_stop`. Everything else is private, so `dead_code` checks it.
+// While `main.rs` held the CLI and every module here was `pub`, all of them counted as public API, and an uncalled `pub fn` was never
+// reported (TODO 69 E).
+pub mod atomic_file; // files written whole, a temp renamed over them: the results, tmr-cfg.json and the window's window.json
 pub mod commands; // the one-shot commands, writing to their caller's writer (TODO 29)
 pub mod cpu_check; // whether this CPU has the features TMR is built for (TODO 104)
 pub mod frontend; // the engine's interface to whoever shows a session: its events (TODO 29)

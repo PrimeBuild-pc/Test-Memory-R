@@ -154,7 +154,7 @@ pub(super) fn text(setup: &Setup) -> String {
         Setup::CacheCalibration(state) => {
             let _ = match state {
                 CacheCalibrationState::Loaded { at } => writeln!(text, "  Calibration: Loaded ({})", at.format("%Y-%m-%d %H:%M")),
-                CacheCalibrationState::Measuring(why) => writeln!(text, "  Calibration: {}", measuring(*why)),
+                CacheCalibrationState::Measuring(why) => writeln!(text, "  Calibration: {}", measuring(why)),
                 CacheCalibrationState::Rechecking { at } => writeln!(
                     text,
                     "  Calibration: Loaded ({}), rechecked before the tests, about 15 s (calibrate=recheck)",
@@ -277,13 +277,18 @@ fn machine_text(
 }
 
 /// Why the run measures the cache calibration before its tests, and when (TODO 22)
-pub(crate) fn measuring(why: tmr::frontend::MeasureWhy) -> &'static str {
+pub(crate) fn measuring(why: &tmr::frontend::MeasureWhy) -> String {
     use tmr::frontend::MeasureWhy;
     match why {
-        MeasureWhy::NoneStored => "none stored: measured on this run's memory before its tests, about 2 minutes",
-        MeasureWhy::OtherHardware => "the one stored is another machine's: measured before the tests, about 2 minutes",
-        MeasureWhy::OneThreadOnly => "the one stored measured one thread only: measured again with the others running, before the tests",
-        MeasureWhy::Always => "measured before the tests, about 2 minutes (calibrate=always)",
+        MeasureWhy::Unreadable(unreadable) => {
+            format!("{}: measured on this run's memory before its tests, about 2 minutes", unreadable.text())
+        }
+        MeasureWhy::NoneStored => "none stored: measured on this run's memory before its tests, about 2 minutes".to_string(),
+        MeasureWhy::OtherHardware => "the one stored is another machine's: measured before the tests, about 2 minutes".to_string(),
+        MeasureWhy::OneThreadOnly => {
+            "the one stored measured one thread only: measured again with the others running, before the tests".to_string()
+        }
+        MeasureWhy::Always => "measured before the tests, about 2 minutes (calibrate=always)".to_string(),
     }
 }
 
