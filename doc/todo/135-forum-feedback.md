@@ -50,6 +50,28 @@ default (TMR clamps it to the nearest allowed); block size code 0 is floored to 
 differs only when the window isn't a multiple of it); a config with no Testing Window Size gets 1024 MB; and a Cores above the CPU
 count should at least warn. Small; they only matter for configs outside the common ones.
 
+## The import's TM5 values and missing keys (2026-11-23, 22d24a2, edd9936, e0d2920)
+
+Under the owner's rule ("as long as TM5 values work, increasing their range to allow what TMR supports is fine; only address
+shortcomings and defaults when not present"), checked against TM5's asm and the decompile by one agent and re-checked by another:
+- Built: `Tests=` read (default 6; only [Test0]..[Test(Tests-1)] load; entries at or above it skipped, as TM5 skips them), so TM5's own
+  `MT.cfg` loads and runs 2,5,1,4,3,0,1 as TM5 does; a missing Test Sequence runs TM5's default list, a missing Cycles is 3, a
+  missing window 1024, Config Name and Author "Default" and "serj"; TM5's number syntax (0x, an h suffix, A-F letters, a dropped
+  `.fraction`, an empty value as the default); Pattern Param0/1 read as TM5 reads them (digits decimal, `-` as 32-bit two's
+  complement, only the low 32 bits kept: 1usmus_v3's four 9-digit Param1 values warn and run as TM5 runs them); quotes and `;`
+  comments as 0.12.3 strips them; Test Sequence separators and its 32-entry limit, numbers cut to their low byte; a disabled test's
+  unknown Function no longer refused; the Lock Granularity clamp 1-1024 MiB and Channels from 1 up; Interleave Type 0's 128-byte
+  walk; Pattern Modes TMR doesn't number run by their low byte; a missing [Main Section] or [Global Memory Setup] takes TM5's
+  defaults when the file is a TM5 .cfg; a negative Test Block Size as TM5's 32-bit shift leaves it; Cores above the CPUs warned.
+- Kept as TMR does it (proposed; the owner's nod pending): an empty `Test Sequence=` runs every enabled test once (0.12.3 runs no
+  step, the older asm the default list); a sequence that runs no test is refused (TM5 runs only its fill and check); mirror steps run
+  with Test0 disabled (TM5 skips them); TMR's own Pattern Mode numbers keep their meaning (TM5 runs them as mode 0); a Test Block Size
+  of 4096 MB or more is capped at the window (TM5's shift wraps it); TM5's default list naming a slot the .cfg doesn't define is
+  skipped with a warning (the owner's 2026-11-12 decision keeps the error for a list the .cfg writes).
+- Left out, as decided or out of the rule: Test Block Size code 0 keeps the window (TODO 79); filling a missing [TestN] with the
+  slot's defaults (2026-11-12); Enable values other than 0 and 1; a window of 0; MirrorMove Parameter=3; TM5 cutting Config Name and
+  Author; TM5 writing the .cfg back (TMR never writes a config).
+
 ## Built or decided (2026-11-20 to 23)
 
 - Serials left out by default, `--serials` keeps them (742a707); `tmr --sanitize` for a results file and its log, `tmr --sanitize-single`

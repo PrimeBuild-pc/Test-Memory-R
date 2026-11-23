@@ -29,6 +29,21 @@ memory, and a fault that needs one core's path to one region shows only if they 
 2. **Leave it to `--disable-pinning`**, which already gives TM5's behaviour, and document it as such.
 3. Both: 2 now, in the docs; 1 if 0.12.3 or a test shows it finds what fixed pins miss.
 
+## Answered (2026-11-23)
+
+The owner's decompile, `TM5_Source/tm5.cpp` (Hex-Rays 9.1; the owner called it "a decompiled 0.12.3" on the forum; its title string
+reads "TestMem5 v0.12.", which doesn't name the patch level; it has the `;` comments and the config-header check the 0.12 asm lacks, so
+it is a later 0.12 build than the asm):
+- Each tester is a process of its own: `sub_4035C4` calls `CreateProcessA(ApplicationName, CommandLine, 0, 0, 0, 0x20u, ...)`,
+  `0x20` being `NORMAL_PRIORITY_CLASS`, its own exe with the tester's index on the command line. No `CREATE_SUSPENDED`, no affinity.
+- The only scheduling calls in it are `SetThreadPriority(CurrentThread, -1)` and `SetPriorityClass(CurrentProcess, 0x20u)`. No
+  `SetThreadAffinityMask`, `SetProcessAffinityMask`, `SetThreadIdealProcessor`, `SetThreadGroupAffinity` or CPU-set call, none named
+  as a string for `GetProcAddress` (its two uses load TM5.DLL's version export and a generic import thunk), nothing from ntdll.
+  `MT0.cxx` (the test module) has none either.
+So TM5's testers are unpinned processes that Windows' scheduler places and moves, steered by CPPC's preferred cores: TMR's
+`--disable-pinning`. Veii's attachment (forum post #11) would change this only if it is a further patched build than the owner's.
+
 ## Next
 
-The 0.12.3 binary from the owner or the forum poster, to see what it does; then the owner's call between the options.
+The owner's call: document `--disable-pinning` as TM5's way in the guide and `--help` (option 2, proposed for the release), and
+whether `pin-rotate=` (option 1, a TMR addition rather than TM5 parity) is still wanted.
