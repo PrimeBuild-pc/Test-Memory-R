@@ -692,7 +692,9 @@ pub fn enable_large_pages() -> Result<String, String> {
                     );
                     if token.as_ref().is_ok_and(uac_filtered) {
                         messages.push(
-                            "   You sign in as an administrator: run TMR as administrator once to grant it; after the next sign-in it has it in every run".to_string(),
+                            "   You sign in as an administrator: run TMR as administrator once to grant it; after the next sign-in it has \
+                             it in every run"
+                                .to_string(),
                         );
                     }
                     messages.push("2. If it was just granted: sign out of Windows and back in, then run TMR again".to_string());
@@ -703,15 +705,20 @@ pub fn enable_large_pages() -> Result<String, String> {
                 }
             }
         }
+        // "This sign-in has it": the token's, which is all this reads; the security policy may give it to a group, or no longer give it
+        // (`--remove-large-pages`, until the next sign-in)
         PrivilegeState::AssignedButDisabled => match enable_large_page_privilege_enhanced() {
             Ok(()) => {
-                messages.push(format!("✅ {RIGHT}: granted to this account, switched on for this run"));
+                messages.push(format!("✅ {RIGHT}: this sign-in has it, switched on for this run"));
                 test_allocation_lines(&mut messages);
             }
-            Err(e) => messages.push(format!("❌ {RIGHT}: granted to this account, but Windows didn't switch it on: {e}")),
+            Err(e) => {
+                messages.push(format!("❌ {RIGHT}: this sign-in has it, but Windows didn't switch it on: {e}"));
+                messages.push("   Run TMR again; if this stays, sign out of Windows and back in, or restart it".to_string());
+            }
         },
         PrivilegeState::AssignedAndEnabled => {
-            messages.push(format!("✅ {RIGHT}: granted to this account, already on"));
+            messages.push(format!("✅ {RIGHT}: this sign-in has it, already on"));
             test_allocation_lines(&mut messages);
         }
     }
@@ -719,18 +726,27 @@ pub fn enable_large_pages() -> Result<String, String> {
     Ok(messages.join("\n"))
 }
 
-/// `enable_large_pages`' test allocation line, the right on: OK, or why it failed and what to do
+/// `enable_large_pages`' test allocation line, the right on: OK, or why it failed and what to do, by its error code (`advice`)
 fn test_allocation_lines(messages: &mut Vec<String>) {
     match test_large_page_allocation() {
         Ok(()) => messages.push("✅ Large-page test allocation (2 MiB): OK".to_string()),
-        Err(e) => {
+        Err((code, e)) => {
             messages.push(format!("❌ Large-page test allocation (2 MiB) failed: {e}"));
-            messages.push(
-                "   The right is in place, but Windows couldn't give a 2 MiB page: restart Windows (memory fragments as it runs) \
-                 and run TMR first"
-                    .to_string(),
-            );
+            messages.push(format!("   {}", advice(code)));
         }
+    }
+}
+
+/// What to do when the test allocation failed with Win32 error `code`, the right on: 1450 is fragmentation, 1314 the right refused, 8
+/// and 1455 (the commit limit, a paging file too small) memory short; each its own fix
+fn advice(code: u32) -> &'static str {
+    match code {
+        1450 => {
+            "The right is in place, but Windows couldn't give a 2 MiB page: restart Windows (memory fragments as it runs) and run TMR first"
+        }
+        1314 => "Windows says the right isn't held, though this sign-in has it: sign out of Windows and back in, then run TMR again",
+        8 | 1455 => "Windows is short of memory to commit (in use, or a paging file too small): close what uses it, or restart Windows",
+        _ => "The right is in place, but Windows refused the page: restart Windows and run TMR first",
     }
 }
 
@@ -766,8 +782,8 @@ pub(crate) fn in_token() -> bool {
     check_privilege_state() != PrivilegeState::NotAssigned
 }
 
-/// Test a small large page allocation
-fn test_large_page_allocation() -> Result<(), String> {
+/// Test a small large page allocation: why not, its Win32 error code and the text Windows gives it
+fn test_large_page_allocation() -> Result<(), (u32, String)> {
     // SAFETY: a self-contained 2 MB probe. The returned pointer is never dereferenced — only null-checked and, when non-null, released with
     // the `MEM_RELEASE` form `VirtualFree` requires (size 0, base address as returned).
     unsafe {
@@ -777,7 +793,7 @@ fn test_large_page_allocation() -> Result<(), String> {
         if ptr.is_null() {
             let err = GetLastError();
             let error_msg = format_win32_error(err);
-            Err(format!("{} ({})", error_msg, err.0))
+            Err((err.0, format!("{} ({})", error_msg, err.0)))
         } else {
             // Clean up test allocation
             let _ = VirtualFree(ptr, 0, MEM_RELEASE);
@@ -822,6 +838,18 @@ mod tests {
     }
 
     const ENABLED: u32 = (SE_GROUP_ENABLED | windows::Win32::System::SystemServices::SE_GROUP_MANDATORY) as u32;
+
+    /// A failed test allocation is advised by its error code (review: every code was told to restart for fragmentation): 1450
+    /// fragmentation, 1314 the right refused, 8 and 1455 memory short, and any other a restart without a cause named
+    #[test]
+    fn a_failed_test_allocation_is_advised_by_its_code() {
+        assert!(advice(1450).contains("couldn't give a 2 MiB page: restart Windows (memory fragments as it runs)"));
+        assert!(advice(1314).contains("sign out of Windows and back in"));
+        for short in [8, 1455] {
+            assert!(advice(short).starts_with("Windows is short of memory to commit"), "{short}");
+        }
+        assert!(!advice(87).contains("fragments") && advice(87).contains("restart Windows"));
+    }
 
     /// TODO 113: which of a token's groups are offered the right, and how far each reaches, by SID: the attributes leave out the logon SID,
     /// the labels and deny-only groups; the types what isn't a group; Users, Domain Users and the automatic groups are broad, service

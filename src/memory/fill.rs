@@ -90,22 +90,23 @@ pub(crate) fn allowed_page_sizes(runtime_config: &crate::RuntimeConfig) -> Resul
             alloc.min_page_size, alloc.max_page_size
         ));
     }
+    // Large pages unavailable: for want of the right, or with the right held, its check failed (no 2 MiB page from Windows, most often),
+    // which the setup's large-page lines say, with what to do (`--setup-large-pages` would grant nothing in the second case)
     if !runtime_config.large_pages_available {
         if min > PageSizeLevel::Regular {
             return Err(format!(
-                "minpage={} needs large pages, but SeLockMemoryPrivilege is not available \
-                 (tmr.exe --setup-large-pages, elevated)",
+                "minpage={} needs large pages, but they aren't available (the large-page check at setup says why, and what to do)",
                 alloc.min_page_size
             ));
         }
         max = PageSizeLevel::Regular;
     }
     if max == PageSizeLevel::Regular && regular == RegularPages::Locked {
-        let why = if runtime_config.large_pages_available { "maxpage=reg-lock" } else { "SeLockMemoryPrivilege is not available" };
+        let why = if runtime_config.large_pages_available { "maxpage=reg-lock" } else { "large pages aren't available" };
         return Err(format!(
             "every page would be 4 KiB ({why}), and minpage=reg-lock locks them only as a tail where large pages run short: locking \
-             them all isn't built yet. minpage=reg-page maxpage=reg-page runs on pageable 4 KiB pages; tmr.exe --setup-large-pages, \
-             elevated, gives large pages"
+             them all isn't built yet. minpage=reg-page maxpage=reg-page runs on pageable 4 KiB pages; the large-page check at setup \
+             says how to get large pages"
         ));
     }
     Ok(PageSizes { min, max, regular })
@@ -714,7 +715,8 @@ mod tests {
         assert_eq!(run("reg-page", "reg-page", true).map(|p| (p.max, p.regular)), Ok((regular, RegularPages::Pageable)));
         assert!(run("reg-lock", "reg-page", true).unwrap_err().contains("one kind"));
         assert!(run("reg-lock", "reg-lock", true).unwrap_err().contains("(maxpage=reg-lock)"));
-        assert!(run("reg-lock", "huge", false).unwrap_err().contains("(SeLockMemoryPrivilege is not available)"));
+        assert!(run("reg-lock", "huge", false).unwrap_err().contains("(large pages aren't available)"));
+        assert!(run("large", "huge", false).unwrap_err().contains("minpage=large needs large pages, but they aren't available"));
         assert_eq!(run("reg-page", "huge", false).map(|p| p.max), Ok(regular), "no privilege: 4 KiB, pageable");
         assert_eq!(check_page_setting("Reg-Lock"), Ok("reg-lock".to_string()));
         assert_eq!(check_page_setting("2MB"), Ok("2mb".to_string()));

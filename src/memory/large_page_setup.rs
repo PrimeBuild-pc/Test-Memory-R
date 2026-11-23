@@ -376,6 +376,8 @@ pub(crate) trait Machine {
     fn diagnostic(&mut self) -> String;
     /// Whether TMR runs as administrator (`privileges::administrator`), which changing the policy needs
     fn administrator(&mut self) -> bool;
+    /// Whether this sign-in has the right, on or off (`privileges::in_token`): read from the token alone, not the policy
+    fn in_token(&mut self) -> bool;
     /// What `name` may name (`lookups`, `WELL_KNOWN`, and last a SID), each with Windows' name for it
     fn find(&mut self, name: &str) -> Result<Vec<Found>, String>;
     /// Who TMR runs as
@@ -450,7 +452,8 @@ fn sign_in(out: &mut dyn Write, me: &Me) -> io::Result<()> {
 }
 
 /// `--setup-large-pages`: the diagnostic, the target, then, run as administrator, the grant: to the target, or with none to the account
-/// TMR runs as unless the policy gives it to the account or one of its groups already. The closing check as before.
+/// TMR runs as unless this sign-in has it already, which needs no administrator, or the policy gives it to the account or one of its
+/// groups already. The closing check as before.
 fn grant(program: &str, target: Option<Account>, machine: &mut dyn Machine, out: &mut dyn Write) -> io::Result<RunStatus> {
     // With a target, the diagnostic and the closing check are this sign-in's, not the target's: say so (the owner, 2026-11-03)
     let targeted = target.is_some();
@@ -465,6 +468,13 @@ fn grant(program: &str, target: Option<Account>, machine: &mut dyn Machine, out:
         }
     }
     if !machine.administrator() {
+        // Nothing to grant needs no administrator: a sign-in that has the right already, with no target (review: it was refused, its
+        // check all ✅ above the refusal)
+        if target.is_none() && machine.in_token() {
+            writeln!(out, "✅ This sign-in has it already: nothing to grant")?;
+            closing(machine, false, true, out)?;
+            return Ok(RunStatus::Passed);
+        }
         return not_administrator(out, program, Change::Grant);
     }
     let me = match machine.me() {
@@ -501,10 +511,23 @@ fn grant(program: &str, target: Option<Account>, machine: &mut dyn Machine, out:
         },
         Some(account) => grant_to(program, &account, &me, &holders, machine, out)?,
     };
+    closing(machine, targeted, me.in_token, out)?;
+    Ok(status)
+}
+
+/// The closing check's lines (`Machine::closing_check`): this sign-in's large pages, said as about it, not the target, when `targeted`.
+/// Failed, with the right in this sign-in already (`in_token`), its check failed, as when Windows gives no 2 MiB page: a sign-in won't
+/// mend that, and TMR asks nothing then (`privileges::question_for`).
+fn closing(machine: &mut dyn Machine, targeted: bool, in_token: bool, out: &mut dyn Write) -> io::Result<()> {
     match (machine.closing_check(), targeted) {
         (Ok(()), false) => {
             writeln!(out, "\n🎉 SUCCESS: Large pages are now enabled and working!")?;
             writeln!(out, "You can now run TMR for optimal performance.")?;
+        }
+        (Err(e), false) if in_token => {
+            writeln!(out, "\n⚠️  Large pages are still not available: {}", e)?;
+            writeln!(out, "This sign-in has the right, so signing in again won't help: restart Windows (memory fragments as it")?;
+            writeln!(out, "runs) and run TMR first.")?;
         }
         (Err(e), false) => {
             writeln!(out, "\n⚠️  Large pages are still not available: {}", e)?;
@@ -518,7 +541,7 @@ fn grant(program: &str, target: Option<Account>, machine: &mut dyn Machine, out:
             writeln!(out, "\nℹ️  This sign-in (the account TMR runs as) can't use large pages: {e}. That is about it, not the target")?
         }
     }
-    Ok(status)
+    Ok(())
 }
 
 /// The grant to `account`, unless the policy gives it to it already
@@ -652,6 +675,10 @@ impl Machine for ThisMachine {
 
     fn administrator(&mut self) -> bool {
         self.read_token().is_ok_and(administrator)
+    }
+
+    fn in_token(&mut self) -> bool {
+        in_token()
     }
 
     fn find(&mut self, name: &str) -> Result<Vec<Found>, String> {
@@ -833,14 +860,15 @@ mod tests {
     }
 
     /// A stand-in machine: what it finds and reads, the outcome of its change, and every call made to it, which the golden shows after
-    /// each case; its closing check passes when the token has the right, as the real one's does. It changes nothing, and fails the test on
-    /// a change before the holders are read on a handle opened for it, or one the policy has made already: a grant to a holder, a removal
-    /// from one that isn't.
+    /// each case; its closing check passes when the token has the right, as the real one's does, unless Windows has no 2 MiB page for it
+    /// (`no_page`). It changes nothing, and fails the test on a change before the holders are read on a handle opened for it, or one the
+    /// policy has made already: a grant to a holder, a removal from one that isn't.
     struct StandIn {
         administrator: bool,
         found: Result<Vec<Found>, String>,
         holders: Vec<&'static str>,
         in_token: bool,
+        no_page: bool,
         uac: bool,
         domain: bool,
         change: Result<(), String>,
@@ -854,6 +882,7 @@ mod tests {
                 found: Ok(Vec::new()),
                 holders: Vec::new(),
                 in_token: false,
+                no_page: false,
                 uac: false,
                 domain: false,
                 change: Ok(()),
@@ -869,6 +898,10 @@ mod tests {
         }
         fn administrator(&mut self) -> bool {
             self.administrator
+        }
+        fn in_token(&mut self) -> bool {
+            self.calls.push("in token".to_string());
+            self.in_token
         }
         fn find(&mut self, name: &str) -> Result<Vec<Found>, String> {
             self.calls.push(format!("find {name}"));
@@ -906,14 +939,19 @@ mod tests {
         }
         fn closing_check(&mut self) -> Result<(), &'static str> {
             self.calls.push("closing check".to_string());
-            if self.in_token { Ok(()) } else { Err("SeLockMemoryPrivilege not assigned to current user") }
+            match (self.in_token, self.no_page) {
+                (true, false) => Ok(()),
+                (true, true) => Err("Insufficient system resources for large pages (ERROR_NO_SYSTEM_RESOURCES)"),
+                (false, _) => Err("SeLockMemoryPrivilege not assigned to current user"),
+            }
         }
     }
 
     /// TODO 113: both commands' every outcome, from stand-ins, each after a `## case` line with how it ended and then the calls it made:
     /// the grant to the account, to a group, to a broad group (warned, and made), to a service account by User:, to a SID Windows can't
     /// name, to a target while the account holds it (in its token and the policy: the target's grant all the same); held already by the
-    /// target, and with no target by the account or a group of it (the sign-in, with the UAC and domain lines); in the token already; not
+    /// target, and with no target by the account or a group of it (the sign-in, with the UAC and domain lines); in the token already,
+    /// with no 2 MiB page from Windows (a restart, not a sign-in), and not run as administrator (nothing to grant, so no refusal); not
     /// run as administrator; a grant that failed; the refusals of the target (no type, an unknown type, no name, two targets: nothing
     /// called), a type that doesn't fit (qualified and not), a domain's name, nothing found, `local\`, two found, a lookup that failed, run
     /// as administrator or not; and the removal: from the account, from a group, of nothing (a group of the account's holding it named;
@@ -952,6 +990,10 @@ mod tests {
             ("held already through a group, no target, under UAC on a domain PC", Change::Grant, &[],
                 StandIn { holders: vec!["S-1-5-80-1-2-3-4-5", "S-1-5-32-544"], uac: true, domain: true, ..machine() }),
             ("in the token already", Change::Grant, &[], StandIn { in_token: true, holders: vec!["S-1-5-32-544"], ..machine() }),
+            ("in the token already, no 2 MiB page", Change::Grant, &[],
+                StandIn { in_token: true, no_page: true, holders: vec!["S-1-5-32-544"], ..machine() }),
+            ("in the token already, not run as administrator", Change::Grant, &[],
+                StandIn { in_token: true, administrator: false, ..machine() }),
             ("not run as administrator", Change::Grant, &[], StandIn { administrator: false, ..machine() }),
             ("not run as administrator, with a target", Change::Grant, &["User:PC\\owner"],
                 StandIn { administrator: false, found: Ok(vec![owner()]), ..machine() }),

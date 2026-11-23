@@ -2071,7 +2071,7 @@ mod tests {
         m.answer_large_pages(DialogButton::Secondary);
         assert_eq!(answer.try_recv(), Ok(LargePageAnswer::Regular));
         for setup in [
-            Setup::LargePageStatus { usable: false, min_page: "reg-page".to_string(), min_needs_large: false },
+            Setup::LargePageStatus { usable: false, min_page: "reg-page".to_string(), min_needs_large: false, right_held: false },
             Setup::MemoryStatus(Some(status)),
             Setup::MemoryStatus(None),
             Setup::SystemInfo {
@@ -2741,7 +2741,7 @@ mod tests {
             Setup::CpuType { cputype: "cores".to_string(), avoid_smt: false },
             Setup::Selection(Box::new(selection())),
             Setup::CacheCalibration(tmr::frontend::CacheCalibrationState::Measuring(tmr::frontend::MeasureWhy::NoneStored)),
-            Setup::LargePageStatus { usable: true, min_page: "large".to_string(), min_needs_large: true },
+            Setup::LargePageStatus { usable: true, min_page: "large".to_string(), min_needs_large: true, right_held: true },
             Setup::MemoryStatus(Some(status)),
             Setup::SystemInfo {
                 report: Box::new(system_info()),

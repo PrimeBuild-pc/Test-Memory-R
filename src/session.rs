@@ -543,6 +543,9 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     use crate::memory::allocator::PageSizeLevel;
     let wants_large = PageSizeLevel::from_config_str(&alloc_config.max_page_size) > PageSizeLevel::Regular;
     match settle_large_pages(&*fe, crate::memory::large_page_question(wants_large), crate::memory::grant_large_pages) {
+        // A run of 4 KiB pages (maxpage=reg-page) needs no right, so its check isn't shown, as after the question's "4 KiB pages this
+        // time": without the right its lines read as faults when nothing is wrong (review)
+        LargePages::Unasked if !wants_large => {}
         LargePages::Unasked => fe.event(Setup::LargePageDiagnostic { report: crate::memory::diagnose_large_pages() }.into()),
         LargePages::SignOut => return Ok(SessionEnd::SignOutChosen),
         // 4 KiB pages this time, both ends of the range (decision 5a), pageable: the default minpage needs large pages (TODO 88; its
@@ -562,7 +565,8 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     let min_needs_large = PageSizeLevel::from_config_str(&alloc_config.min_page_size) > PageSizeLevel::Regular
         || crate::memory::allocator::RegularPages::from_config_str(&alloc_config.min_page_size)
             == crate::memory::allocator::RegularPages::Locked;
-    fe.event(Setup::LargePageStatus { usable, min_page: alloc_config.min_page_size.clone(), min_needs_large }.into());
+    let right_held = crate::memory::privileges::in_token();
+    fe.event(Setup::LargePageStatus { usable, min_page: alloc_config.min_page_size.clone(), min_needs_large, right_held }.into());
 
     // Serials out of what the run shows and keeps unless `--serials`, before SMBIOS is first read and logged (TODO 105)
     crate::smbios::hide_serials_unless_kept(&args);

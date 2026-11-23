@@ -95,7 +95,7 @@ TMR will exit now.
 ## what the check did
 🔍 Large page check
 👤 User: PC\owner
-✅ Lock pages in memory (SeLockMemoryPrivilege): granted to this account, switched on for this run
+✅ Lock pages in memory (SeLockMemoryPrivilege): this sign-in has it, switched on for this run
 ✅ Large-page test allocation (2 MiB): OK
 
 ## large pages usable
@@ -108,6 +108,13 @@ TMR will exit now.
    with minpage=reg-page to test on standard 4KB pages: every test still runs, but
    slower memory traffic is less stress, so marginal errors that only appear at
    full bandwidth may go undetected
+
+## large pages not usable, the right held, and minpage needs them
+⚠️  Large Pages: Not available, and minpage=reg-lock needs them, so the run will stop
+   before allocating. The right is in place, but its check above failed: restart
+   Windows and run TMR first, or rerun with minpage=reg-page to test on standard
+   4KB pages: every test still runs, but slower memory traffic is less stress, so
+   marginal errors that only appear at full bandwidth may go undetected
 
 ## large pages not usable, and minpage doesn't need them
 ⚠️  Large Pages: Not available - TMR will use standard 4KB pages

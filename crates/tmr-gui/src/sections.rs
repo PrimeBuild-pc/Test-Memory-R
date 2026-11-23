@@ -75,12 +75,18 @@ impl Sections {
                 )),
                 Err(e) => Block::Warning(format!("Large pages: 'Lock pages in memory' couldn't be granted to {account}: {e}")),
             }),
-            Setup::LargePageStatus { usable, min_page, min_needs_large } => self.memory.push(if *usable {
+            Setup::LargePageStatus { usable, min_page, min_needs_large, right_held } => self.memory.push(if *usable {
                 text("Large pages: on, tested".to_string())
             } else if *min_needs_large {
+                // With the right held its check failed, which a restart mends, not --setup-large-pages: it would find nothing to grant
+                let fix = if *right_held {
+                    "the right is in place, but its check failed: restart Windows and run TMR first"
+                } else {
+                    "tmr.exe --setup-large-pages (elevated)"
+                };
                 Block::Warning(format!(
-                    "Large pages: not available, and minpage={min_page} needs them, so the run stops before allocating: \
-                     tmr.exe --setup-large-pages (elevated), or minpage=reg-page for 4 KiB pages"
+                    "Large pages: not available, and minpage={min_page} needs them, so the run stops before allocating: {fix}, or \
+                     minpage=reg-page for 4 KiB pages"
                 ))
             } else {
                 Block::Warning("Large pages: not available, so the run takes 4 KiB pages: less stress, about 5-10% slower".to_string())

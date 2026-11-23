@@ -149,8 +149,9 @@ pub enum Setup {
     /// What the large-page check found (`memory::diagnose_large_pages`), which never grants the right
     LargePageDiagnostic { report: String },
     /// Whether this run can take large pages, and its `minpage=`, which stops the run before it allocates when it needs them
-    /// (`min_needs_large`) and they aren't usable
-    LargePageStatus { usable: bool, min_page: String, min_needs_large: bool },
+    /// (`min_needs_large`) and they aren't usable; and whether this sign-in has the right they need (`right_held`, on or off), which
+    /// tells why they aren't: with it, its check failed (most often no 2 MiB page from Windows), and setting the right up again won't help
+    LargePageStatus { usable: bool, min_page: String, min_needs_large: bool, right_held: bool },
     /// The cache calibration the tests' sizes take, from tmr-cfg.json
     CacheCalibration(CacheCalibrationState),
     /// The seal calibration `seal-width=auto` takes. Its own event, because checking it against this machine logs

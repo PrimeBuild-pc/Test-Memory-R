@@ -177,6 +177,31 @@ standard 4 KiB pages.
 You can now run TMR for optimal performance.
 [calls: diagnostic, me, holders Grant, closing check]
 
+## in the token already, no 2 MiB page: Passed
+🔧 TMR Large Page Setup Tool
+=============================
+
+<the large-page check's report>
+
+✅ This sign-in has it already: nothing to grant
+
+⚠️  Large pages are still not available: Insufficient system resources for large pages (ERROR_NO_SYSTEM_RESOURCES)
+This sign-in has the right, so signing in again won't help: restart Windows (memory fragments as it
+runs) and run TMR first.
+[calls: diagnostic, me, holders Grant, closing check]
+
+## in the token already, not run as administrator: Passed
+🔧 TMR Large Page Setup Tool
+=============================
+
+<the large-page check's report>
+
+✅ This sign-in has it already: nothing to grant
+
+🎉 SUCCESS: Large pages are now enabled and working!
+You can now run TMR for optimal performance.
+[calls: diagnostic, in token, closing check]
+
 ## not run as administrator: NotRun
 🔧 TMR Large Page Setup Tool
 =============================
@@ -184,7 +209,7 @@ You can now run TMR for optimal performance.
 <the large-page check's report>
 
 ❌ Not running as Administrator: run tmr.exe --setup-large-pages from a console run as administrator
-[calls: diagnostic]
+[calls: diagnostic, in token]
 
 ## not run as administrator, with a target: NotRun
 🔧 TMR Large Page Setup Tool

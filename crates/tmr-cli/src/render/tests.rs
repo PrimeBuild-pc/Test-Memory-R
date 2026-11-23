@@ -429,8 +429,12 @@ fn setup_events_print_as_their_golden() {
             window_priority: ThreadPriority::Realtime,
         }))
     };
-    let large_pages =
-        |usable, min_page: &str, min_needs_large| Setup::LargePageStatus { usable, min_page: min_page.to_string(), min_needs_large };
+    let large_pages = |usable, min_page: &str, min_needs_large, right_held| Setup::LargePageStatus {
+        usable,
+        min_page: min_page.to_string(),
+        min_needs_large,
+        right_held,
+    };
     let topology = |smt_p_cores, e_cores_skipped_first| Setup::CpuTopology {
         report: Box::new(crate::renderer::tests::cpu_topology_report()),
         smt_p_cores,
@@ -486,13 +490,15 @@ fn setup_events_print_as_their_golden() {
         }),
         // As `memory::diagnose_large_pages` reads in the usual run: the right held but off, as Windows starts every process
         ("what the check did", Setup::LargePageDiagnostic {
-            report: "🔍 Large page check\n👤 User: PC\\owner\n✅ Lock pages in memory (SeLockMemoryPrivilege): granted to this account, \
+            report: "🔍 Large page check\n👤 User: PC\\owner\n✅ Lock pages in memory (SeLockMemoryPrivilege): this sign-in has it, \
                      switched on for this run\n✅ Large-page test allocation (2 MiB): OK\n"
                 .to_string(),
         }),
-        ("large pages usable", large_pages(true, "large", true)),
-        ("large pages not usable, and minpage needs them", large_pages(false, "large", true)),
-        ("large pages not usable, and minpage doesn't need them", large_pages(false, "reg-page", false)),
+        ("large pages usable", large_pages(true, "large", true, true)),
+        ("large pages not usable, and minpage needs them", large_pages(false, "large", true, false)),
+        // The right held, its check failed (no 2 MiB page from Windows): a restart, not --setup-large-pages, which grants nothing
+        ("large pages not usable, the right held, and minpage needs them", large_pages(false, "reg-lock", true, true)),
+        ("large pages not usable, and minpage doesn't need them", large_pages(false, "reg-page", false, false)),
         ("the cache calibration", Setup::CacheCalibration(CacheCalibrationState::Loaded { at: at(20) })),
         ("no cache calibration", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::NoneStored))),
         ("another machine's cache calibration", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::OtherHardware))),

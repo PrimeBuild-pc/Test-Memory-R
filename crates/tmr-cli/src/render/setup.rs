@@ -130,22 +130,31 @@ pub(super) fn text(setup: &Setup) -> String {
         Setup::LargePageDiagnostic { report } => {
             let _ = writeln!(text, "{}", report);
         }
-        Setup::LargePageStatus { usable, min_page, min_needs_large } => {
+        Setup::LargePageStatus { usable, min_page, min_needs_large, right_held } => {
             if *usable {
                 let _ = writeln!(text, "🎉 Large Pages: ✅ ENABLED and tested successfully!");
                 // What allocation takes with the default minpage= and maxpage= (`memory::fill`'s passes); `Run::AllocationStarting` then
                 // says this run's range
                 let _ = writeln!(
                     text,
-                    "   By default: 1 GiB pages where TMR gets them, then 2 MiB, then locked 4 KiB pages where those run short (see minpage=)"
+                    "   By default: 1 GiB pages where TMR gets them, then 2 MiB, then locked 4 KiB pages where those run \
+                     short (see minpage=)"
                 );
             } else if *min_needs_large {
-                // Without the privilege, a large minpage (the default) refuses the run at allocation
+                // Without large pages, a large minpage (the default) refuses the run at allocation. With the right held its check failed,
+                // which a restart mends (fragmentation, most often), not --setup-large-pages: it would find nothing to grant
                 let _ = writeln!(text, "⚠️  Large Pages: Not available, and minpage={} needs them, so the run will stop", min_page);
-                let _ = writeln!(text, "   before allocating. Set them up (tmr.exe --setup-large-pages, elevated), or rerun");
-                let _ = writeln!(text, "   with minpage=reg-page to test on standard 4KB pages: every test still runs, but");
-                let _ = writeln!(text, "   slower memory traffic is less stress, so marginal errors that only appear at");
-                let _ = writeln!(text, "   full bandwidth may go undetected");
+                if *right_held {
+                    let _ = writeln!(text, "   before allocating. The right is in place, but its check above failed: restart");
+                    let _ = writeln!(text, "   Windows and run TMR first, or rerun with minpage=reg-page to test on standard");
+                    let _ = writeln!(text, "   4KB pages: every test still runs, but slower memory traffic is less stress, so");
+                    let _ = writeln!(text, "   marginal errors that only appear at full bandwidth may go undetected");
+                } else {
+                    let _ = writeln!(text, "   before allocating. Set them up (tmr.exe --setup-large-pages, elevated), or rerun");
+                    let _ = writeln!(text, "   with minpage=reg-page to test on standard 4KB pages: every test still runs, but");
+                    let _ = writeln!(text, "   slower memory traffic is less stress, so marginal errors that only appear at");
+                    let _ = writeln!(text, "   full bandwidth may go undetected");
+                }
             } else {
                 let _ = writeln!(text, "⚠️  Large Pages: Not available - TMR will use standard 4KB pages");
                 let _ = writeln!(text, "   Performance impact: ~5-10% slower memory allocation");
