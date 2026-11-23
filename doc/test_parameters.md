@@ -40,7 +40,8 @@ including after CLI overrides: a legacy numbered-pattern override is rejected. N
 
 If the period is at least the chunk length, every offset pass contains one visit. Coverage remains complete, but no period hop
 occurs; the plan reports this for the smallest resolved chunks. It also prints bytes per visit and bytes between starts.
-Saved results retain the requested geometry. Default plans and TM5 imports remain group 1.
+Saved results retain the requested geometry. Default plans and TM5 imports remain group 1, but for an import with Interleave
+Type 0 on two or more channels: group 2 (TM5's 128 B visits).
 
 See [the comparison kit](../research/access_geometry/README.md) and
 [the design and coverage proof](access_geometry_proposal_2026-11-12.md).
@@ -53,7 +54,7 @@ The jump in cache lines (64-byte units) after each line the test writes or reads
 - **Formula:** `channels × parameter - 1` (from TM5 `JumpStep = BlkSize × (Channels × Parameter - 1)`)
 - **Example:** channels=2, parameter=8 → stride = 15 cache lines
 - **The walk** (TODO 93, TM5's `mtests0.asm` ~336-394): each step writes or reads one whole 64 B line, then jumps the stride, so the period is `stride + 1` lines (`64 × channels × parameter` bytes). Each line of a period starts an offset pass, the last line first, and a pass steps a period at a time to the chunk's end, so every line is touched once per sweep of the chunk. Reads walk the same way. The image is the sequential test's (strided mode 2 writes mode 20's lines, at every width). Prefetch looks up to 128 visited lines ahead, limited by the shortest offset pass. The walk does not establish which channel, bank or row a request reaches. Measurements: `doc/todo/93-strided-simpletest-lines.md`
-- **Source:** TM5 `.cfg` parameter field + channels config, or direct value in JSON config
+- **Source:** TM5 `.cfg` parameter field + channels config, or direct value in JSON config. An import's Channels has no ceiling (TM5's is 3), so the stride is capped at `AccessGeometry::MAX_PERIOD`; a negative Parameter is 0, as TM5 runs it. Under TM5's Interleave Type 0 on two or more channels an import takes explicit geometry instead: a `period_lines` of 2 x Parameter and a `group_lines` of 2 (TM5's 128 B visits, whatever the Channels), sequential for a Parameter of 1 or less
 - **Display:** Shown in Test Configuration table as `Stride(15cl/960B)`
 
 ### `stride_elements: Option<usize>`
@@ -324,10 +325,14 @@ effective parameters. Older configs/results without this metadata still load; TM
 or mirror test, `write_read_cycles` 0 on any `run_phased_test` test, and `test_reps` 0 on a mirror
 are refused; so is `test_reps` 0 with a mode that keys its image by the cycle (0, 1, 2, 20, 30),
 whose fill and verifies would disagree. Each knob is at most 10,000. A knob the test doesn't read is
-logged, not refused. A TM5 `.cfg` value that doesn't parse is an error naming it; damage to its
-structure (NULs, a line TM5 ignores, a repeated key or section, a clamped Channels, text that isn't
-UTF-8) is a warning with its line, and the file is read as TM5 reads it
-(`LegacyConfig::parse_reporting`).
+logged, not refused. A TM5 `.cfg` value that isn't a number as TM5 writes one (`tm5_number`: `0x`, an `h` suffix or a letter
+A-F makes hex, else decimal with its fraction dropped, the low 32 bits kept) is an error naming it, as is a negative one where TM5
+gives it no meaning; damage to its structure (NULs, a line TM5 ignores, a repeated key or section, a missing section, a `[TestN]` at
+or above Tests, a clamped Tests, Channels or Lock Memory Granularity, text that isn't UTF-8) is a warning with its line, and the
+file is read as TM5 reads it (`LegacyConfig::parse_reporting`). A SimpleTest's Pattern Param0/1 written as digits only is decimal,
+as in TM5, and one wider than 32 bits keeps its low 32 (1usmus_v3's four 9-digit Param1 values), warned. A Pattern Mode TMR
+doesn't name imports as TM5 runs it, by its low byte (1 or 2, else mode 0); TMR's own numbers above (10-33) keep TMR's meaning,
+though TM5 runs each as mode 0.
 
 **A native SimpleTest's rounds come in pairs.** Each pattern is written twice in a row on a
 chunk: P, then ~P (every bit flipped), so every bit is checked holding a 0 and a 1. An odd
@@ -458,14 +463,15 @@ These sit beside the per-test parameters above:
 | Where | Field | Meaning |
 |---|---|---|
 | test entry | `"id": "12"` | The name `cycle_order` lists the test by; unique in the config. A TM5 import gives each `[TestN]` the id `"N"`, disabled ones too |
-| top level | `"cycle_order": ["6", "12", "2", "1", "1"]` | One cycle's steps, as ids in order; an id may repeat. A disabled test's id is skipped (the plan marks it); an unknown id is a load error. Unset is every enabled test once, in file order. A TM5 import's `Test Sequence`, read up to a number of 16 or more |
+| top level | `"cycle_order": ["6", "12", "2", "1", "1"]` | One cycle's steps, as ids in order; an id may repeat. A disabled test's id is skipped (the plan marks it); an unknown id is a load error. Unset is every enabled test once, in file order. A TM5 import's `Test Sequence`, read up to a number of 16 or more, without its entries at or above `Tests` (default 6: TM5 reads `[Test0]` to `[Test(Tests-1)]` only); with no `Test Sequence`, TM5's default `6,12,14,2,15,10,5,1,4,3,0,13,9,7,8,1,11`, an entry the `.cfg` doesn't define skipped (one the `.cfg`'s own sequence names is an error); an empty `Test Sequence=` is every enabled test once |
 | test entry | `"seal": false` | This correctness test runs without the seal around its chunks |
 | `system` | `"seal": "tmr"` | The seal (`seal.rs`, `doc/test_harness_tiers.md` §3a): `tmr` (the default), `tm5` (TM5's test 0 pattern, bit for bit) or `off`. A TM5 import takes `tmr` when its Test0 (RefreshStable) is enabled, else `off` |
 | `system` | `"seal_width": "auto"` | The seal kernels' SIMD width: `auto` (this machine's seal calibration, else the rule: 256 with AVX2; below), `128`, `256` or `512`; unset, `width`'s when that is set, else `auto`. A width the CPU lacks is a load error |
 
 A TM5 import supplies the default enabled `RefreshStable` Test0 if its whole section is absent, just as if `[Test0]` were empty.
 The seal does not depend on 0 appearing in `Test Sequence`; listing 0 adds an explicit `Seal-Check` step. `[Test0] Enable=0`
-disables the imported seal, and the command-line `seal=` setting still overrides that choice.
+disables the imported seal, whatever its Function (TM5 never calls a disabled test 0), and the command-line `seal=` setting still
+overrides that choice. A disabled test whose Function TMR doesn't know is declared, disabled, so the sequence skips it, as TM5 does.
 
 The command line overrides the last two: `seal=tmr|tm5|off`, `seal-width=auto|128|256|512`. A TM5
 `Cycles = 0` runs until stopped. A dependent step (`skip_init`) must directly follow the step that

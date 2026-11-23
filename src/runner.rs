@@ -1020,7 +1020,7 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
             if let Some(ref mut ctx) = def.config.parameter_context {
                 // Recompute stride if this test has stride_cachelines (SimpleTest)
                 if ctx.access.is_none() && ctx.stride_cachelines.is_some() && ctx.raw_parameter > 0 {
-                    let stride_cl = (channels as usize * ctx.raw_parameter as usize).saturating_sub(1);
+                    let stride_cl = crate::config::tm5_stride_lines(channels, ctx.raw_parameter);
                     ctx.stride_cachelines = Some(stride_cl);
                     ctx.stride_elements = Some(stride_cl * (def.config.cache_line_bytes / 8));
                     log::debug!(
