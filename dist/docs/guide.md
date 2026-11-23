@@ -344,11 +344,12 @@ or earlier have them: it kept them by default. A file that left them out has
 
 To share a run's files, `tmr --sanitize <results file or log>` (in the window, Sanitize a results
 file and its log, in the `•••` menu) writes copies of both beside them, `<name>.sanitized.json` and
-`<name>.sanitized.log`, without the serials, the UUID and the fingerprints, nor your user folder in
-paths, the Windows account and PC names, or SIDs: each is `<removed>`. Either file names the pair,
-by its path or its name in `results\` or `logs\`; the other must be there (or in the same folder) with
-the same run ID, or nothing is written. Read the copies before posting them: a name TMR didn't write,
-in a config's name or a folder outside `C:\Users\`, is still there.
+`<name>.sanitized.log`, without the serials, the UUID and the fingerprints, nor your user folder and
+OneDrive organisation in paths, the PC in a share's path (`\\PC\share`), the Windows account and PC
+names, or SIDs: each is `<removed>`. Either file names the pair, by its path or its name in
+`results\` or `logs\`; the other must be there (or in the same folder) with the same run ID, or
+nothing is written. Read the copies before posting them: a name TMR didn't write, in a config's name
+or a folder outside `C:\Users\`, is still there.
 
 That is the one to use when you have both files. To share one file alone, or one whose partner is
 gone or from another run (a log from before TMR recorded run IDs), `tmr --sanitize-single <results
@@ -356,9 +357,10 @@ file or log>` (Sanitize one file, in the same menu) writes a copy of that file o
 for its partner or checking a run ID. It removes the same things as far as that file shows them, and
 says what it couldn't. A results file alone can't know the PC and user names only its log gives (the
 Windows account, a hardware error event's PC), so one in the results file outside `C:\Users\` stays,
-such as a config on `\\PC\share`. A log alone finds the serials, the UUID and the fingerprints by
-TMR's own lines for them (each DIMM's, the system's, a calibration's identity check) rather than from
-a results file, so one only a line of another kind has, as in an older build's log, stays.
+such as a config in a folder named for you (`D:\<your name>\`). A log alone finds the serials, the
+UUID and the fingerprints by TMR's own lines for them (each DIMM's, the system's, a calibration's
+identity check) rather than from a results file, so one only a line of another kind has, as in an
+older build's log, stays.
 
 To keep the files somewhere else, set the `TMR_HOME` environment variable to that folder
 (`setx TMR_HOME D:\tmr`, then open a new console).
