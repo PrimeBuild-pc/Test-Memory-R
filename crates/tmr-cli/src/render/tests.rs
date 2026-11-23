@@ -484,8 +484,11 @@ fn setup_events_print_as_their_golden() {
             account: r"PC\owner".to_string(),
             outcome: Err("LsaAddAccountRights: Access is denied. (5, NTSTATUS 0xC0000022)".to_string()),
         }),
+        // As `memory::diagnose_large_pages` reads in the usual run: the right held but off, as Windows starts every process
         ("what the check did", Setup::LargePageDiagnostic {
-            report: "🔍 Large Page Diagnostic\n  Privilege: assigned and enabled\n  Test allocation: 2 MiB, succeeded".to_string(),
+            report: "🔍 Large page check\n👤 User: PC\\owner\n✅ Lock pages in memory (SeLockMemoryPrivilege): granted to this account, \
+                     switched on for this run\n✅ Large-page test allocation (2 MiB): OK\n"
+                .to_string(),
         }),
         ("large pages usable", large_pages(true, "large", true)),
         ("large pages not usable, and minpage needs them", large_pages(false, "large", true)),

@@ -93,12 +93,14 @@ TMR will exit now.
 5. Sign out and back in (or restart Windows)
 
 ## what the check did
-🔍 Large Page Diagnostic
-  Privilege: assigned and enabled
-  Test allocation: 2 MiB, succeeded
+🔍 Large page check
+👤 User: PC\owner
+✅ Lock pages in memory (SeLockMemoryPrivilege): granted to this account, switched on for this run
+✅ Large-page test allocation (2 MiB): OK
+
 ## large pages usable
 🎉 Large Pages: ✅ ENABLED and tested successfully!
-   TMR will use 2MB large pages for optimal performance
+   By default: 1 GiB pages where TMR gets them, then 2 MiB, then locked 4 KiB pages where those run short (see minpage=)
 
 ## large pages not usable, and minpage needs them
 ⚠️  Large Pages: Not available, and minpage=large needs them, so the run will stop

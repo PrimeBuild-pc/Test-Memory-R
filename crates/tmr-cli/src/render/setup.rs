@@ -133,7 +133,12 @@ pub(super) fn text(setup: &Setup) -> String {
         Setup::LargePageStatus { usable, min_page, min_needs_large } => {
             if *usable {
                 let _ = writeln!(text, "🎉 Large Pages: ✅ ENABLED and tested successfully!");
-                let _ = writeln!(text, "   TMR will use 2MB large pages for optimal performance");
+                // What allocation takes with the default minpage= and maxpage= (`memory::fill`'s passes); `Run::AllocationStarting` then
+                // says this run's range
+                let _ = writeln!(
+                    text,
+                    "   By default: 1 GiB pages where TMR gets them, then 2 MiB, then locked 4 KiB pages where those run short (see minpage=)"
+                );
             } else if *min_needs_large {
                 // Without the privilege, a large minpage (the default) refuses the run at allocation
                 let _ = writeln!(text, "⚠️  Large Pages: Not available, and minpage={} needs them, so the run will stop", min_page);

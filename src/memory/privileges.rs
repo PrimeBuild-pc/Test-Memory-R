@@ -660,14 +660,18 @@ pub fn grant_large_pages(candidate: &Candidate) -> Result<(), String> {
 }
 
 /// The large-page check's lines: the right's state in this token, enabling it there when it is disabled, and a test allocation; without
-/// it, who can grant it and how. It never grants the right (`grant_large_pages` does, asked). The allocator calls it too, before a
-/// large-page request (`WindowsBackend::allocate_with_virtualalloc2`).
+/// it, whether TMR runs as administrator, who can grant it and how. It never grants the right (`grant_large_pages` does, asked). The
+/// allocator calls it too, before a large-page request (`WindowsBackend::allocate_with_virtualalloc2`).
+///
+/// Held and off is the normal state, not a fault: Windows starts every process with the right off, and this switches it on, so that reads
+/// as one success line (forum feedback, 2026-11-23: a user took the old "⚠️ ASSIGNED but DISABLED" for one).
 pub fn enable_large_pages() -> Result<String, String> {
+    const RIGHT: &str = "Lock pages in memory (SeLockMemoryPrivilege)";
     let mut messages = Vec::new();
 
     match check_privilege_state() {
         PrivilegeState::NotAssigned => {
-            messages.push("❌ SeLockMemoryPrivilege: NOT in current session token".to_string());
+            messages.push(format!("❌ {RIGHT}: this sign-in doesn't have it"));
 
             let token = Token::read();
             match &token {
@@ -677,7 +681,7 @@ pub fn enable_large_pages() -> Result<String, String> {
                     if is_elevated() {
                         messages.push("❌ Running elevated, but not as an administrator: only an administrator can grant it".to_string());
                     } else {
-                        messages.push("❌ Not running as Administrator".to_string());
+                        messages.push("❌ Not running as Administrator: only an administrator can grant it".to_string());
                     }
                     messages.push("".to_string());
                     messages.push("🔧 SOLUTIONS (try in order):".to_string());
@@ -699,44 +703,35 @@ pub fn enable_large_pages() -> Result<String, String> {
                 }
             }
         }
-        PrivilegeState::AssignedButDisabled => {
-            messages.push("⚠️  SeLockMemoryPrivilege: ASSIGNED but DISABLED".to_string());
-
-            match enable_large_page_privilege_enhanced() {
-                Ok(()) => {
-                    messages.push("✅ Successfully enabled SeLockMemoryPrivilege".to_string());
-
-                    match test_large_page_allocation() {
-                        Ok(()) => {
-                            messages.push("✅ Large page test allocation successful".to_string());
-                            return Ok(messages.join("\n"));
-                        }
-                        Err(e) => {
-                            messages.push(format!("❌ Large page test failed: {}", e));
-                        }
-                    }
-                }
-                Err(e) => {
-                    messages.push(format!("❌ Failed to enable privilege: {}", e));
-                }
+        PrivilegeState::AssignedButDisabled => match enable_large_page_privilege_enhanced() {
+            Ok(()) => {
+                messages.push(format!("✅ {RIGHT}: granted to this account, switched on for this run"));
+                test_allocation_lines(&mut messages);
             }
-        }
+            Err(e) => messages.push(format!("❌ {RIGHT}: granted to this account, but Windows didn't switch it on: {e}")),
+        },
         PrivilegeState::AssignedAndEnabled => {
-            messages.push("✅ SeLockMemoryPrivilege: ASSIGNED and ENABLED".to_string());
-
-            match test_large_page_allocation() {
-                Ok(()) => {
-                    messages.push("✅ Large page test allocation successful".to_string());
-                    return Ok(messages.join("\n"));
-                }
-                Err(e) => {
-                    messages.push(format!("❌ Large page test failed: {}", e));
-                }
-            }
+            messages.push(format!("✅ {RIGHT}: granted to this account, already on"));
+            test_allocation_lines(&mut messages);
         }
     }
 
     Ok(messages.join("\n"))
+}
+
+/// `enable_large_pages`' test allocation line, the right on: OK, or why it failed and what to do
+fn test_allocation_lines(messages: &mut Vec<String>) {
+    match test_large_page_allocation() {
+        Ok(()) => messages.push("✅ Large-page test allocation (2 MiB): OK".to_string()),
+        Err(e) => {
+            messages.push(format!("❌ Large-page test allocation (2 MiB) failed: {e}"));
+            messages.push(
+                "   The right is in place, but Windows couldn't give a 2 MiB page: restart Windows (memory fragments as it runs) \
+                 and run TMR first"
+                    .to_string(),
+            );
+        }
+    }
 }
 
 /// Check the current state of the SeLockMemoryPrivilege
@@ -782,7 +777,7 @@ fn test_large_page_allocation() -> Result<(), String> {
         if ptr.is_null() {
             let err = GetLastError();
             let error_msg = format_win32_error(err);
-            Err(format!("Large page allocation failed: {} ({})", error_msg, err.0))
+            Err(format!("{} ({})", error_msg, err.0))
         } else {
             // Clean up test allocation
             let _ = VirtualFree(ptr, 0, MEM_RELEASE);
@@ -791,43 +786,22 @@ fn test_large_page_allocation() -> Result<(), String> {
     }
 }
 
-/// The large-page check's report (`Setup::LargePageDiagnostic`): elevated or not, the account, and `enable_large_pages`' lines. It never
-/// grants the right: a session asks first (`large_page_question`), and `--setup-large-pages` grants it after this.
+/// The large-page check's report (`Setup::LargePageDiagnostic`): its heading, the account, and `enable_large_pages`' lines, which say
+/// whether TMR runs as administrator only where the right is missing: granting it needs that, and nothing else here does. It never grants
+/// the right: a session asks first (`large_page_question`), and `--setup-large-pages` grants it after this.
 pub fn diagnose_large_pages() -> String {
-    let mut report = String::new();
+    let mut report = "🔍 Large page check\n".to_string();
 
-    report.push_str("🔧 TMR Large Page Auto-Setup starting\n\n");
-
-    // Show current system info
-    report.push_str("System Information:\n");
-    if is_elevated() {
-        report.push_str("✅ Running with Administrator privileges\n");
-    } else {
-        report.push_str("❌ Not running as Administrator\n");
-    }
-
-    // The account, from the token: not %USERDOMAIN%\%USERNAME%, which whoever started TMR sets
+    // The account, from the token: not %USERDOMAIN%\%USERNAME%, which whoever started TMR sets. `sanitize::USER_LINE` finds it by this
+    // line's start.
     match Token::read() {
         Ok(token) => report.push_str(&format!("👤 User: {}\n", account_of(&token))),
         Err(e) => report.push_str(&format!("👤 User: unknown ({e})\n")),
     }
 
-    report.push('\n');
-
     // Enable it in this token, and try it
-    match enable_large_pages() {
-        Ok(setup_result) => {
-            report.push_str("Auto-Setup Results:\n");
-            report.push_str(&setup_result);
-            report.push('\n');
-        }
-        Err(setup_error) => {
-            report.push_str("Auto-Setup Failed:\n");
-            report.push_str(&setup_error);
-            report.push('\n');
-        }
-    }
-
+    report.push_str(&enable_large_pages().unwrap_or_else(|e| e));
+    report.push('\n');
     report
 }
 
