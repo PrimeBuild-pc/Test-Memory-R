@@ -36,12 +36,25 @@ pub struct SystemIdentity {
 /// Per-DIMM memory module info from SMBIOS Type 17
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryModule {
+    /// The module's slot as TMR names it: the channel letter and the slot, `A-2`, where the board's strings say both (`assign_slots`),
+    /// else the board's own name for it, made unique
+    #[serde(default)]
+    pub slot: String,
+    /// SMBIOS Device Locator (Type 17 offset 0x10), the board's name for the socket: `DIMM 1`, `DIMMA2`, `Controller0-ChannelA-DIMM0`
     pub locator: String,
+    /// SMBIOS Bank Locator (0x11): AMD's firmware puts the channel here (`P0 CHANNEL A`), many others a bank number or nothing
+    #[serde(default)]
+    pub bank_locator: String,
     pub manufacturer: String,
     pub serial_number: String,
     pub part_number: String,
-    /// Configured speed in MT/s
-    pub speed_mts: u32,
+    /// The speed it runs at, in MT/s: SMBIOS Configured Memory Speed (0x20, or 0x58 past 65,534), 0 when the firmware doesn't say
+    #[serde(default)]
+    pub configured_mts: u32,
+    /// SMBIOS Speed (0x15, or 0x54), in MT/s: the module's "maximum capable" speed as the firmware fills it, its JEDEC rating on many
+    /// boards (4800 for a DDR5-6000 EXPO kit), the configured speed on others, now and then nonsense; 0 unknown
+    #[serde(default)]
+    pub max_mts: u32,
     /// SMBIOS memory type (Type 17 offset 0x12): 0x1A DDR4, 0x22 DDR5, 0x23 LPDDR5; 0 if absent
     #[serde(default)]
     pub memory_type: u8,
@@ -156,7 +169,9 @@ impl SmbiosData {
             module.manufacturer.hash(&mut hasher);
             module.serial_number.hash(&mut hasher);
             module.part_number.hash(&mut hasher);
-            module.speed_mts.hash(&mut hasher);
+            // The configured speed, so an XMP/EXPO change shows, and the maximum the firmware reports
+            module.configured_mts.hash(&mut hasher);
+            module.max_mts.hash(&mut hasher);
             module.capacity_bytes.hash(&mut hasher);
         }
         format!("{:016x}", hasher.finish())
@@ -313,6 +328,8 @@ fn parse_smbios(raw: &[u8]) -> SmbiosData {
         return data;
     }
 
+    // The firmware table header (`RawSMBIOSData`): calling method, then the SMBIOS major and minor version
+    let version = (raw[1], raw[2]);
     // Skip the firmware table header to get to the SMBIOS structure table
     let table = &raw[SMBIOS_HEADER_SIZE..];
     let mut offset = 0;
@@ -391,7 +408,7 @@ fn parse_smbios(raw: &[u8]) -> SmbiosData {
                         &formatted[..struct_len]
                     );
                 }
-                if let Some(module) = parse_type17_memory(formatted, &strings) {
+                if let Some(module) = parse_type17_memory(formatted, &strings, version) {
                     data.memory_modules.push(module);
                 } else {
                     log::debug!("SMBIOS Type 17: skipped (empty slot or short struct, len={})", struct_len);
@@ -422,6 +439,8 @@ fn parse_smbios(raw: &[u8]) -> SmbiosData {
             );
         }
     }
+
+    assign_slots(&mut data.memory_modules);
 
     // Set capacity_human for any modules that have it unset
     for module in &mut data.memory_modules {
@@ -575,7 +594,7 @@ fn parse_type1_system(formatted: &[u8], strings: &[String], system: &mut SystemI
 }
 
 /// Parse Type 17: Memory Device — returns None for genuinely empty slots
-fn parse_type17_memory(formatted: &[u8], strings: &[String]) -> Option<MemoryModule> {
+fn parse_type17_memory(formatted: &[u8], strings: &[String], version: (u8, u8)) -> Option<MemoryModule> {
     // Need at least enough bytes for the size field
     if formatted.len() < 0x0E {
         return None;
@@ -610,8 +629,10 @@ fn parse_type17_memory(formatted: &[u8], strings: &[String]) -> Option<MemoryMod
     // Offset 0x12: Memory Type (u8)
     let memory_type = formatted.get(0x12).copied().unwrap_or(0);
 
-    // Offset 0x15: Speed in MT/s (u16) — guard for short structs
-    let speed_mts = if formatted.len() >= 0x17 { u16::from_le_bytes([formatted[0x15], formatted[0x16]]) } else { 0 };
+    // Offset 0x15: Speed, the maximum capable (2.3+), and 0x20: Configured Memory Speed (2.7+), each MT/s (MHz before 3.1), 0 unknown,
+    // 0xFFFF for the DWORD at 0x54 / 0x58 (3.3+). Each read only where the structure's length covers it (DSP0134 6.1.1)
+    let max_mts = speed_field(formatted, 0x15, 0x54);
+    let configured_mts = as_data_rate(speed_field(formatted, 0x20, 0x58), memory_type, version);
 
     // String references (all guarded for short structs)
     // 0x10: Device Locator
@@ -620,20 +641,136 @@ fn parse_type17_memory(formatted: &[u8], strings: &[String]) -> Option<MemoryMod
     // 0x19: Asset Tag
     // 0x1A: Part Number
     let locator = if formatted.len() > 0x10 { get_string(strings, formatted[0x10]) } else { String::new() };
+    let bank_locator = if formatted.len() > 0x11 { get_string(strings, formatted[0x11]) } else { String::new() };
     let manufacturer = if formatted.len() > 0x17 { get_string(strings, formatted[0x17]) } else { String::new() };
     let serial_number = if formatted.len() > 0x18 { get_string(strings, formatted[0x18]) } else { String::new() };
     let part_number = if formatted.len() > 0x1A { get_string(strings, formatted[0x1A]) } else { String::new() };
 
     Some(MemoryModule {
+        slot: String::new(),
         locator,
+        bank_locator,
         manufacturer,
         serial_number,
         part_number,
-        speed_mts: speed_mts as u32,
+        configured_mts,
+        max_mts,
         memory_type,
         capacity_human: format_capacity(capacity_bytes),
         capacity_bytes,
     })
+}
+
+/// A Type 17 speed (DSP0134 Table 75): the WORD at `word`, or past 65,534 MT/s (0xFFFF) the DWORD at `dword`, bit 31 reserved. 0 when
+/// unknown, including a field the structure is too short to have.
+fn speed_field(formatted: &[u8], word: usize, dword: usize) -> u32 {
+    let Some(&[lo, hi]) = formatted.get(word..word + 2) else {
+        return 0;
+    };
+    match u16::from_le_bytes([lo, hi]) {
+        0xFFFF => formatted.get(dword..dword + 4).map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0x7FFF_FFFF),
+        speed => u32::from(speed),
+    }
+}
+
+/// A configured speed as a data rate. Before SMBIOS 3.1 it was a clock in MHz, and some firmware of then writes the half-rate clock
+/// (an MSI X370 BIOS of 2017: 1200 for DDR4-2400, TODO 132's research): a value below the type's slowest JEDEC data rate is taken for
+/// one and doubled. From 3.1 it is MT/s as it reads.
+fn as_data_rate(configured: u32, memory_type: u8, version: (u8, u8)) -> u32 {
+    let slowest = match memory_type {
+        0x18 => 800,         // DDR3
+        0x1A | 0x1E => 1600, // DDR4, LPDDR4
+        0x1D => 1066,        // LPDDR3
+        _ => 0,
+    };
+    if version < (3, 1) && configured > 0 && configured < slowest { configured * 2 } else { configured }
+}
+
+/// Each module's `slot`, the board's slot as a reader names it, `A-2`: the channel letter, then the slot in it from 1. From the board's
+/// strings where they say both, one scheme for the whole machine (TODO 132's research, about 250 boards' SMBIOS dumps):
+/// - a letter and a number at the end of the Device Locator, as the board prints its slots: `DIMMA2`, `DIMM_A1`, `DDR5-B2`,
+///   `Controller1-DIMMB2`, `A1` (newer MSI AM5 BIOSes, ASUS AM4, Gigabyte Z790, Supermicro, Dell servers);
+/// - AMD's default: Device Locator `DIMM n`, the slot in its channel from 0, and Bank Locator `P0 CHANNEL X`: `X-(n + 1)` (most AM4 and
+///   AM5 boards, AMD laptops; one MSI board seen under both its BIOS formats reads `DIMM 1`/`P0 CHANNEL A` on one and `DIMMA2` on the
+///   other).
+///
+/// Every other scheme (Intel's `Controller0-ChannelA-DIMM0`, counted from 0 or 1 by vendor; servers' `CPU0 Channel0 DIMM0`; Dell
+/// laptops' `Motherboard` on every channel) keeps the board's own names: the Device Locator where those differ, else with the Bank
+/// Locator before it, else numbered in the table's order. So do all of them when any module doesn't fit or two labels would match: a
+/// wrong slot is worse than the board's own words.
+fn assign_slots(modules: &mut [MemoryModule]) {
+    let slots: Option<Vec<String>> = modules.iter().map(|m| slot_label(&m.locator, &m.bank_locator)).collect();
+    let names = match slots.filter(|slots| all_differ(slots)) {
+        Some(slots) => slots,
+        None => board_names(modules),
+    };
+    for (module, name) in modules.iter_mut().zip(names) {
+        module.slot = name;
+    }
+}
+
+/// The `A-2` label a module's two strings give, if they give one (`assign_slots`)
+fn slot_label(device: &str, bank: &str) -> Option<String> {
+    let device = device.trim().to_ascii_uppercase();
+    // A letter and a number the board prints: at the end, after `DIMM`, `DDRn` and an optional separator, or the whole string
+    let digits = device.len() - device.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    if (1..=2).contains(&digits) {
+        let head = &device[..device.len() - digits];
+        let number = &device[device.len() - digits..];
+        if let Some(letter) = head.chars().last().filter(char::is_ascii_uppercase) {
+            let before = head[..head.len() - 1].trim_end_matches(['_', '-', ' ']);
+            let named =
+                before.is_empty() || before.ends_with("DIMM") || before.strip_suffix(char::is_numeric).is_some_and(|b| b.ends_with("DDR"));
+            if named {
+                return Some(format!("{letter}-{}", number.parse::<u32>().ok()?));
+            }
+        }
+    }
+    // AMD's default: `DIMM n`, counted from 0 in the channel the Bank Locator names
+    let slot: u32 = device.strip_prefix("DIMM")?.trim().parse().ok()?;
+    let bank = bank.trim().to_ascii_uppercase();
+    let channel = bank.split_whitespace().skip_while(|word| *word != "CHANNEL").nth(1)?;
+    let letter = channel.chars().next().filter(|c| c.is_ascii_uppercase() && channel.len() == 1)?;
+    Some(format!("{letter}-{}", slot + 1))
+}
+
+/// The board's own names, made to differ: the Device Locator, else the Bank Locator with it, else either numbered in table order
+fn board_names(modules: &[MemoryModule]) -> Vec<String> {
+    let device: Vec<String> = modules.iter().map(|m| m.locator.trim().to_string()).collect();
+    if device.iter().all(|d| !d.is_empty()) && all_differ(&device) {
+        return device;
+    }
+    let both: Vec<String> = modules
+        .iter()
+        .map(|m| [m.bank_locator.trim(), m.locator.trim()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" "))
+        .collect();
+    if both.iter().all(|b| !b.is_empty()) && all_differ(&both) {
+        return both;
+    }
+    both.iter().enumerate().map(|(i, name)| if name.is_empty() { format!("#{}", i + 1) } else { format!("{name} #{}", i + 1) }).collect()
+}
+
+fn all_differ(names: &[String]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    names.iter().all(|name| seen.insert(name.as_str()))
+}
+
+impl MemoryModule {
+    /// The speed it runs at, else the maximum the firmware reports: what to show first
+    pub fn speed_mts(&self) -> u32 {
+        if self.configured_mts > 0 { self.configured_mts } else { self.max_mts }
+    }
+
+    /// Its speed for a reader: `6000 MT/s`, the SMBIOS maximum after it where it differs, `6000 MT/s (SMBIOS max 4800)`; empty when
+    /// neither is known
+    pub fn speed_label(&self) -> String {
+        match (self.configured_mts, self.max_mts) {
+            (0, 0) => String::new(),
+            (0, max) => format!("{max} MT/s"),
+            (configured, max) if max == 0 || max == configured => format!("{configured} MT/s"),
+            (configured, max) => format!("{configured} MT/s (SMBIOS max {max})"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -649,14 +786,17 @@ mod tests {
             manufacturer: "G Skill".to_string(),
             serial_number: "12345678".to_string(),
             part_number: "F5-6000J3038F16G".to_string(),
-            speed_mts: 6000,
+            configured_mts: 6000,
             capacity_bytes: 16 << 30,
             ..Default::default()
         };
         let system =
             SystemIdentity { manufacturer: "ASUS".to_string(), product_name: "PRIME".to_string(), uuid: "03000200-0400".to_string() };
         let hidden = modules_shown(std::slice::from_ref(&module), true);
-        assert_eq!((hidden[0].serial_number.as_str(), hidden[0].part_number.as_str(), hidden[0].speed_mts), ("", "F5-6000J3038F16G", 6000));
+        assert_eq!(
+            (hidden[0].serial_number.as_str(), hidden[0].part_number.as_str(), hidden[0].configured_mts),
+            ("", "F5-6000J3038F16G", 6000)
+        );
         assert_eq!(modules_shown(std::slice::from_ref(&module), false)[0].serial_number, "12345678");
         let without = system_shown(&system, true);
         assert_eq!((without.uuid.as_str(), without.product_name.as_str()), ("", "PRIME"));
@@ -677,6 +817,111 @@ mod tests {
         assert_eq!(strings_shown(&strings, false), r#"["DIMM_A2", "G Skill", "12345678"]"#);
     }
 
+    /// A Type 17 formatted section `len` bytes long, its Speed (0x15) and Configured Memory Speed (0x20) WORDs and their DWORDs set
+    fn type17(len: usize, speed: u16, configured: u16, extended: (u32, u32)) -> Vec<u8> {
+        let mut f = vec![0u8; len];
+        let mut put = |at: usize, bytes: &[u8]| {
+            if at + bytes.len() <= len {
+                f[at..at + bytes.len()].copy_from_slice(bytes);
+            }
+        };
+        put(0x15, &speed.to_le_bytes());
+        put(0x20, &configured.to_le_bytes());
+        put(0x54, &extended.0.to_le_bytes());
+        put(0x58, &extended.1.to_le_bytes());
+        f
+    }
+
+    /// TODO 132's speed fix: the configured speed at 0x20, the maximum at 0x15, each read only where the structure's length covers it,
+    /// 0xFFFF sending it to the DWORD (bit 31 reserved), and a pre-3.1 half-rate clock doubled
+    #[test]
+    fn the_speeds_come_from_their_fields() {
+        let f = type17(0x5C, 4800, 6000, (0, 0));
+        assert_eq!((speed_field(&f, 0x15, 0x54), speed_field(&f, 0x20, 0x58)), (4800, 6000));
+        let f = type17(0x5C, 0xFFFF, 0xFFFF, (70_000 | 1 << 31, 72_000));
+        assert_eq!((speed_field(&f, 0x15, 0x54), speed_field(&f, 0x20, 0x58)), (70_000, 72_000), "the DWORDs, bit 31 masked");
+        let short = type17(0x1B, 2400, 0, (0, 0));
+        assert_eq!((speed_field(&short, 0x15, 0x54), speed_field(&short, 0x20, 0x58)), (2400, 0), "an SMBIOS 2.3 structure has no 0x20");
+        let no_dword = type17(0x54, 0xFFFF, 6000, (0, 0));
+        assert_eq!(speed_field(&no_dword, 0x15, 0x54), 0, "0xFFFF in a 3.2 structure, with no 0x54: unknown");
+        // MSI X370, SMBIOS 3.0: DDR4-2400's configured speed as its 1200 MHz clock
+        assert_eq!(as_data_rate(1200, 0x1A, (3, 0)), 2400);
+        assert_eq!(as_data_rate(1200, 0x1A, (3, 1)), 1200, "MT/s from 3.1");
+        assert_eq!(as_data_rate(2400, 0x1A, (3, 0)), 2400, "a data rate already");
+        assert_eq!(as_data_rate(3000, 0x22, (3, 0)), 3000, "no rule for a type without a pre-3.1 era");
+    }
+
+    /// The current speed first, the SMBIOS maximum only where it differs
+    #[test]
+    fn the_speed_reads_current_first() {
+        let speeds = |configured_mts, max_mts| MemoryModule { configured_mts, max_mts, ..Default::default() };
+        assert_eq!(speeds(6000, 4800).speed_label(), "6000 MT/s (SMBIOS max 4800)");
+        assert_eq!(speeds(6000, 6000).speed_label(), "6000 MT/s");
+        assert_eq!(speeds(0, 7200).speed_label(), "7200 MT/s", "an EC2 VM: no configured speed");
+        assert_eq!(speeds(0, 0).speed_label(), "");
+        assert_eq!((speeds(6000, 4800).speed_mts(), speeds(0, 7200).speed_mts()), (6000, 7200));
+    }
+
+    /// TODO 132's labels, from real boards' strings (the research's dumps): the channel letter and the slot from 1, where the strings say
+    /// both
+    #[test]
+    fn the_board_strings_give_the_slot() {
+        let cases = [
+            // AMD's default, the slot counted from 0 in its channel: ASUS and ASRock AM5, MSI AM4, AMD laptops
+            ("DIMM 1", "P0 CHANNEL A", Some("A-2")),
+            ("DIMM 0", "P0 CHANNEL B", Some("B-1")),
+            ("DIMM 0", "P0 CHANNEL D", Some("D-1")),
+            // The slot as the board prints it: MSI AM5's newer BIOSes, ASUS AM4, Gigabyte Z790, MSI Z790, Supermicro, Dell servers
+            ("DIMMA2", "P0 CHANNEL A", Some("A-2")),
+            ("DIMM_B1", "BANK 2", Some("B-1")),
+            ("DDR5-B2", "BANK 0", Some("B-2")),
+            ("Controller1-DIMMB2", "BANK 0", Some("B-2")),
+            ("P1-DIMMA1", "P0_Node0_Channel0_Dimm0", Some("A-1")),
+            ("A16", "", Some("A-16")),
+            // Schemes that don't say both, or count by vendor: the board's own names
+            ("Controller0-ChannelA-DIMM0", "BANK 0", None),
+            ("ChannelA-DIMM1", "BANK 1", None),
+            ("CPU0 Channel0 DIMM0", "CPU0 Channel0", None),
+            ("PROC 1 DIMM 1", "", None),
+            ("DIMM_P0_A0", "", None),
+            ("Motherboard", "BANK 0", None),
+            ("DIMM 1", "BANK 0", None),
+            ("", "", None),
+        ];
+        for (device, bank, slot) in cases {
+            assert_eq!(slot_label(device, bank).as_deref(), slot, "{device:?} / {bank:?}");
+        }
+    }
+
+    /// One scheme a machine: labels where every module has one and they differ, else the board's names, the Bank Locator with them
+    /// where the Device Locators repeat, else numbered in table order
+    #[test]
+    fn every_module_gets_a_slot_of_its_own() {
+        let slots = |pairs: &[(&str, &str)]| {
+            let mut modules: Vec<MemoryModule> = pairs
+                .iter()
+                .map(|(device, bank)| MemoryModule { locator: device.to_string(), bank_locator: bank.to_string(), ..Default::default() })
+                .collect();
+            assign_slots(&mut modules);
+            modules.into_iter().map(|m| m.slot).collect::<Vec<_>>()
+        };
+        // The forum reporter's ASUS board, and the ASRock B650M: "DIMM 1" twice
+        assert_eq!(slots(&[("DIMM 1", "P0 CHANNEL A"), ("DIMM 1", "P0 CHANNEL B")]), ["A-2", "B-2"]);
+        assert_eq!(
+            slots(&[("DIMM 0", "P0 CHANNEL A"), ("DIMM 1", "P0 CHANNEL A"), ("DIMM 0", "P0 CHANNEL B"), ("DIMM 1", "P0 CHANNEL B")]),
+            ["A-1", "A-2", "B-1", "B-2"]
+        );
+        // Intel: unique Device Locators, kept as they are
+        assert_eq!(slots(&[("Controller0-ChannelA-DIMM0", "BANK 0"), ("Controller1-ChannelA-DIMM0", "BANK 0")]), [
+            "Controller0-ChannelA-DIMM0", "Controller1-ChannelA-DIMM0"
+        ]);
+        // A module that doesn't fit puts the whole machine on the board's names
+        assert_eq!(slots(&[("DIMM 1", "P0 CHANNEL A"), ("DIMM 1", "BANK 1")]), ["P0 CHANNEL A DIMM 1", "BANK 1 DIMM 1"]);
+        // Dell laptops: every channel "Motherboard", the bank repeated
+        assert_eq!(slots(&[("Motherboard", "BANK 0"), ("Motherboard", "BANK 0")]), ["BANK 0 Motherboard #1", "BANK 0 Motherboard #2"]);
+        assert_eq!(slots(&[("", ""), ("", "")]), ["#1", "#2"], "a VM's empty strings");
+    }
+
     #[test]
     fn test_detect_smbios() {
         // Integration test: should succeed on any Windows machine
@@ -693,7 +938,7 @@ mod tests {
                 m.manufacturer,
                 m.serial_number,
                 m.part_number,
-                m.speed_mts,
+                m.speed_label(),
                 m.capacity_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
             );
         }

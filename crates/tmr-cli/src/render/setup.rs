@@ -253,13 +253,13 @@ fn machine_text(
     let _ = writeln!(text, "🖥️  System: {}", parts.join(" · "));
     for module in modules {
         let size = joined(&[&gib(module.capacity_bytes), tmr::frontend::memory_type_name(module.memory_type).unwrap_or("")]);
-        let speed = if module.speed_mts > 0 { format!("{} MT/s", module.speed_mts) } else { String::new() };
+        let speed = module.speed_label();
         let maker = joined(&[&module.manufacturer, &module.part_number]);
         let serial = if module.serial_number.trim().is_empty() { String::new() } else { format!("serial {}", module.serial_number.trim()) };
         let fields = [joined(&[&size, &speed]), maker, serial];
         let details: Vec<&str> = fields.iter().filter(|field| !field.is_empty()).map(String::as_str).collect();
-        let locator = if module.locator.trim().is_empty() { "a module" } else { module.locator.trim() };
-        let _ = writeln!(text, "    {locator}: {}", details.join(" · "));
+        let slot = if module.slot.trim().is_empty() { "a module" } else { module.slot.trim() };
+        let _ = writeln!(text, "    {slot}: {}", details.join(" · "));
     }
     if let Some(os) = os {
         let _ = writeln!(text, "🪟 OS: {}", os.label());

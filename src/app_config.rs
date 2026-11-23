@@ -403,10 +403,11 @@ mod tests {
                     manufacturer: "UnknownMemoryMaker".to_string(),
                     serial_number: "12345678".to_string(),
                     part_number: "123456789-12345".to_string(),
-                    speed_mts: 4800,
+                    configured_mts: 4800,
                     memory_type: 0x22,
                     capacity_bytes: cap,
                     capacity_human: crate::smbios::format_capacity(cap),
+                    ..Default::default()
                 }
             }]),
             ..Default::default()
@@ -420,7 +421,7 @@ mod tests {
         assert_eq!(loaded.tsc_frequency_ghz, Some(2.496012345));
         assert_eq!(loaded.memory_modules.as_ref().unwrap().len(), 1);
         assert_eq!(loaded.memory_modules.as_ref().unwrap()[0].locator, "DIMM_A1");
-        assert_eq!(loaded.memory_modules.as_ref().unwrap()[0].speed_mts, 4800);
+        assert_eq!(loaded.memory_modules.as_ref().unwrap()[0].configured_mts, 4800);
     }
 
     use crate::calibration::test_seal_calibration;

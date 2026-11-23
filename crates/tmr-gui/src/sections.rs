@@ -211,7 +211,7 @@ fn memory_status_table(status: &MemoryStatus) -> TableData {
 fn modules_table(modules: &[MemoryModule]) -> TableData {
     let table = TableData::new()
         .with_title("Memory modules (SMBIOS)")
-        .add_header("Locator", ColumnAlignment::Left)
+        .add_header("Slot", ColumnAlignment::Left)
         .add_header("Size", ColumnAlignment::Right)
         .add_header("Type", ColumnAlignment::Left)
         .add_header("Speed", ColumnAlignment::Right)
@@ -219,10 +219,10 @@ fn modules_table(modules: &[MemoryModule]) -> TableData {
         .add_header("Part", ColumnAlignment::Left);
     modules.iter().fold(table, |table, m| {
         table.add_row(vec![
-            m.locator.clone(),
+            m.slot.clone(),
             if m.capacity_bytes > 0 { crate::sysinfo::size(m.capacity_bytes as usize) } else { String::new() },
             tmr::frontend::memory_type_name(m.memory_type).unwrap_or_default().to_string(),
-            if m.speed_mts > 0 { format!("{} MT/s", m.speed_mts) } else { String::new() },
+            m.speed_label(),
             m.manufacturer.trim().to_string(),
             m.part_number.trim().to_string(),
         ])

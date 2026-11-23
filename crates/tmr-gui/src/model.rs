@@ -2051,9 +2051,15 @@ mod tests {
         let mut m = model();
         m.start();
         assert_eq!(m.position, "Setting up");
-        let module = MemoryModule { locator: "DIMM_A2".to_string(), capacity_bytes: 32 << 30, memory_type: 0x22, ..Default::default() };
-        let second = MemoryModule { locator: "DIMM_B2".to_string(), capacity_bytes: 16 << 30, ..module.clone() };
-        m.choose_dimm("DIMM_B2 · 16 GiB");
+        let module = MemoryModule {
+            slot: "A-2".to_string(),
+            locator: "DIMM_A2".to_string(),
+            capacity_bytes: 32 << 30,
+            memory_type: 0x22,
+            ..Default::default()
+        };
+        let second = MemoryModule { slot: "B-2".to_string(), locator: "DIMM_B2".to_string(), capacity_bytes: 16 << 30, ..module.clone() };
+        m.choose_dimm("B-2 · 16 GiB");
         assert!(m.system.is_none(), "no DIMM to choose before setup has detected them");
         let status = MemoryStatus { total_phys: 62 << 30, avail_phys: 50 << 30, total_page_file: 70 << 30, avail_page_file: 60 << 30 };
         for setup in [Setup::Selection(Box::new(selection())), Setup::LargePageCheck] {
@@ -2093,9 +2099,9 @@ mod tests {
         assert_eq!((memory.total.as_deref(), memory.dimms.as_str()), (Some("48 GiB DDR5"), "2 DIMMs"));
         assert!(memory.about.contains("Windows reports 62 GiB"), "{}", memory.about);
         let chosen = |m: &Model| m.system.as_ref().and_then(SystemPanel::chosen).map(Dimm::choice);
-        assert_eq!(chosen(&m).as_deref(), Some("DIMM_A2 · 32 GiB"), "the first, before any choice");
-        m.choose_dimm("DIMM_B2 · 16 GiB");
-        assert_eq!(chosen(&m).as_deref(), Some("DIMM_B2 · 16 GiB"), "the one chosen");
+        assert_eq!(chosen(&m).as_deref(), Some("A-2 · 32 GiB"), "the first, before any choice");
+        m.choose_dimm("B-2 · 16 GiB");
+        assert_eq!(chosen(&m).as_deref(), Some("B-2 · 16 GiB"), "the one chosen");
         assert_eq!(m.errors, [
             "Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)",
             "priority=realtime with a worker on every logical CPU: the window can freeze until the run ends"
@@ -2699,10 +2705,11 @@ mod tests {
     fn the_tabs_take_the_consoles_startup_sections() {
         let mut m = model();
         let module = MemoryModule {
+            slot: "A-2".to_string(),
             locator: "DIMM_A2".to_string(),
             capacity_bytes: 32 << 30,
             memory_type: 0x22,
-            speed_mts: 6000,
+            configured_mts: 6000,
             manufacturer: "G.Skill ".to_string(),
             part_number: "F5-6000J3040G32G ".to_string(),
             serial_number: "0x1234".to_string(),
@@ -2749,7 +2756,7 @@ mod tests {
             "table Memory modules (SMBIOS)"
         ]);
         let Some(crate::report::Block::Table(modules)) = s.system.last() else { panic!("the modules' table") };
-        assert_eq!(modules.rows, [["DIMM_A2", "32 GiB", "DDR5", "6000 MT/s", "G.Skill", "F5-6000J3040G32G"]], "no serial number");
+        assert_eq!(modules.rows, [["A-2", "32 GiB", "DDR5", "6000 MT/s", "G.Skill", "F5-6000J3040G32G"]], "no serial number");
         let memory = outline(&s.memory);
         assert_eq!(memory[..3], ["Large pages: on, tested", "table Windows' memory", "table Memory Status & Allocation Plan"]);
         assert!(

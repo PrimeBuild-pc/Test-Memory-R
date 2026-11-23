@@ -511,16 +511,23 @@ fn setup_events_print_as_their_golden() {
             report: Box::new(crate::renderer::tests::system_info_report()),
             memory_modules: vec![
                 MemoryModule {
+                    slot: "A-2".to_string(),
                     locator: "DIMM_A2".to_string(),
                     manufacturer: "G Skill".to_string(),
                     part_number: "F5-6000J3038F16G".to_string(),
                     serial_number: "00000000".to_string(),
-                    speed_mts: 6000,
+                    configured_mts: 6000,
                     memory_type: 0x22,
                     capacity_bytes: 16 << 30,
                     ..Default::default()
                 },
-                MemoryModule { locator: "DIMM_B2".to_string(), capacity_bytes: 16 << 30, memory_type: 0x22, ..Default::default() },
+                MemoryModule {
+                    slot: "B-2".to_string(),
+                    locator: "DIMM_B2".to_string(),
+                    capacity_bytes: 16 << 30,
+                    memory_type: 0x22,
+                    ..Default::default()
+                },
             ],
             system: SystemIdentity {
                 manufacturer: "ASUS".to_string(),
