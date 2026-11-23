@@ -512,11 +512,20 @@ impl Scrubber {
     /// `log`, a log's text, scrubbed: its SMBIOS string tables, the values its lines label (`labeled_spans`), then the run's values
     /// wherever else it has them, then what its calibration checks recorded, then the rest; all of it free text
     fn log(&self, log: &str, counts: &mut BTreeMap<Kind, usize>) -> String {
-        let text = by_line(log, |line| smbios_strings(line, counts));
+        // TMR writes these metadata lines itself. A learned account name such as "run" must never change their labels or pairing ID.
+        let header_len = log
+            .split_inclusive('\n')
+            .take_while(|line| {
+                ["# TMR ", "# build: ", "# paired result file: results/", "# run id: "].iter().any(|label| line.starts_with(label))
+            })
+            .map(str::len)
+            .sum();
+        let (header, body) = log.split_at(header_len);
+        let text = by_line(body, |line| smbios_strings(line, counts));
         let text = replace_labeled(&text, &labeled_spans(&text), counts);
         let text = self.values(&text, counts);
         let text = by_line(&text, |line| recorded(line, counts));
-        self.rest(&text, counts, true)
+        format!("{header}{}", self.rest(&text, counts, true))
     }
 
     /// `json`, a results file's text, with each of its strings scrubbed by its field, the rest as it was: a labeled field's value whole
@@ -1283,6 +1292,24 @@ mod tests {
             };
             std::fs::write(&log, header + &body).unwrap();
             Run { results, log }
+        }
+    }
+
+    #[test]
+    fn an_account_named_run_keeps_the_pairing_header() {
+        let dir = TempDir::new("sanitize-run-account");
+        let pair = Run::new(&dir, "TMR_2026-11-24_090000", RUN, true, false);
+        let original = read(&pair.log).replace("jamie", "run");
+        std::fs::write(&pair.log, &original).unwrap();
+        for paired in [true, false] {
+            let copies =
+                if paired { sanitize(pair.results.to_str().unwrap()) } else { sanitize_single(pair.log.to_str().unwrap()) }.unwrap();
+            let log = read(copies.copies.iter().find(|p| p.extension().is_some_and(|ext| ext == "log")).unwrap());
+            assert!(log.starts_with(original.split("[2026").next().unwrap()));
+            assert!(!log.contains(r"DESKTOP-J4M13\run"));
+            for path in copies.copies {
+                std::fs::remove_file(path).unwrap();
+            }
         }
     }
 
