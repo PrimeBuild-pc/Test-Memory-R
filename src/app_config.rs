@@ -296,6 +296,15 @@ impl AppConfig {
         }
     }
 
+    /// Reload under an exclusive cross-process file handle and save only this calibration's changes. The lock file stays in place:
+    /// Windows releases the handle when a process exits, including after a crash. No lock is held while measuring or prompting.
+    pub(crate) fn update(path: &Path, apply: impl FnOnce(&mut Self)) -> Result<(), String> {
+        let _held = settings_file::lock(path)?;
+        let mut config = Self::load_to_save(path)?;
+        apply(&mut config);
+        config.save(path)
+    }
+
     /// The config at `path` for a run's setup, which may save a calibration over it: `load`'s, and, when the file is there but couldn't be
     /// read or isn't a config, what was wrong with it and what became of its last good copy, for the setup to say. One that isn't a
     /// config is kept aside first (`settings_file::keep_aside`), so a calibration saved since loses nothing of it.
@@ -682,6 +691,24 @@ mod tests {
         AppConfig { machine_id: Some("over it".to_string()), ..Default::default() }.save(&path).unwrap();
         assert_eq!(AppConfig::load(&path).machine_id.as_deref(), Some("over it"));
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "no temp, nothing kept aside, no copy");
+    }
+
+    #[test]
+    fn concurrent_updates_keep_both_fields_and_the_backup() {
+        let dir = crate::results::TempDir::new("calibration-update");
+        let path = PathBuf::from(dir.file("tmr-cfg.json"));
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                AppConfig::update(&path, |c| c.memory_id = Some("memory".into())).unwrap();
+            });
+            barrier.wait();
+            AppConfig::update(&path, |c| c.machine_id = Some("machine".into())).unwrap();
+        });
+        let saved = AppConfig::load(&path);
+        assert_eq!((saved.memory_id.as_deref(), saved.machine_id.as_deref()), (Some("memory"), Some("machine")));
+        assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(settings_file::backup_of(&path)).unwrap());
     }
 
     #[test]

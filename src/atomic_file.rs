@@ -215,7 +215,7 @@ fn handle(file: &File) -> HANDLE {
 }
 
 /// The Win32 error a `windows` call failed with, as std's: HRESULT_FROM_WIN32 puts it in the low word under facility 7
-fn os_error(e: windows::core::Error) -> io::Error {
+pub(crate) fn os_error(e: windows::core::Error) -> io::Error {
     let hr = e.code().0 as u32;
     io::Error::from_raw_os_error(if hr & 0xFFFF_0000 == 0x8007_0000 { (hr & 0xFFFF) as i32 } else { hr as i32 })
 }

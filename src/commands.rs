@@ -740,7 +740,10 @@ fn calibrate(args: &[String], out: &mut dyn Write, confirm: &mut dyn FnMut(&str)
     let command = args[1].as_str();
     // Where it saves (tmr-cfg.json, in TMR's home), checked before it measures, unless it won't save (TODO 104): not found out after
     if checks_the_save(command, save.choice)
-        && let Err(e) = crate::home::can_save(&crate::app_config::AppConfig::default_path())
+        && let Err(e) = {
+            let path = crate::app_config::AppConfig::default_path();
+            crate::settings_file::lock(&path).and_then(|_held| crate::home::can_save(&path))
+        }
     {
         writeln!(out, "❌ {e}")?;
         return Ok(RunStatus::NotRun);
@@ -834,7 +837,7 @@ fn calibrate_cache(
 
             // Save to tmr-cfg.json — compare with existing if present
             let cfg_path = crate::app_config::AppConfig::default_path();
-            let mut app_config = match stored_config(&cfg_path, save) {
+            let app_config = match stored_config(&cfg_path, save) {
                 Ok(config) => config,
                 Err(e) => {
                     writeln!(out, "❌ Failed to save calibration: {}", e)?;
@@ -844,10 +847,10 @@ fn calibrate_cache(
             let stored = app_config.calibration.is_some();
             let should_save = prompt_calibration_save(&app_config.calibration, &results, "cache", out, save)?;
             if should_save {
-                app_config.update_machine_id(system_info, smbios);
-                app_config.calibration = Some(results.clone());
-                // A save that was asked for and failed is the command's failure (exit 2), as a script would want to know
-                if let Err(e) = app_config.save(&cfg_path) {
+                if let Err(e) = crate::app_config::AppConfig::update(&cfg_path, |stored| {
+                    stored.update_machine_id(system_info, smbios);
+                    stored.calibration = Some(results.clone());
+                }) {
                     writeln!(out, "❌ Failed to save calibration: {}", e)?;
                     return Ok(RunStatus::NotRun);
                 }
@@ -891,7 +894,7 @@ fn calibrate_seal(
         Ok(seal) => {
             crate::calibration::display_seal_calibration(&seal, cache_info, out)?;
             let cfg_path = crate::app_config::AppConfig::default_path();
-            let mut app_config = match stored_config(&cfg_path, save) {
+            let app_config = match stored_config(&cfg_path, save) {
                 Ok(config) => config,
                 Err(e) => {
                     writeln!(out, "❌ Failed to save seal calibration: {}", e)?;
@@ -900,8 +903,9 @@ fn calibrate_seal(
             };
             let stored = app_config.seal_calibration.is_some();
             if prompt_seal_calibration_save(&app_config.seal_calibration, &seal, out, save)? {
-                app_config.set_seal_calibration(seal, system_info, smbios);
-                if let Err(e) = app_config.save(&cfg_path) {
+                if let Err(e) =
+                    crate::app_config::AppConfig::update(&cfg_path, |stored| stored.set_seal_calibration(seal, system_info, smbios))
+                {
                     writeln!(out, "❌ Failed to save seal calibration: {}", e)?;
                     return Ok(RunStatus::NotRun);
                 }

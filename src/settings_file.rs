@@ -82,6 +82,45 @@ fn make_folder(path: &Path) -> Result<(), String> {
     path.parent().map_or(Ok(()), |folder| fs::create_dir_all(folder).map_err(|e| format!("Couldn't make {} ({e})", folder.display())))
 }
 
+/// Hold this name across a calibration's reload, merge and save, including the first legacy import. The sidecar survives a crash;
+/// its exclusive Windows handle does not. In an old install whose executable directory takes no new files, lock one byte far past
+/// the end of the existing config and disallow renaming it while the legacy in-place update runs.
+pub(crate) fn lock(path: &Path) -> Result<fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::time::{Duration, Instant};
+
+    use windows::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, HANDLE};
+    use windows::Win32::Storage::FileSystem::{FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE, LockFile};
+    make_folder(path)?;
+    let legacy = path.parent() == Some(crate::home::dir());
+    let name = if legacy { path.to_owned() } else { path.with_added_extension("lock") };
+    let acquire = || -> std::io::Result<fs::File> {
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+        if legacy {
+            let file = opts.share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0).open(&name)?;
+            // SAFETY: this handle remains open through the transaction; the byte at offset 2^32 is outside the settings data.
+            unsafe { LockFile(HANDLE(file.as_raw_handle()), 0, 1, 1, 0) }.map_err(atomic_file::os_error)?;
+            Ok(file)
+        } else {
+            opts.write(true).create(true).truncate(false).share_mode(0).open(&name)
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match acquire() {
+            Err(e)
+                if [ERROR_SHARING_VIOLATION.0 as i32, ERROR_LOCK_VIOLATION.0 as i32].contains(&e.raw_os_error().unwrap_or(0))
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            result => return result.map_err(|e| format!("Couldn't lock {} for the settings update: {e}", name.display())),
+        }
+    }
+}
+
 /// Saves `bytes` as the settings file `path`, whole (`atomic_file::write`: in place, flushed, where the temp can't be made), its folder
 /// made first; then its last good copy (`backup_of`), the same bytes, whole too (the module's doc). A copy that can't be written leaves
 /// the save done, which the log says: where `settings\` takes no new file, there may be none.

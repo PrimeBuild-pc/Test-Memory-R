@@ -5112,13 +5112,11 @@ fn calibrate_on_allocation(
     // the pool takes it, after this; the workers, which would be pinned to the calibration's CPUs, don't exist yet
     let results = unsafe { test.run_on(base, bytes, page) }?;
     let path = crate::app_config::AppConfig::default_path();
-    let saved = crate::app_config::AppConfig::load_to_save(&path)
-        .and_then(|mut stored| {
-            stored.update_machine_id(crate::tests::get_system_info(), crate::smbios::get_smbios());
-            stored.calibration = Some(results.clone());
-            stored.save(&path)
-        })
-        .map(|()| path);
+    let saved = crate::app_config::AppConfig::update(&path, |stored| {
+        stored.update_machine_id(crate::tests::get_system_info(), crate::smbios::get_smbios());
+        stored.calibration = Some(results.clone());
+    })
+    .map(|()| path);
     let mut table = Vec::new();
     let _ = crate::calibration::CalibrationTest::display_results(&results, cache_info, &mut table);
     Ok(crate::frontend::CalibratedNow { results, table: String::from_utf8_lossy(&table).into_owned(), saved })
