@@ -241,21 +241,23 @@ mod tests {
     use crate::golden::{capture, check, turn};
 
     /// TODO 72: `--show-results` on the console, each case after a `## case` line with its exit status: a run that finished, by this build,
-    /// and one that never finished, by another (`tmr::test_support::results_file_*`), each its first lines and then the final summary as
-    /// the console showed it at the run's end (the Reporter's test of the summary saved and loaded shows it the same text); and a file that
-    /// doesn't load, with why. The first lines of every other ending are the engine's golden (`show_results_heads`), as are the usage and
-    /// a file that isn't there (`commands`).
+    /// one that never finished, by another, and one saved at the end of setup and not after (`tmr::test_support::results_file_*`), each its
+    /// first lines and then the final summary as the console showed it at the run's end (the Reporter's test of the summary saved and
+    /// loaded shows it the same text); and a file that doesn't load, with why. The first lines of every other ending are the engine's
+    /// golden (`show_results_heads`), as are the usage and a file that isn't there (`commands`).
     #[test]
     fn show_results_prints_as_its_golden() {
         // The results files are built with this machine's detections, which log at their first use
         let _turn = turn();
         let (finished, never_finished) = (tmr::test_support::results_file_finished(), tmr::test_support::results_file_never_finished());
+        let from_setup = tmr::test_support::results_file_from_setup();
         let unreadable = std::env::temp_dir().join(format!("tmr-cli-show-results-{}.json", std::process::id()));
         std::fs::write(&unreadable, r#"{"metadata": {"tmr_version": "0.1.0"}}"#).expect("a temp file");
         let unreadable = unreadable.to_str().expect("a UTF-8 temp path").to_string();
         let cases = [
             ("a run that finished", &finished.path),
             ("a run that never finished", &never_finished.path),
+            ("a run saved at the end of setup", &from_setup.path),
             ("a file that doesn't load", &unreadable),
         ];
         let mut text = String::new();

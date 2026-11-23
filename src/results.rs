@@ -321,9 +321,9 @@ pub fn op_records(ops: &crate::ops::OpTally) -> OpRecords {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverallStats {
-    /// Saved between cycles with the run still going (TODO 72): after the first cycle, then at most once a minute
-    /// (`runner::RESULTS_SAVE_INTERVAL`), and the figures are the cycles that had finished. A run killed, lost or crashed leaves its last
-    /// such save. False in the final save, and in results written before it.
+    /// Saved with the run still going (TODO 72): at the end of setup, with no cycle, then after the first cycle, then at most once a minute
+    /// (`runner::SaveSchedule`), and the figures are the cycles that had finished. A run killed, lost or crashed leaves its last such
+    /// save. False in the final save, and in results written before it.
     #[serde(default)]
     pub in_progress: bool,
     /// How the run ended, in the final save: `completed` (its cycle limit), `time_limit`, `interrupted` (Ctrl+C) or `halted` (errors=halt);
@@ -992,8 +992,11 @@ impl TestComparison {
         let mut run_differences = Vec::new();
         if b.in_progress || c.in_progress {
             let saved = |stats: &OverallStats| {
-                let state = if stats.in_progress { "saved mid-run" } else { "finished" };
                 let cycles = stats.cycles_completed;
+                if stats.in_progress && cycles == 0 {
+                    return "saved at the end of setup, before a cycle ended".to_string();
+                }
+                let state = if stats.in_progress { "saved mid-run" } else { "finished" };
                 format!("{state} after {cycles} cycle{}", if cycles == 1 { "" } else { "s" })
             };
             run_differences.push(crate::run_context::RunDifference::new("Results file", saved(b), saved(c), false));

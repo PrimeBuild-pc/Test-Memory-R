@@ -222,3 +222,13 @@ skip-cores=0`, `TMR_HOME` a scratch folder:
 - **Run 2, killed** (`taskkill /F`) after its first save: "The run never finished: it was killed or crashed, unless it is still
   running; its figures are up to its last saved cycle, 1".
 - **`--compare-results` of the two**: "Plan Changes: none, the same 11 steps in both", the mid-run save flagged, each step matched.
+
+## 2026-11-23: a save at the end of setup too (forum feedback)
+
+A run that crashed in its first cycle (10 to 25 minutes with a TM5 config) left no results file: the first save was cycle 1's. Now
+the file is saved once more, at the end of setup, just before cycle 1 starts (`runner::SavePoint::Setup`): in progress, no cycle,
+no steps. The rest of A's schedule is as it was (`runner::SaveSchedule`): cycle 1's save is made whatever came before it, then a
+cycle's end once 60 s have passed since the last cycle's save, then the final save; the setup's save isn't counted. A's save is
+`runner::save_in_progress` now. Such a file reads in `--show-results` ("its file is from the end of setup, before its first cycle
+ended, so it has no figures"), `--compare-results` and the Compare tab ("saved at the end of setup, before a cycle ended") and
+`--sanitize` (`runner::tests::a_results_file_from_the_end_of_setup_reads_everywhere`, the CLI's `show_results.txt`).

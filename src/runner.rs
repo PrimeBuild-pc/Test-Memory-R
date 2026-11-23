@@ -1383,8 +1383,8 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
     );
 
     let mut cycles_done = 0u32;
-    // When the results were last saved between cycles (TODO 72)
-    let mut last_save = suite_start;
+    // When the results are saved before the run's end (TODO 72)
+    let mut saves = SaveSchedule::new(suite_start);
     let outcome = loop {
         if cycle_limit.is_some_and(|limit| cycles_done >= limit) {
             break RunOutcome::Completed;
@@ -1397,12 +1397,17 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
         }
 
         let cycle = cycles_done + 1;
+        // Setup is over and the first cycle runs next: a file now, in progress with no cycle, so a run that crashes in its first cycle
+        // (10 to 25 minutes with a TM5 config) leaves one too
+        if cycle == 1 {
+            save_if_due(&test_run_result, SavePoint::Setup, &mut saves, suite_start, &progress.whea);
+        }
         progress.start_new_cycle(cycle);
         fe.event(Run::CycleStarted { cycle, limit: cycle_limit }.into());
 
         // Execute all tests in sequence for this cycle
         let end = execute_test_cycle(&cycle_ctx, cycle as u64);
-        last_save = after_cycle(&end, cycle, &test_run_result, &progress.whea, suite_start, last_save, fe.as_ref());
+        after_cycle(&end, cycle, &test_run_result, &progress.whea, suite_start, &mut saves, fe.as_ref());
         if let Some(stop) = end.stop {
             break stop;
         }
@@ -5268,39 +5273,90 @@ fn display_and_save_results(
     }
 }
 
-/// A cycle's end, in the cycle loop. The results are saved between cycles when a save is due (TODO 72), so a run killed, lost or crashed
+/// A cycle's end, in the cycle loop. The results are saved when a save is due (`SaveSchedule`, TODO 72), so a run killed, lost or crashed
 /// from then on still leaves the cycles saved so far; then the cycle's end is shown, a partial one too, `partial` as its results record it
-/// (TODO 29). Returns when the results were last saved: now, or `last_save` when this cycle's weren't.
+/// (TODO 29).
 fn after_cycle(
     end: &CycleEnd, cycle: u32, test_run_result: &Mutex<TestRunResult>, whea: &crate::whea::WheaMonitor, suite_start: Instant,
-    last_save: Instant, fe: &dyn Frontend,
-) -> Instant {
-    let saved = if results_save_due(cycle, end.stop.is_some(), last_save.elapsed()) {
-        save_after_cycle(test_run_result, cycle, suite_start.elapsed(), whea);
-        Instant::now()
-    } else {
-        last_save
-    };
+    saves: &mut SaveSchedule, fe: &dyn Frontend,
+) {
+    save_if_due(test_run_result, SavePoint::Cycle { cycle, stopped: end.stop.is_some() }, saves, suite_start, whea);
     fe.event(Run::CycleFinished { cycle, partial: end.partial }.into());
-    saved
 }
 
-/// The least time between two saves of the results between cycles (TODO 72), but for the first cycle's and a stopped cycle's. Each save
-/// writes the whole file again, which grows with every cycle: a run of cycles of a few seconds that saved after each would spend a growing
-/// part of its time serializing, and write hundreds of GB over a night. Cycles of a minute or more are each saved.
+/// The least time between two saves of the results between cycles (TODO 72), but for the first cycle's and a stopped cycle's; the save at
+/// the end of setup is outside it. Each save writes the whole file again, which grows with every cycle: a run of cycles of a few seconds
+/// that saved after each would spend a growing part of its time serializing, and write hundreds of GB over a night. Cycles of a minute or
+/// more are each saved.
 const RESULTS_SAVE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Whether the results are saved after `cycle` (TODO 72): after the first, so a run has a file from then on, after one that `stopped`
-/// early, and after any other once `RESULTS_SAVE_INTERVAL` has passed `since_last_save`.
-fn results_save_due(cycle: u32, stopped: bool, since_last_save: Duration) -> bool {
-    cycle == 1 || stopped || since_last_save >= RESULTS_SAVE_INTERVAL
+/// Where a save of the results before the run's end falls (TODO 72)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavePoint {
+    /// Setup is over and the first cycle runs next: the file has the run's configuration and no cycle
+    Setup,
+    /// `cycle` has ended, `stopped` when it stopped early
+    Cycle { cycle: u32, stopped: bool },
 }
 
-/// Saves the results so far, after a cycle (TODO 72): marked in progress, with no outcome or status yet, for the final save
-/// (`display_and_save_results`) to replace. Silent, and never fatal: a failure is a warning, and the next save tries again.
-fn save_after_cycle(test_run_result: &Mutex<TestRunResult>, cycle: u32, elapsed: Duration, whea: &crate::whea::WheaMonitor) {
+impl std::fmt::Display for SavePoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SavePoint::Setup => write!(f, "at the end of setup"),
+            SavePoint::Cycle { cycle, .. } => write!(f, "after cycle {cycle}"),
+        }
+    }
+}
+
+/// When the results are saved before the run's end (TODO 72): once at the end of setup, so a run that crashes in its first cycle leaves a
+/// file; after the first cycle, so the file has a cycle's figures from then on; after one that stopped early; and after any other once
+/// `RESULTS_SAVE_INTERVAL` has passed since the last cycle's save. The setup's save isn't counted: the first cycle's is made whatever came
+/// before it, and the interval runs from there, as it did before setup saved.
+struct SaveSchedule {
+    /// The last cycle's save, or the suite's start before the first
+    last: Instant,
+}
+
+impl SaveSchedule {
+    fn new(suite_start: Instant) -> Self {
+        SaveSchedule { last: suite_start }
+    }
+
+    /// Whether the results are saved at `point`, `now`
+    fn due(&self, point: SavePoint, now: Instant) -> bool {
+        match point {
+            SavePoint::Setup => true,
+            SavePoint::Cycle { cycle, stopped } => {
+                cycle == 1 || stopped || now.saturating_duration_since(self.last) >= RESULTS_SAVE_INTERVAL
+            }
+        }
+    }
+
+    /// A save made at `point`, done `now`: a cycle's restarts the interval, the setup's doesn't
+    fn saved(&mut self, point: SavePoint, now: Instant) {
+        if let SavePoint::Cycle { .. } = point {
+            self.last = now;
+        }
+    }
+}
+
+/// Saves the results at `point` when `saves` has a save due there (`save_in_progress`), and counts it
+fn save_if_due(
+    test_run_result: &Mutex<TestRunResult>, point: SavePoint, saves: &mut SaveSchedule, suite_start: Instant,
+    whea: &crate::whea::WheaMonitor,
+) {
+    if saves.due(point, Instant::now()) {
+        save_in_progress(test_run_result, point, suite_start.elapsed(), whea);
+        saves.saved(point, Instant::now());
+    }
+}
+
+/// Saves the results so far, at `point` before the run's end (TODO 72): marked in progress, with no outcome or status yet, for the final
+/// save (`display_and_save_results`) to replace; at the end of setup, with no cycle. Silent, and never fatal: a failure is a warning, and
+/// the next save tries again.
+fn save_in_progress(test_run_result: &Mutex<TestRunResult>, point: SavePoint, elapsed: Duration, whea: &crate::whea::WheaMonitor) {
     let Ok(mut result) = test_run_result.lock() else {
-        log::warn!("Couldn't lock the results to save them after cycle {cycle}");
+        log::warn!("Couldn't lock the results to save them {point}");
         return;
     };
     // record=off: nothing to save
@@ -5312,7 +5368,7 @@ fn save_after_cycle(test_run_result: &Mutex<TestRunResult>, cycle: u32, elapsed:
     result.set_whea_totals(whea.counts(), whea.is_active());
     result.overall_stats.in_progress = true;
     if let Err(e) = result.save_atomic(&result.save_path()) {
-        log::warn!("Failed to save the results after cycle {cycle}: {e}");
+        log::warn!("Failed to save the results {point}: {e}");
     }
 }
 
@@ -7557,14 +7613,17 @@ mod tests {
         let test_run_result = Mutex::new(result);
         let whea = crate::whea::WheaMonitor::new();
         let start = Instant::now();
+        let mut saves = SaveSchedule::new(start);
         // The first cycle is saved; the second isn't due, so the last save stands
-        let saved = after_cycle(&end, 1, &test_run_result, &whea, start, start, &fe);
+        after_cycle(&end, 1, &test_run_result, &whea, start, &mut saves, &fe);
+        let saved = saves.last;
         std::fs::remove_file(&fe.path).unwrap();
         let whole = CycleEnd { stop: None, partial: false };
-        assert_eq!(after_cycle(&whole, 2, &test_run_result, &whea, start, saved, &fe), saved, "not due");
+        after_cycle(&whole, 2, &test_run_result, &whea, start, &mut saves, &fe);
+        assert_eq!(saves.last, saved, "not due");
         // A cycle that stopped early is saved
         let stopped = CycleEnd { stop: Some(RunOutcome::Interrupted), partial: true };
-        after_cycle(&stopped, 3, &test_run_result, &whea, start, saved, &fe);
+        after_cycle(&stopped, 3, &test_run_result, &whea, start, &mut saves, &fe);
         assert_eq!(*fe.ends.lock().unwrap(), [(1, false, true), (2, false, false), (3, true, true)]);
     }
 
@@ -7621,7 +7680,9 @@ mod tests {
         let whea = crate::whea::WheaMonitor::new();
 
         // Silent: it has no frontend to tell, and logs nothing but a failure
-        let ((), records) = records_of(|| save_after_cycle(&test_run_result, 2, Duration::from_secs(65), &whea));
+        let ((), records) = records_of(|| {
+            save_in_progress(&test_run_result, SavePoint::Cycle { cycle: 2, stopped: false }, Duration::from_secs(65), &whea)
+        });
         assert!(records.is_empty(), "a save between cycles is silent: {records:?}");
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("\"outcome\"") && !text.contains("\"status\""), "no outcome or status mid-run");
@@ -7665,14 +7726,90 @@ mod tests {
         assert!(!std::path::Path::new(&format!("{path}.tmp")).exists());
     }
 
-    /// TODO 72: the results are saved after the first cycle, after one that stopped early, and after any other once `RESULTS_SAVE_INTERVAL`
-    /// has passed since the last save.
+    /// TODO 72: the results are saved at the end of setup; after the first cycle, however soon after the setup's save, which the interval
+    /// doesn't count; after one that stopped early; and after any other once `RESULTS_SAVE_INTERVAL` has passed since the last cycle's
+    /// save.
     #[test]
-    fn the_results_are_saved_at_most_once_an_interval_between_cycles() {
-        let soon = Duration::from_secs(5);
-        assert!(results_save_due(1, false, soon), "the first cycle");
-        assert!(results_save_due(7, true, soon), "a cycle that stopped early");
-        assert!(!results_save_due(7, false, soon));
-        assert!(results_save_due(7, false, RESULTS_SAVE_INTERVAL));
+    fn the_results_are_saved_at_setups_end_then_at_most_once_an_interval_between_cycles() {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let cycle = |cycle: u32| SavePoint::Cycle { cycle, stopped: false };
+        let mut saves = SaveSchedule::new(start);
+
+        assert!(saves.due(SavePoint::Setup, at(0)), "the end of setup");
+        saves.saved(SavePoint::Setup, at(1));
+        assert_eq!(saves.last, start, "the setup's save isn't counted");
+        assert!(saves.due(cycle(1), at(2)), "the first cycle, a second after the setup's save");
+        saves.saved(cycle(1), at(2));
+
+        assert!(!saves.due(cycle(2), at(30)), "a cycle 28 s after the first cycle's save");
+        assert!(saves.due(SavePoint::Cycle { cycle: 2, stopped: true }, at(30)), "a cycle that stopped early");
+        assert!(!saves.due(cycle(3), at(61)), "59 s after the first cycle's save");
+        assert!(saves.due(cycle(3), at(62)), "60 s after it");
+        saves.saved(cycle(3), at(62));
+        assert!(!saves.due(cycle(4), at(121)), "the interval runs from the last cycle's save");
+        assert!(saves.due(cycle(4), at(122)));
+        assert!(saves.due(SavePoint::Setup, at(122)), "setup's is never held back");
+
+        // A first cycle that ran over the interval is saved as the first, and the interval runs from its save
+        let mut saves = SaveSchedule::new(start);
+        saves.saved(SavePoint::Setup, at(0));
+        assert!(saves.due(cycle(1), at(900)));
+        saves.saved(cycle(1), at(900));
+        assert!(!saves.due(cycle(2), at(910)));
+    }
+
+    /// TODO 72: the save at the end of setup is in progress with no cycle, no steps, no outcome or status, silent; it reads everywhere TMR
+    /// reads a results file (`--show-results`, which says where it is from, `--compare-results`, the window's Compare tab, `--sanitize`);
+    /// and record=off writes nothing.
+    #[test]
+    fn a_results_file_from_the_end_of_setup_reads_everywhere() {
+        let dir = crate::results::TempDir::new("setup-save");
+        let path = dir.file("TMR_2026-11-02_14-03-07.json");
+        let whea = crate::whea::WheaMonitor::new();
+        let unsaved = |record: crate::results::Record| {
+            let mut result = TestRunResult::new(Default::default());
+            (result.metadata.filename, result.metadata.record) = (path.clone(), record);
+            Mutex::new(result)
+        };
+
+        save_in_progress(&unsaved(crate::results::Record::Off), SavePoint::Setup, Duration::ZERO, &whea);
+        assert!(!std::path::Path::new(&path).exists(), "record=off: no file");
+
+        let ((), records) =
+            records_of(|| save_in_progress(&unsaved(crate::results::Record::Full), SavePoint::Setup, Duration::ZERO, &whea));
+        assert!(records.is_empty(), "silent: {records:?}");
+        let saved = TestRunResult::load_from_file(&path).unwrap();
+        let stats = &saved.overall_stats;
+        assert_eq!((stats.in_progress, stats.cycles_completed, stats.total_runtime_secs), (true, 0, 0));
+        assert!(saved.cycles.is_empty() && stats.per_step_averages.is_empty());
+        assert_eq!((stats.outcome.as_deref(), stats.status.as_deref()), (None, None));
+
+        let shown = crate::commands::saved_run(&path).unwrap_or_else(|e| panic!("--show-results: {e}"));
+        assert!(
+            shown.head.starts_with("⚠️  The run never finished") && shown.head.contains("from the end of setup"),
+            "--show-results: {}",
+            shown.head
+        );
+        assert!(shown.work.is_none(), "no thread ran");
+
+        let finished = crate::test_support::results_file_finished();
+        let console = crate::results::compare_test_results(&finished.path, &path).unwrap_or_else(|e| panic!("--compare-results: {e}"));
+        assert!(console.to_text_report().contains("saved at the end of setup"), "{}", console.to_text_report());
+        let window = crate::commands::compare_results(&path, &finished.path).unwrap_or_else(|e| panic!("the Compare tab: {e}"));
+        assert!(window.text.contains("saved at the end of setup"), "{}", window.text);
+
+        let id = saved.metadata.run_id.expect("a run ID");
+        std::fs::write(dir.file("TMR_2026-11-02_14-03-07.log"), format!("# TMR\n# run id: {id}\n")).unwrap();
+        crate::sanitize::sanitize(&path).unwrap_or_else(|e| panic!("--sanitize: {e}"));
+        let original = std::path::Path::new(&path);
+        let copies: Vec<std::path::PathBuf> = std::fs::read_dir(original.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|file| file.extension().is_some_and(|extension| extension == "json") && file != original)
+            .collect();
+        let [copy] = &copies[..] else { panic!("--sanitize: one copy of the results file, not {copies:?}") };
+        let copy = TestRunResult::load_from_file(copy.to_str().unwrap()).unwrap();
+        assert_eq!((copy.overall_stats.in_progress, copy.cycles.len()), (true, 0), "the sanitized copy");
     }
 }

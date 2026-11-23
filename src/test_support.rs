@@ -763,6 +763,17 @@ pub fn results_file_never_finished() -> ResultsFile {
     ResultsFile::of("show-never-finished", &result)
 }
 
+/// The results file of a run saved at the end of setup and not after (TODO 72's `--show-results`): in progress with no cycle, WHEA
+/// monitored, by this build
+pub fn results_file_from_setup() -> ResultsFile {
+    let mut result = TestRunResult::new(Default::default());
+    result.finalize(Duration::ZERO);
+    result.set_whea_totals(crate::whea::WheaCounts::default(), true);
+    stamped(&mut result);
+    result.overall_stats.in_progress = true;
+    ResultsFile::of("show-from-setup", &result)
+}
+
 /// `result` as a run started at 2026-11-02 14:03:07 +10:00 saves it: the start, the file's name and the run ID, which the clock and the OS
 /// give a run, fixed for a golden. Its build stays the one it has (`TestRunResult::new` gives this one).
 pub(crate) fn stamped(result: &mut TestRunResult) {
