@@ -1750,6 +1750,42 @@ fn tm5_section_keys(section: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// `text` trimmed as `GetPrivateProfileString` trims a line, a section's name, a key and a value: every character from NUL to the space
+/// at both ends (measured, review of the `.cfg` warnings: a crash's run of NULs before a header or a key, or after a value, is read past),
+/// not Unicode's other spaces, nor DEL
+fn ini_trim(text: &str) -> &str {
+    text.trim_matches(|c: char| c <= ' ')
+}
+
+/// A `.cfg`'s bytes as text, and the line of the first that isn't UTF-8, if any. `GetPrivateProfileStringA` reads any bytes, so they
+/// must load, as an error stopped them: UTF-16 with its BOM (Notepad's "Unicode"), else UTF-8, a byte that isn't read as `�`, which a
+/// file saved as ANSI (a comment in another script) has, or garbage a crash left.
+fn cfg_text(bytes: &[u8]) -> (String, Option<usize>) {
+    let utf16 =
+        |pairs: &[[u8; 2]], unit: fn([u8; 2]) -> u16| String::from_utf16_lossy(&pairs.iter().map(|&pair| unit(pair)).collect::<Vec<_>>());
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => (utf16(rest.as_chunks::<2>().0, u16::from_le_bytes), None),
+        [0xFE, 0xFF, rest @ ..] => (utf16(rest.as_chunks::<2>().0, u16::from_be_bytes), None),
+        _ => match std::str::from_utf8(bytes) {
+            Ok(text) => (text.to_string(), None),
+            Err(e) => {
+                let line = bytes[..e.valid_up_to()].iter().filter(|&&b| b == b'\n').count() + 1;
+                (String::from_utf8_lossy(bytes).into_owned(), Some(line))
+            }
+        },
+    }
+}
+
+/// `warnings` logged as `<path>, line N: ...`, the first `MAX_CFG_WARNINGS`, then a count
+fn log_cfg_warnings(path: &str, warnings: &[CfgWarning]) {
+    for CfgWarning { line, message } in warnings.iter().take(MAX_CFG_WARNINGS) {
+        log::warn!("{path}, line {line}: {message}");
+    }
+    if warnings.len() > MAX_CFG_WARNINGS {
+        log::warn!("{path}: {} more warnings like these, not listed", warnings.len() - MAX_CFG_WARNINGS);
+    }
+}
+
 /// A `.cfg` line as a warning quotes it: control characters escaped, so a crash's NULs show, and cut at 40 characters
 fn cfg_quoted(text: &str) -> String {
     let mut quoted = String::new();
@@ -1788,19 +1824,26 @@ impl CfgSection {
 }
 
 impl LegacyConfig {
-    /// A `.cfg` loaded, its warnings logged with its path and line (`parse_reporting`). They are logged when the load then fails too: a
+    /// A `.cfg` loaded, its warnings logged with its path and line (`read_file`). They are logged when the load then fails too: a
     /// damaged header can be why `[Main Section]` is missing.
     pub fn load_from_file(path: &str) -> Result<Self, String> {
-        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read legacy config file: {}", e))?;
-        let mut warnings = Vec::new();
-        let parsed = Self::parse_reporting(&content, &mut warnings);
-        for CfgWarning { line, message } in warnings.iter().take(MAX_CFG_WARNINGS) {
-            log::warn!("{path}, line {line}: {message}");
-        }
-        if warnings.len() > MAX_CFG_WARNINGS {
-            log::warn!("{path}: {} more warnings like these, not listed", warnings.len() - MAX_CFG_WARNINGS);
-        }
+        let (parsed, warnings) = Self::read_file(path)?;
+        log_cfg_warnings(path, &warnings);
         parsed
+    }
+
+    /// The `.cfg` at `path` read (`cfg_text`, a line that isn't UTF-8 warned) and parsed (`parse_reporting`), with its warnings, not
+    /// logged; or why it couldn't be read. `load_config` names the file in either error.
+    fn read_file(path: &str) -> Result<(Result<Self, String>, Vec<CfgWarning>), String> {
+        let bytes = fs::read(path).map_err(|e| format!("Failed to read legacy config file: {e}"))?;
+        let (content, not_utf8) = cfg_text(&bytes);
+        let mut warnings = Vec::new();
+        if let Some(line) = not_utf8 {
+            let message = "isn't UTF-8 text (a file saved as ANSI, or damage): TMR reads each byte that isn't as �".to_string();
+            warnings.push(CfgWarning { line, message });
+        }
+        let parsed = Self::parse_reporting(&content, &mut warnings);
+        Ok((parsed, warnings))
     }
 
     /// `parse_reporting` without its warnings, for a test that checks only what a `.cfg`'s text loads as
@@ -1810,14 +1853,15 @@ impl LegacyConfig {
     }
 
     /// A `.cfg`'s text read as TM5 reads it, through `GetPrivateProfileString` (as measured on Windows Server 2025, build 26100): names
-    /// ignore case and the spaces around them; a repeated key keeps its first value; a repeated section is never read, so only the first
-    /// one's keys count (they aren't merged); a header with no `]` names the section the rest of its line does, and text after the `]` is
-    /// ignored. TMR also drops a leading UTF-8 BOM, which would cost TM5 a header on the first line.
+    /// ignore case; lines, names and values ignore every character from NUL to the space around them (`ini_trim`), a crash's NULs among
+    /// them; a repeated key keeps its first value; a repeated section is never read, so only the first one's keys count (they aren't
+    /// merged); a header with no `]` names the section the rest of its line does, and text after the `]` is ignored. TMR also drops a
+    /// leading UTF-8 BOM, which would cost TM5 a header on the first line.
     ///
-    /// A value must parse. The structure only warns, into `warnings`, whether the load then succeeds or not. It warns on a line that is
-    /// neither a header nor a key=value (TM5's own text before the first header aside), a key before any section, a key or section TM5
-    /// doesn't read, a header with no `]` or with a key=value after it, a repeated section or key, and a Channels or Lock Memory
-    /// Granularity TMR clamps.
+    /// A value must parse. The structure only warns, into `warnings`, whether the load then succeeds or not. It warns on a line with NULs,
+    /// a line that is neither a header nor a key=value (TM5's own text before the first header aside), a key before any section, a key or
+    /// section TM5 doesn't read, a header with no `]` or with a key=value after it, a repeated section or key, and a Channels or Lock
+    /// Memory Granularity TMR clamps.
     pub(crate) fn parse_reporting(content: &str, warnings: &mut Vec<CfgWarning>) -> Result<Self, String> {
         // Where a key=value line goes: nowhere before the first header (TM5's own text is there), into a section TM5 reads, or nowhere,
         // in one it doesn't or a repeated one
@@ -1829,29 +1873,41 @@ impl LegacyConfig {
         let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
         let mut sections: HashMap<String, CfgSection> = HashMap::new();
         let mut place = Place::Preamble;
-        for (index, line) in content.lines().enumerate() {
-            let line = line.trim();
+        for (index, raw) in content.lines().enumerate() {
+            let mut warn = |message: String| warnings.push(CfgWarning { line: index + 1, message });
+            // A run of NULs is what a crash while the file was written leaves: read past at the ends of a line, a name or a value, as
+            // TM5 reads past them, but said, as damage
+            let nuls = raw.matches('\0').count();
+            if nuls > 0 {
+                warn(format!(
+                    "{nuls} NUL byte{}, as a crash while the file was written leaves; TM5 ignores them around a name or a value, and \
+                     so does TMR",
+                    if nuls == 1 { "" } else { "s" }
+                ));
+            }
+            let line = ini_trim(raw);
             // `;` is the INI comment. `#` has always been TMR's; TM5 reads such a line as a key it never asks for, so ignores it too.
             if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
                 continue;
             }
-            let mut warn = |message: String| warnings.push(CfgWarning { line: index + 1, message });
             if let Some(header) = line.strip_prefix('[') {
                 let (name, after) = header.split_once(']').unwrap_or((header, ""));
-                let name = name.trim();
+                let name = ini_trim(name);
+                // Escaped for the text: a name a crash damaged may hold NULs, which a console doesn't show
+                let shown = cfg_quoted(name);
                 if !header.contains(']') {
-                    warn(format!("\"{}\" has no closing ']'; TM5 reads it as the header of [{name}], and so does TMR", cfg_quoted(line)));
+                    warn(format!("\"{}\" has no closing ']'; TM5 reads it as the header of [{shown}], and so does TMR", cfg_quoted(line)));
                 } else if after.contains('=') {
                     // A lost line break. Other text there costs nothing: anta777's three 2020 configs have "[Test6]    `"
                     warn(format!("\"{}\" has a key=value after its ']', which TM5 ignores, and so does TMR", cfg_quoted(line)));
                 }
                 let key = name.to_ascii_lowercase();
                 place = if tm5_section_keys(&key).is_none() {
-                    warn(format!("[{name}] is not a section TM5 reads; TM5 and TMR ignore its keys"));
+                    warn(format!("[{shown}] is not a section TM5 reads; TM5 and TMR ignore its keys"));
                     Place::Unread
                 } else if let Some(first) = sections.get(&key) {
                     warn(format!(
-                        "[{name}] again (first at line {}): TM5 reads only the first, so it ignores the keys under this one, and so does \
+                        "[{shown}] again (first at line {}): TM5 reads only the first, so it ignores the keys under this one, and so does \
                          TMR",
                         first.line
                     ));
@@ -1862,7 +1918,7 @@ impl LegacyConfig {
                 };
                 continue;
             }
-            let setting = line.split_once('=').map(|(key, value)| (key.trim(), value.trim())).filter(|(key, _)| !key.is_empty());
+            let setting = line.split_once('=').map(|(key, value)| (ini_trim(key), ini_trim(value))).filter(|(key, _)| !key.is_empty());
             match (&place, setting) {
                 (Place::Preamble, None) => {}
                 (_, None) => warn(format!("\"{}\" is neither a [section] header nor a key=value; TM5 and TMR ignore it", cfg_quoted(line))),
@@ -1892,7 +1948,7 @@ impl LegacyConfig {
         fn num<T: std::str::FromStr>(section: &CfgSection, name: &str, key: &str, default: T) -> Result<T, String> {
             match section.get(key) {
                 None => Ok(default),
-                Some(s) => s.parse().map_err(|_| format!("TM5 config [{name}] {key}={s}: not a number")),
+                Some(s) => s.parse().map_err(|_| format!("TM5 config [{name}] {key}={}: not a number", cfg_quoted(s))),
             }
         }
         // TM5 writes the pattern parameters in hex, with or without 0x
@@ -1901,7 +1957,8 @@ impl LegacyConfig {
                 None => Ok(default),
                 Some(s) => {
                     let digits = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
-                    u64::from_str_radix(digits, 16).map_err(|_| format!("TM5 config [{name}] {key}={s}: not a 64-bit hex number"))
+                    u64::from_str_radix(digits, 16)
+                        .map_err(|_| format!("TM5 config [{name}] {key}={}: not a 64-bit hex number", cfg_quoted(s)))
                 }
             }
         }
@@ -1924,7 +1981,10 @@ impl LegacyConfig {
                 .split(',')
                 .map(|n| n.trim())
                 .filter(|n| !n.is_empty())
-                .map(|n| n.parse::<u32>().map_err(|_| format!("TM5 config [Main Section] Test Sequence: '{n}' is not a test number")))
+                .map(|n| {
+                    n.parse::<u32>()
+                        .map_err(|_| format!("TM5 config [Main Section] Test Sequence: '{}' is not a test number", cfg_quoted(n)))
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         };
 
@@ -2337,7 +2397,7 @@ impl LegacyConfig {
             "Mem-MirrorV2-256" => Ok("Mem-MirrorV2-256".to_string()),
             "Mem-MirrorV2-512" => Ok("Mem-MirrorV2-512".to_string()),
             "Mem-MirrorV2-Auto" => Ok("Mem-MirrorV2-Auto".to_string()),
-            _ => Err(format!("Unknown legacy test function: '{}'", legacy_name)),
+            _ => Err(format!("Unknown legacy test function: '{}'", cfg_quoted(legacy_name))),
         }
     }
 }
@@ -2350,22 +2410,29 @@ pub fn load_config(path: &str) -> Result<ModernConfig, String> {
     let found = found.display().to_string();
     let path = found.as_str();
 
-    // Try to detect format by file extension or content
-    let config = if path.ends_with(".json") {
+    // Try to detect format by file extension (in any case: `MT.CFG`) or content
+    let extension = std::path::Path::new(path).extension().map(|extension| extension.to_ascii_lowercase());
+    let config = if extension.as_deref() == Some("json".as_ref()) {
         ModernConfig::load_from_file(path)?
-    } else if path.ends_with(".cfg") {
-        // Legacy format (v1.0)
-        let legacy = LegacyConfig::load_from_file(path)?;
-        legacy.to_modern_config()?
+    } else if extension.as_deref() == Some("cfg".as_ref()) {
+        // Legacy format (v1.0). Its errors name it: "Missing [Main Section]" alone doesn't say which file
+        LegacyConfig::load_from_file(path).and_then(|legacy| legacy.to_modern_config()).map_err(|e| format!("{path}: {e}"))?
     } else {
         // Try JSON first, then legacy. If neither parses, say why for both: one of the two messages is the real problem, and it isn't
-        // always the second.
+        // always the second. The .cfg's warnings are logged only when it loads as one: a JSON file that doesn't parse would have its
+        // lines warned as TM5's
         match ModernConfig::load_from_file(path) {
             Ok(config) => config,
-            Err(json_err) => match LegacyConfig::load_from_file(path).and_then(|l| l.to_modern_config()) {
-                Ok(config) => config,
-                Err(cfg_err) => return Err(format!("{path} is neither a TMR JSON config ({json_err}) nor a TM5 .cfg ({cfg_err})")),
-            },
+            Err(json_err) => {
+                let (legacy, warnings) = LegacyConfig::read_file(path).unwrap_or_else(|e| (Err(e), Vec::new()));
+                match legacy.and_then(|l| l.to_modern_config()) {
+                    Ok(config) => {
+                        log_cfg_warnings(path, &warnings);
+                        config
+                    }
+                    Err(cfg_err) => return Err(format!("{path} is neither a TMR JSON config ({json_err}) nor a TM5 .cfg ({cfg_err})")),
+                }
+            }
         }
     };
     config.validate_system()?;
@@ -2899,6 +2966,12 @@ mod tests {
         }
         let seq = "[Main Section]\nTest Sequence=1,x\n[Global Memory Setup]\n";
         assert!(LegacyConfig::parse_legacy_format(seq).unwrap_err().contains("'x'"));
+        // A value's NULs inside it (not around it, which are read past) show, escaped: a console doesn't show them
+        let err = LegacyConfig::parse_legacy_format(&cfg("Parameter=4\0x")).unwrap_err();
+        assert!(err.ends_with("Parameter=4\\0x: not a number"), "{err}");
+        let legacy = LegacyConfig::parse_legacy_format(&cfg("").replace("Function=SimpleTest", "Function=Simple\0Test")).unwrap();
+        let err = legacy.to_modern_config().unwrap_err();
+        assert_eq!(err, "Unknown legacy test function: 'Simple\\0Test'");
     }
 
     /// A `.cfg`'s text parsed, and its warnings as (line, message)
@@ -2962,7 +3035,13 @@ mod tests {
         let test = |legacy: &LegacyConfig, id: u32| legacy.tests.iter().find(|t| t.id == id).map(|t| (t.parameter, t.pattern_mode));
         for (damage, phrase, test1, test2) in [
             ("Enable 1", "\"Enable 1\" is neither a [section] header nor a key=value", (4, 1), None),
-            ("\0\0\0\0", "\"\\0\\0\\0\\0\" is neither a [section] header", (4, 1), None),
+            // A crash's NULs: said, and read past around a name or a value, as GetPrivateProfileString reads past them (review: TMR took
+            // a header or key after them for neither, and a value before them for one that doesn't parse)
+            ("\0\0\0\0", "4 NUL bytes, as a crash while the file was written leaves", (4, 1), None),
+            ("\0\0\0\0Pattern Mode=2", "4 NUL bytes", (4, 2), None),
+            ("Pattern Mode=2\0\0\0\0", "4 NUL bytes", (4, 2), None),
+            ("\0\0[Test2]\nParameter=8", "2 NUL bytes", (4, 1), Some((8, 2))),
+            ("[Test2\0]\nParameter=8", "1 NUL byte,", (4, 1), Some((8, 2))),
             // A misspelt key is ignored, so the setting it meant keeps TM5's default (Test1's Pattern Mode is 1)
             ("Patern Mode=2", "\"Patern Mode=2\" in [Test1]: not a key TM5 reads", (4, 1), None),
             // The first of a repeated key, as TM5
@@ -3001,6 +3080,47 @@ mod tests {
         let (parsed, warnings) = cfg_warnings("Main Section]\nTest Sequence=1\n[Global Memory Setup]\n");
         assert_eq!(parsed.unwrap_err(), "Missing [Main Section]");
         assert_eq!(warnings.iter().map(|w| w.0).collect::<Vec<_>>(), [2]);
+
+        // A header a crash cut off in NULs is the section it names, warned twice; a name with NULs inside is quoted escaped
+        let (parsed, warnings) = cfg_warnings(&cfg("[Test2\0\0\0\0\0\0\0\0\nParameter=8"));
+        assert_eq!(warnings.iter().map(|w| w.0).collect::<Vec<_>>(), [7, 7], "{warnings:?}");
+        assert!(warnings[0].1.starts_with("8 NUL bytes") && warnings[1].1.contains("the header of [Test2]"), "{warnings:?}");
+        assert_eq!(test(&parsed.unwrap(), 2), Some((8, 2)));
+        let (_, warnings) = cfg_warnings(&cfg("[Tset2\0\0x]"));
+        assert!(warnings[1].1.starts_with("[Tset2\\0\\0x] is not a section TM5 reads"), "{warnings:?}");
+        // A file of NULs only, the usual crash damage for one this small, says so on its line
+        let (parsed, warnings) = cfg_warnings(&"\0".repeat(3400));
+        assert_eq!(parsed.unwrap_err(), "Missing [Main Section]");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].0, 1);
+        assert!(warnings[0].1.starts_with("3400 NUL bytes"), "{warnings:?}");
+    }
+
+    /// A `.cfg` that isn't UTF-8 loads as `GetPrivateProfileStringA` reads it (review: one such byte stopped the load, unnamed): UTF-16
+    /// with its BOM, and a byte that isn't UTF-8, a comment saved as ANSI or garbage, read as `�` and warned on its line. A `.cfg` that
+    /// doesn't load names its file, `.CFG` too.
+    #[test]
+    fn a_cfg_that_isnt_utf8_loads_and_its_errors_name_it() {
+        let text = "[Main Section]\r\nTest Sequence=1\r\n[Global Memory Setup]\r\n[Test1]\r\nFunction=SimpleTest\r\n";
+        let utf16le: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let utf16be: Vec<u8> = [0xFE, 0xFF].into_iter().chain(text.encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(cfg_text(&utf16le), (text.to_string(), None));
+        assert_eq!(cfg_text(&utf16be), (text.to_string(), None));
+        let ansi: Vec<u8> = [b"; \xcf\xf0\xe8\r\n".as_slice(), text.as_bytes()].concat();
+        let (read, not_utf8) = cfg_text(&ansi);
+        assert_eq!((read.lines().next(), not_utf8), (Some("; \u{FFFD}\u{FFFD}\u{FFFD}"), Some(1)));
+
+        let dir = crate::results::TempDir::new("cfg-not-utf8");
+        let path = dir.file("ansi.cfg");
+        fs::write(&path, [text.as_bytes(), b"\xff\xfe\x80\x81\r\nParameter=4\r\n".as_slice()].concat()).unwrap();
+        let (parsed, warnings) = LegacyConfig::read_file(&path).unwrap();
+        assert_eq!(parsed.unwrap().tests.iter().find(|t| t.id == 1).map(|t| t.parameter), Some(4));
+        assert_eq!(warnings.iter().map(|w| w.line).collect::<Vec<_>>(), [6, 6], "{warnings:?}");
+        assert!(warnings[0].message.starts_with("isn't UTF-8 text"), "{warnings:?}");
+
+        let upper = dir.file("CRASHED.CFG");
+        fs::write(&upper, "\0".repeat(3400)).unwrap();
+        assert_eq!(load_config(&upper).unwrap_err(), format!("{upper}: Missing [Main Section]"));
     }
 
     /// A Channels or Lock Memory Granularity TMR clamps warns with its line and the value TMR takes.

@@ -269,11 +269,12 @@ effective settings. `patterns=legacy` selects TMR's older numbered adaptations f
 not exact TM5 reproduction.
 
 A crash can damage a `.cfg` with no visible sign, so TMR warns, naming the file and the line,
-about a line that is neither a `[section]` nor a `key=value`, a key or section TM5 doesn't read,
-a key before the first section, a header without its `]`, a repeated section or key, and a
-Channels or Lock Memory Granularity outside what TMR takes. These are warnings, not errors: the
-file loads, read as TM5 reads it. The first of a repeated key or section counts, and a header
-without its `]` still starts its section. A value that doesn't parse stops the run.
+about NUL bytes (what a crash leaves), a line that is neither a `[section]` nor a `key=value`, a
+key or section TM5 doesn't read, a key before the first section, a header without its `]`, a
+repeated section or key, text that isn't UTF-8, and a Channels or Lock Memory Granularity outside
+what TMR takes. These are warnings, not errors: the file loads, read as TM5 reads it. The first of
+a repeated key or section counts, a header without its `]` still starts its section, and NULs and
+spaces around a name or a value are ignored. A value that doesn't parse stops the run.
 
 ### TMR JSON configs
 
