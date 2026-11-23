@@ -989,19 +989,37 @@ impl TestComparison {
             .collect();
 
         // A file saved mid-run first (TODO 72): its figures are only the cycles that had finished, of a run that was killed or lost, or is
-        // still going; and a file with no figures, saved mid-run or finished. Then identity, then configuration: a hardware change is the
-        // more fundamental explanation, and on a new machine the config differences are usually downstream of it.
+        // still going; a finished one whose run stopped before its end (Ctrl+C, errors=halt), whose figures are of less work too (review:
+        // it had no row, the comparison read as one of the same work); and a file with no figures, saved mid-run or finished. Whole cycles
+        // are the plan's steps, so the overall speed compares, the totals plainly not; a last cycle cut short is some of its steps, so the
+        // overall figures are of other work, which invalidates them, as no figures do. Then identity, then configuration: a hardware
+        // change is the more fundamental explanation, and on a new machine the config differences are usually downstream of it.
+        let stopped = |run: &TestRunResult| {
+            let cut = run.cycles.last().is_some_and(|cycle| cycle.partial);
+            let outcome = run.overall_stats.outcome.as_deref();
+            (!run.overall_stats.in_progress && (cut || matches!(outcome, Some("interrupted" | "halted")))).then_some(cut)
+        };
         let mut run_differences = Vec::new();
-        if b.in_progress || c.in_progress || figureless {
-            let saved = |stats: &OverallStats| {
-                let cycles = stats.cycles_completed;
+        if b.in_progress || c.in_progress || figureless || stopped(&baseline).is_some() || stopped(&current).is_some() {
+            let saved = |run: &TestRunResult| {
+                let (stats, cycles) = (&run.overall_stats, run.overall_stats.cycles_completed);
                 let state = if stats.in_progress { "saved mid-run" } else { "finished" };
                 if cycles == 0 {
                     return format!("{state} with no cycle, so no figures");
                 }
-                format!("{state} after {cycles} cycle{}", if cycles == 1 { "" } else { "s" })
+                let after = format!("after {cycles} cycle{}", if cycles == 1 { "" } else { "s" });
+                match stopped(run) {
+                    Some(cut) => format!(
+                        "{} {after}{}",
+                        stats.outcome.as_deref().unwrap_or("stopped"),
+                        if cut { ", the last cut short" } else { "" }
+                    ),
+                    None => format!("{state} {after}"),
+                }
             };
-            run_differences.push(crate::run_context::RunDifference::new("Results file", saved(b), saved(c), figureless));
+            let cut = stopped(&baseline) == Some(true) || stopped(&current) == Some(true);
+            let (was, is) = (saved(&baseline), saved(&current));
+            run_differences.push(crate::run_context::RunDifference::new("Results file", was, is, figureless || cut));
         }
         run_differences.extend(crate::run_context::compare_identity(&baseline.identity, &current.identity));
         run_differences.extend(crate::run_context::compare_config(&baseline.run_config, &current.run_config));
@@ -1503,6 +1521,45 @@ mod tests {
         assert!(report.find("Results file").unwrap() < report.find("Overall Performance Changes").unwrap(), "{report}");
         let both_finished = compare_test_results(&baseline, &baseline).unwrap();
         assert!(both_finished.run_differences.iter().all(|d| d.field != "Results file"));
+    }
+
+    /// A finished run that stopped before its end, halted in its first cycle or interrupted after it, compared with one that ran to its
+    /// end, either way round, has its Results file row, as a file saved mid-run has (review: it had none, and the header said nothing
+    /// invalidated the comparison, its totals, of less work, given as changes). Stopped after whole cycles, like a mid-run file, the row
+    /// doesn't invalidate it; with its last cycle cut short, of some of the plan's steps, it does. A run that completed its cycles, or
+    /// reached its time limit, has none.
+    #[test]
+    fn a_comparison_warns_of_a_finished_run_that_stopped_before_its_end() {
+        let (_, finished) = written_before_todo_72();
+        let stopped = |outcome: &str, cut: bool| {
+            let mut stopped = finished.clone();
+            stopped.cycles.truncate(1);
+            stopped.cycles[0].partial = cut;
+            stopped.finalize(std::time::Duration::from_secs(20));
+            stopped.overall_stats.outcome = Some(outcome.to_string());
+            stopped
+        };
+        let (halted, interrupted) = (stopped("halted", true), stopped("interrupted", false));
+        for (stopped, state, invalidates) in
+            [(&halted, "halted after 1 cycle, the last cut short", true), (&interrupted, "interrupted after 1 cycle", false)]
+        {
+            for (baseline, current) in [(stopped, &finished), (&finished, stopped)] {
+                let comparison = TestComparison::of(baseline.clone(), current.clone());
+                let rows: Vec<_> = comparison.run_differences.iter().filter(|d| d.field == "Results file").collect();
+                let [row] = rows[..] else { panic!("one Results file row: {:?}", comparison.run_differences) };
+                let (figures, other) =
+                    if std::ptr::eq(baseline, stopped) { (&row.baseline, &row.current) } else { (&row.current, &row.baseline) };
+                assert_eq!((figures.as_str(), other.as_str(), row.invalidates), (state, "finished after 2 cycles", invalidates));
+                assert!(comparison.overall_comparison.is_some());
+            }
+        }
+        let ended = |outcome: &str| {
+            let mut ended = finished.clone();
+            ended.overall_stats.outcome = Some(outcome.to_string());
+            ended
+        };
+        let comparison = TestComparison::of(ended("completed"), ended("time_limit"));
+        assert!(comparison.run_differences.iter().all(|d| d.field != "Results file"), "{:?}", comparison.run_differences);
     }
 
     /// A run with no cycle has no figures, saved mid-run (at the end of setup) or finished (stopped before its first step): a comparison
