@@ -12,7 +12,8 @@
 //! a crash mid-save, where a save is in place, damages one of the two at most.
 //!
 //! A file still in the old place, the home itself (an unzipped exe of an earlier version, a copy by hand), is taken into `settings\`
-//! the first time TMR loads or saves it, when `settings\` has none, and left where it was (`path`).
+//! once, the first time TMR loads or saves it, and left where it was (`path`): with its last good copy, so a `settings\` that has had
+//! it holds one of the two, and a file deleted there to start again takes the defaults, not the old one again.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,20 +26,37 @@ pub const FOLDER: &str = "settings";
 /// The settings file `name` (`tmr-cfg.json`, `window.json`): in the home's `settings\`, a file still in the old place taken first
 /// (`in_home`)
 pub fn path(name: &str) -> PathBuf {
-    in_home(crate::home::dir(), name)
+    in_home(crate::home::dir(), name, crate::memory::privileges::is_elevated())
 }
 
-/// `home`'s settings file `name`, in its `settings\`. When that has none and the home itself has one, from before `settings\`, it is
-/// taken first: read, and saved into `settings\` whole, the old one left where it was, as it may be no file TMR can delete (`take`).
+/// `home`'s settings file `name`, in its `settings\`. When that has had none (it holds neither the file nor its last good copy) and the
+/// home itself has one, from before `settings\`, it is taken first: read, and saved into `settings\` whole, with its copy, the old one
+/// left where it was, as it may be no file TMR can delete (`take`). Taken once: a file deleted from `settings\` to start again leaves its
+/// copy, so it takes the defaults, as the guide says, not the old one again (review: the old file outlives the take in an unzipped exe
+/// updated in place, a `TMR_HOME` of the repo, an install whose upgrade couldn't move it).
+///
 /// One that can't be taken is the old one, so nothing of it is lost: one that can't be read is said by its load and isn't saved over,
 /// and in a home where `settings\` can't be made or takes no file (read-only media, an old install's folder) it is read, and saved,
-/// where it is.
-fn in_home(home: &Path, name: &str) -> PathBuf {
+/// where it is. So is every one when TMR runs as administrator, `elevated` (review). In a home users can't write, an install for all
+/// users whose new tmr.exe was copied over the old by hand, without the installer, a `settings\` it made, for this file or for a save of
+/// the other, would hand down only the home's right to read: every user's TMR, finding the file there, could then save it neither whole
+/// nor in place, where the old one, beside tmr.exe, was theirs to write. TMR run as its user takes it: into a `settings\` the installer
+/// made writable by users (`dist/tmr.iss`), or one it makes as that user can.
+fn in_home(home: &Path, name: &str, elevated: bool) -> PathBuf {
     let (path, old) = (home.join(FOLDER).join(name), home.join(name));
     // A link is a file there, for this as for a save: none is followed
     let there = |path: &Path| fs::symlink_metadata(path).is_ok();
-    if there(&path) || !there(&old) {
+    if there(&path) || there(&backup_of(&path)) || !there(&old) {
         return path;
+    }
+    if elevated {
+        log::info!(
+            "{} isn't taken into {}: TMR, run as administrator, takes none, as users may be unable to write what it makes there; it is \
+             read and saved where it is",
+            old.display(),
+            path.display()
+        );
+        return old;
     }
     match take(&old, &path) {
         Ok(()) => {
@@ -52,11 +70,11 @@ fn in_home(home: &Path, name: &str) -> PathBuf {
     }
 }
 
-/// `old`'s bytes saved as `path`, whole, as they are: whether they are a settings file is its load's to say
+/// `old`'s bytes saved as `path` and its last good copy, whole, as they are (`save`): whether they are a settings file is its load's to
+/// say. The copy marks `settings\` as having had the file (`in_home`).
 fn take(old: &Path, path: &Path) -> Result<(), String> {
     let bytes = fs::read(old).map_err(|e| format!("couldn't read it: {e}"))?;
-    make_folder(path)?;
-    atomic_file::write(path, &bytes).map(drop)
+    save(path, &bytes).map(drop)
 }
 
 /// `path`'s folder, made when it isn't there
@@ -113,29 +131,77 @@ mod tests {
     use crate::results::TempDir;
 
     /// A home with nothing in it has its settings files in `settings\`; one still in the old place is taken into it, whole and as it is,
-    /// and left where it was; one already in `settings\` is never taken over, whatever the old place has
+    /// with its last good copy, and left where it was; one already in `settings\` is never taken over, whatever the old place has
     #[test]
     fn a_settings_file_in_the_old_place_is_taken_into_settings() {
         let dir = TempDir::new("settings-take");
         let home = PathBuf::from(dir.file("home"));
         fs::create_dir(&home).unwrap();
         let path = home.join(FOLDER).join("tmr-cfg.json");
-        assert_eq!(in_home(&home, "tmr-cfg.json"), path, "nothing there");
+        assert_eq!(in_home(&home, "tmr-cfg.json", false), path, "nothing there");
         assert!(!home.join(FOLDER).exists(), "a path, nothing made");
 
         let old = home.join("tmr-cfg.json");
         fs::write(&old, b"{\"machine_id\": \"from before settings\"}").unwrap();
-        assert_eq!(in_home(&home, "tmr-cfg.json"), path);
+        assert_eq!(in_home(&home, "tmr-cfg.json", false), path);
         assert_eq!(fs::read(&path).unwrap(), fs::read(&old).unwrap(), "taken as it is");
+        assert_eq!(fs::read(backup_of(&path)).unwrap(), fs::read(&old).unwrap(), "with its last good copy");
         assert!(old.exists() && !with_suffix(&path, ".tmp").exists(), "the old one left, no temp");
 
         fs::write(&old, b"{\"machine_id\": \"a copy by hand\"}").unwrap();
-        assert_eq!(in_home(&home, "tmr-cfg.json"), path);
+        assert_eq!(in_home(&home, "tmr-cfg.json", false), path);
         assert_eq!(fs::read(&path).unwrap(), b"{\"machine_id\": \"from before settings\"}", "not over settings\\'s own");
 
         // Whatever the bytes: whether they are a settings file is the load's to say
         fs::write(home.join("window.json"), [0u8, 0, 0xFF]).unwrap();
-        assert_eq!(fs::read(in_home(&home, "window.json")).unwrap(), [0u8, 0, 0xFF]);
+        assert_eq!(fs::read(in_home(&home, "window.json", false)).unwrap(), [0u8, 0, 0xFF]);
+    }
+
+    /// Taken once (review): a file deleted from `settings\` to start again, straight after the take or after a save, is the defaults,
+    /// not the old one taken again, which is left where it was; its last good copy is left alone too
+    #[test]
+    fn a_settings_file_deleted_to_start_again_is_the_defaults_not_the_old_one() {
+        use crate::app_config::AppConfig;
+        let dir = TempDir::new("settings-take-once");
+        let home = PathBuf::from(dir.file("home"));
+        fs::create_dir(&home).unwrap();
+        let (path, old) = (home.join(FOLDER).join("tmr-cfg.json"), home.join("tmr-cfg.json"));
+        fs::write(&old, b"{\"machine_id\": \"old place, before settings\"}").unwrap();
+        assert_eq!(in_home(&home, "tmr-cfg.json", false), path);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(in_home(&home, "tmr-cfg.json", false), path, "straight after the take");
+        assert_eq!(AppConfig::load(&path).machine_id, None, "the defaults");
+
+        save(&path, b"{\"machine_id\": \"newer, saved in settings\"}").unwrap();
+        fs::remove_file(&path).unwrap();
+        assert_eq!(in_home(&home, "tmr-cfg.json", false), path, "after a save");
+        assert_eq!(AppConfig::load(&path).machine_id, None, "the defaults");
+        assert!(!path.exists() && old.exists());
+        assert_eq!(fs::read(backup_of(&path)).unwrap(), b"{\"machine_id\": \"newer, saved in settings\"}");
+    }
+
+    /// Run as administrator, TMR takes no file into `settings\` (review): in a home users can't write, a folder it made, for this file
+    /// or a save of the other, would be theirs to read only, so the old file is read and saved where it is, `settings\` there or not.
+    /// With no old file, or one already in `settings\`, the path is `settings\`'s, nothing made; run as its user, TMR takes it
+    #[test]
+    fn run_as_administrator_tmr_takes_no_settings_file() {
+        let dir = TempDir::new("settings-elevated");
+        let home = PathBuf::from(dir.file("home"));
+        fs::create_dir(&home).unwrap();
+        let (folder, old) = (home.join(FOLDER), home.join("tmr-cfg.json"));
+        assert_eq!(in_home(&home, "tmr-cfg.json", true), folder.join("tmr-cfg.json"), "no old file");
+        fs::write(&old, b"{}").unwrap();
+        assert_eq!(in_home(&home, "tmr-cfg.json", true), old);
+        assert!(!folder.exists(), "settings\\ not made");
+
+        // Made by a save of the other file, run as administrator too
+        save(&folder.join("window.json"), b"{}").unwrap();
+        assert_eq!(in_home(&home, "tmr-cfg.json", true), old);
+        assert!(!folder.join("tmr-cfg.json").exists(), "not taken");
+
+        assert_eq!(in_home(&home, "tmr-cfg.json", false), folder.join("tmr-cfg.json"));
+        assert_eq!(fs::read(folder.join("tmr-cfg.json")).unwrap(), b"{}", "taken run as its user");
+        assert_eq!(in_home(&home, "tmr-cfg.json", true), folder.join("tmr-cfg.json"), "then settings\\'s, run as administrator too");
     }
 
     /// One that can't be taken is the old one, so nothing of it is lost: unread (held by a program that shares it with no one), its load
@@ -149,7 +215,7 @@ mod tests {
         let old = home.join("window.json");
         fs::write(&old, b"{}").unwrap();
         let held = fs::OpenOptions::new().read(true).share_mode(0).open(&old).unwrap();
-        assert_eq!(in_home(&home, "window.json"), old, "unread");
+        assert_eq!(in_home(&home, "window.json", false), old, "unread");
         assert!(!home.join(FOLDER).join("window.json").exists());
         drop(held);
 
@@ -158,7 +224,7 @@ mod tests {
         fs::create_dir(&home).unwrap();
         fs::write(home.join(FOLDER), b"a file where the folder would be").unwrap();
         fs::write(home.join("tmr-cfg.json"), b"{}").unwrap();
-        assert_eq!(in_home(&home, "tmr-cfg.json"), home.join("tmr-cfg.json"));
+        assert_eq!(in_home(&home, "tmr-cfg.json", false), home.join("tmr-cfg.json"));
     }
 
     /// A save writes the file and its last good copy, the same bytes, making `settings\` first; a copy that can't be written leaves the

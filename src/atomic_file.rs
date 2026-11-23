@@ -47,8 +47,8 @@ fn flushed(file: io::Result<File>, bytes: &[u8]) -> io::Result<()> {
 
 /// `temp` put in `path`'s place, keeping `path`'s permissions (`ReplaceFileW`, which keeps the replaced file's DACL, attributes and
 /// creation time): a rename would leave the file with the temp's, only what its folder hands down. An install for all users gave Users
-/// the right to modify `tmr-cfg.json` and `window.json` on the files themselves, beside tmr.exe, and its upgrade moves them into
-/// `settings\` with that right (`dist/tmr.iss`), so a save by a TMR run as administrator that renamed would take it away where the
+/// the right to modify `tmr-cfg.json` and `window.json` on the files themselves, beside tmr.exe, where TMR still saves them when they
+/// weren't taken into `settings\` (`settings_file`), so a save by a TMR run as administrator that renamed would take it away where the
 /// folder doesn't hand it down, and no later save by a user's TMR could write them, nor make them again (review of the first version,
 /// which renamed). With no file there yet, a rename: there are no permissions to keep.
 fn replace(temp: &Path, path: &Path) -> io::Result<()> {

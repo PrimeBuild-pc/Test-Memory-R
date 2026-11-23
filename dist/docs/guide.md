@@ -303,13 +303,23 @@ Beside `tmr.exe`, in its folder:
 
 TMR writes each file in `settings\` whole: a crash or a power cut while it saves leaves the last
 save as it was. After each save it writes a copy of that save beside it, `tmr-cfg.json.bak` and
-`window.json.bak`. If a file is damaged all the same (edited by hand and broken, or written on a
-share or a drive TMR can only write in place), TMR uses its `.bak` copy instead, says so as the run
-starts (in the window, in its list of problems), and keeps the damaged file as
-`<name>.unreadable` for you to look at or delete. A file you delete is not brought back from its
-copy: TMR starts again from its defaults. The 0.1.2 release and earlier kept `tmr-cfg.json` and
-`window.json` beside `tmr.exe`; the installer moves them into `settings\`, and TMR copies one it
-still finds there the first time it needs it, leaving the old one in place.
+`window.json.bak`. If a file is damaged all the same (edited by hand and broken, say), TMR uses its
+`.bak` copy instead, and keeps the damaged file as `<name>.unreadable` for you to look at or delete.
+For `tmr-cfg.json` it says so as a run starts, among the console's setup lines and on the window's
+System tab (`tmr --show-calibration` names the copy too); for `window.json`, in the window's Errors
+list as the window opens. On a share or a drive where TMR can't make a new file in `settings\`, it
+writes each save in place, so a crash while it saves can still damage the file, and it can make no
+`.bak` there, only rewrite one already there: with none, a damaged file's settings are lost, and
+TMR starts from its defaults.
+
+A file you delete is not brought back from its copy: TMR starts again from its defaults. The 0.1.2
+release and earlier kept `tmr-cfg.json` and `window.json` beside `tmr.exe`; the installer moves them
+into `settings\`, and TMR copies one it still finds there into `settings\` the first time it needs
+it, writing its `.bak` as well, and leaves the old one in place. It copies it only into a
+`settings\` with neither the file nor its `.bak`, so a file you delete there isn't brought back
+from beside `tmr.exe` either. Run as administrator, TMR copies none, as other users might be unable
+to write what it makes in `settings\`: it reads and saves the old file where it is, until TMR runs
+without administrator rights or the installer moves it.
 
 The run's last lines say where its results file went. `tmr --compare-results <one> <other>`
 compares two results files, by their names in `results\` or by their paths. It matches the two

@@ -73,7 +73,8 @@ Source: "{#Stage}\tmr.build.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs
 Source: "{#Stage}\configs\*"; DestDir: "{app}\configs"; Flags: onlyifdoesntexist uninsneveruninstall
 ; The calibrations save into it (src/app_config.rs): an empty one, which TMR reads as no settings, writable by users as settings\ is.
-; Not while one is still beside tmr.exe, which couldn't be moved (MoveOldSettings): TMR takes that one into settings\ when it starts
+; Not while one is still beside tmr.exe, not moved (MoveOldSettings): TMR, run unelevated, takes that one into settings\, as the move
+; would have, when settings\ has had none
 Source: "tmr-cfg.json"; DestDir: "{app}\settings"; Flags: onlyifdoesntexist uninsneveruninstall; Check: NoOldSetting('tmr-cfg.json')
 ; The window's settings save into it as well (crates/tmr-gui/src/settings.rs): an empty one, which is its defaults
 Source: "window.json"; DestDir: "{app}\settings"; Flags: onlyifdoesntexist uninsneveruninstall; Check: NoOldSetting('window.json')
@@ -165,19 +166,28 @@ begin
   Result := not FileExists(OldSetting(Name));
 end;
 
-{ An upgrade from a version that kept Name beside tmr.exe: moved into settings\ when settings\ has none, keeping the right to modify it
-  that the old installer gave Users on the file itself. Setup runs elevated for all users, so it can move what a user's TMR can't. One
-  that can't be moved (another program holding it) stays, and TMR takes a copy into settings\ when it next starts. }
+{ An upgrade from a version that kept Name beside tmr.exe: moved into settings\ when settings\ has had none, as TMR takes one
+  (src/settings_file.rs): it holds neither the file nor its last good copy, Name.bak, which a file deleted there to start again leaves.
+  Then given settings\'s permissions, as a file made there has them (icacls /reset): a move keeps the file's own, which give Users the
+  right to modify it only where the old installer made it. One TMR made again, run as administrator, or copied in by hand has only
+  Program Files' right to read, and a user's TMR could save it neither whole nor in place (review). Setup runs elevated for all users,
+  so it can move what a user's TMR can't. One that can't be moved (another program holding it) stays, and TMR takes a copy into
+  settings\ when it next runs without administrator rights (run as administrator it takes none). }
 procedure MoveOldSetting(Name: String);
 var
   Moved: String;
+  ResultCode: Integer;
 begin
   Moved := ExpandConstant('{app}\settings\') + Name;
-  if not FileExists(OldSetting(Name)) or FileExists(Moved) then exit;
-  if RenameFile(OldSetting(Name), Moved) then
-    Log('Moved ' + OldSetting(Name) + ' into settings\')
-  else
-    Log('Couldn''t move ' + OldSetting(Name) + ' into settings\: TMR takes a copy when it next starts');
+  if not FileExists(OldSetting(Name)) or FileExists(Moved) or FileExists(Moved + '.bak') then exit;
+  if not RenameFile(OldSetting(Name), Moved) then begin
+    Log('Couldn''t move ' + OldSetting(Name) + ' into settings\: TMR takes a copy when it next runs unelevated');
+    exit;
+  end;
+  Log('Moved ' + OldSetting(Name) + ' into settings\');
+  if not ExecAndLogOutput(ExpandConstant('{sys}\icacls.exe'), AddQuotes(Moved) + ' /reset', '', SW_SHOWNORMAL, ewWaitUntilTerminated,
+    ResultCode, nil) or (ResultCode <> 0) then
+    Log('Couldn''t give ' + Moved + ' the permissions of settings\ (icacls: ' + IntToStr(ResultCode) + '): it keeps its own');
 end;
 
 procedure MoveOldSettings;

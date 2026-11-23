@@ -217,6 +217,15 @@ written whole; beside tmr.exe it could only write them in place. An upgrade move
 `settings\` when it has none (the `[Dirs]` entry's `AfterInstall`, before `[Files]` puts the `{}`
 defaults there), and TMR copies one it still finds beside the exe (`src/settings_file.rs`).
 
+Review of that (2026-11-23): both take a file once, into a `settings\` with neither it nor its
+`.bak` (TMR's copy writes the `.bak` too), so a file deleted there to start again isn't brought
+back from beside the exe. The move then runs `icacls /reset` on the file, which gives it
+`settings\`'s ACL: a move keeps the file's own, and one 0.1.x's installer didn't make (an elevated
+TMR made it again) has only Program Files' Users RX. TMR run elevated takes no copy: over an old
+all-users install by hand, without the installer, a `settings\` it made (for the copy, or a save of
+the other file) would be Users RX, and no user's TMR could save there; it reads and saves the old
+file where it is, as before, until an unelevated TMR copies it or the installer moves it.
+
 ## An installer? (weighed 2026-10-24; Inno Setup chosen 2026-10-25, above)
 
 A portable package (the bare `tmr.exe`) puts `tmr` on the PATH, which serves a console user, but

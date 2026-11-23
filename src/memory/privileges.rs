@@ -234,7 +234,9 @@ unsafe fn enable_privilege_in_token(token: HANDLE, privilege_luid: LUID) -> Resu
     }
 }
 
-fn is_elevated() -> bool {
+/// Whether this process runs as administrator (`TokenElevation`): run elevated, or an administrator with no split token (UAC off, the
+/// built-in Administrator). False when it can't be read.
+pub(crate) fn is_elevated() -> bool {
     use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
