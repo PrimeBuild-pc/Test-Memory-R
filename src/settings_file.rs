@@ -271,6 +271,52 @@ mod tests {
         assert_eq!((fs::read(&other).unwrap(), backup_of(&other).exists()), (b"{\"chart\": false}".to_vec(), false));
     }
 
+    /// Two TMRs saving the same file at once (review: two writers, a hundred saves each, showed a reader 27 to 33 files cut short, some
+    /// empty): every save is done, whole, and a reader of the file or its last good copy sees one save or another, whole, never a part
+    /// of one, nor no file
+    #[test]
+    fn saves_at_once_show_a_reader_only_whole_files() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = TempDir::new("settings-at-once");
+        let path = PathBuf::from(dir.file("window.json"));
+        // One length for every save, so a part of one is seen as such
+        let text = |writer: usize, n: usize| format!("{{\"writer\": {writer}, \"save\": {n:03}, \"pad\": \"{}\"}}\n", "x".repeat(16 << 10));
+        save(&path, text(9, 0).as_bytes()).unwrap();
+        let (done, path, text) = (&AtomicBool::new(false), &path, &text);
+        let (writes, seen) = std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                let mut seen = Vec::new();
+                while !done.load(Ordering::Relaxed) {
+                    for file in [path.clone(), backup_of(path)] {
+                        match fs::read(&file) {
+                            Ok(bytes) if bytes.len() == text(0, 0).len() && bytes.ends_with(b"\"}\n") => {}
+                            Ok(bytes) => seen.push(format!("{}: {} bytes", file.display(), bytes.len())),
+                            Err(e) => seen.push(format!("{}: {e}", file.display())),
+                        }
+                    }
+                }
+                seen
+            });
+            let writers: Vec<_> = (0..2)
+                .map(|writer| scope.spawn(move || (0..100).map(|n| save(path, text(writer, n).as_bytes())).collect::<Vec<_>>()))
+                .collect();
+            let writes: Vec<_> = writers.into_iter().flat_map(|writer| writer.join().unwrap()).collect();
+            done.store(true, Ordering::Relaxed);
+            (writes, reader.join().unwrap())
+        });
+        let not_whole: Vec<_> = writes.iter().filter(|written| **written != Ok(Written::Replaced)).collect();
+        assert!(
+            not_whole.is_empty() && seen.is_empty(),
+            "{} of 200 saves not whole ({:?}); the reader saw {} files not whole ({:?})",
+            not_whole.len(),
+            &not_whole[..not_whole.len().min(3)],
+            seen.len(),
+            &seen[..seen.len().min(8)]
+        );
+        let left: Vec<_> = fs::read_dir(dir.file("")).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(left.len(), 2, "the file and its copy, no temp: {left:?}");
+    }
+
     /// A file kept aside is a copy, over an older one, the file itself left to be saved over
     #[test]
     fn a_file_kept_aside_is_a_copy() {
