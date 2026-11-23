@@ -432,9 +432,10 @@ pub struct TestComparison {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverallComparison {
     pub runtime_diff_secs: i64,
-    pub runtime_diff_percent: f64,
+    /// `None` when the baseline has none to take a percentage of, as a file with no cycle (TODO 72)
+    pub runtime_diff_percent: Option<f64>,
     pub throughput_diff_mib_s: f64,
-    pub throughput_diff_percent: f64,
+    pub throughput_diff_percent: Option<f64>,
     pub data_processed_diff_gib: f64,
     pub errors_diff: i64,
 }
@@ -946,17 +947,10 @@ impl TestComparison {
         let throughput_diff_mib_s = c.overall_throughput_mib_s - b.overall_throughput_mib_s;
         let overall_comparison = OverallComparison {
             runtime_diff_secs,
-            runtime_diff_percent: if b.total_runtime_secs > 0 {
-                (runtime_diff_secs as f64 / b.total_runtime_secs as f64) * 100.0
-            } else {
-                0.0
-            },
+            runtime_diff_percent: (b.total_runtime_secs > 0).then_some((runtime_diff_secs as f64 / b.total_runtime_secs as f64) * 100.0),
             throughput_diff_mib_s,
-            throughput_diff_percent: if b.overall_throughput_mib_s > 0.0 {
-                (throughput_diff_mib_s / b.overall_throughput_mib_s) * 100.0
-            } else {
-                0.0
-            },
+            throughput_diff_percent: (b.overall_throughput_mib_s > 0.0)
+                .then_some((throughput_diff_mib_s / b.overall_throughput_mib_s) * 100.0),
             data_processed_diff_gib: c.total_data_processed_gib - b.total_data_processed_gib,
             errors_diff: c.total_errors as i64 - b.total_errors as i64,
         };
@@ -987,19 +981,21 @@ impl TestComparison {
             .collect();
 
         // A file saved mid-run first (TODO 72): its figures are only the cycles that had finished, of a run that was killed or lost, or is
-        // still going. Then identity, then configuration: a hardware change is the more fundamental explanation, and on a new machine the
-        // config differences are usually downstream of it.
+        // still going. One with no cycle has no figures, so nothing in it compares: its first save is at the end of setup, and a first
+        // cycle stopped before its first step saves none either. Then identity, then configuration: a hardware change is the more
+        // fundamental explanation, and on a new machine the config differences are usually downstream of it.
         let mut run_differences = Vec::new();
         if b.in_progress || c.in_progress {
             let saved = |stats: &OverallStats| {
                 let cycles = stats.cycles_completed;
                 if stats.in_progress && cycles == 0 {
-                    return "saved at the end of setup, before a cycle ended".to_string();
+                    return "saved mid-run with no cycle, so no figures".to_string();
                 }
                 let state = if stats.in_progress { "saved mid-run" } else { "finished" };
                 format!("{state} after {cycles} cycle{}", if cycles == 1 { "" } else { "s" })
             };
-            run_differences.push(crate::run_context::RunDifference::new("Results file", saved(b), saved(c), false));
+            let figureless = b.cycles_completed == 0 || c.cycles_completed == 0;
+            run_differences.push(crate::run_context::RunDifference::new("Results file", saved(b), saved(c), figureless));
         }
         run_differences.extend(crate::run_context::compare_identity(&baseline.identity, &current.identity));
         run_differences.extend(crate::run_context::compare_config(&baseline.run_config, &current.run_config));
@@ -1050,16 +1046,19 @@ impl TestComparison {
         if self.plan_changes.differ() {
             report.push_str("  ⚠️  The plans differ (Plan Changes, above): these totals cover different work\n");
         }
+        // A percentage of a baseline of none is no figure: "from 0"
+        let percent = |change: Option<f64>| change.map_or("from 0".to_string(), |change| format!("{change:+.1}%"));
         report.push_str(&format!(
-            "  Runtime: {}{} seconds ({:+.1}%)\n",
+            "  Runtime: {}{} seconds ({})\n",
             if self.overall_comparison.runtime_diff_secs >= 0 { "+" } else { "" },
             self.overall_comparison.runtime_diff_secs,
-            self.overall_comparison.runtime_diff_percent
+            percent(self.overall_comparison.runtime_diff_percent)
         ));
 
         report.push_str(&format!(
-            "  Throughput: {:+.1} MiB/s ({:+.1}%)\n",
-            self.overall_comparison.throughput_diff_mib_s, self.overall_comparison.throughput_diff_percent
+            "  Throughput: {:+.1} MiB/s ({})\n",
+            self.overall_comparison.throughput_diff_mib_s,
+            percent(self.overall_comparison.throughput_diff_percent)
         ));
 
         report.push_str(&format!("  Data Processed: {:+.2} GiB\n", self.overall_comparison.data_processed_diff_gib));

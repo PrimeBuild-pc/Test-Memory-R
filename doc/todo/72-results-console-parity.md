@@ -229,6 +229,14 @@ A run that crashed in its first cycle (10 to 25 minutes with a TM5 config) left 
 the file is saved once more, at the end of setup, just before cycle 1 starts (`runner::SavePoint::Setup`): in progress, no cycle,
 no steps. The rest of A's schedule is as it was (`runner::SaveSchedule`): cycle 1's save is made whatever came before it, then a
 cycle's end once 60 s have passed since the last cycle's save, then the final save; the setup's save isn't counted. A's save is
-`runner::save_in_progress` now. Such a file reads in `--show-results` ("its file is from the end of setup, before its first cycle
-ended, so it has no figures"), `--compare-results` and the Compare tab ("saved at the end of setup, before a cycle ended") and
-`--sanitize` (`runner::tests::a_results_file_from_the_end_of_setup_reads_everywhere`, the CLI's `show_results.txt`).
+`runner::save_in_progress` now. Such a file reads in `--show-results` ("its file has no cycle, so no figures (it is from the end of
+setup, or from a first cycle stopped before its first step)"), `--compare-results` and the Compare tab ("saved mid-run with no
+cycle, so no figures") and `--sanitize` (`runner::tests::a_results_file_from_the_end_of_setup_reads_everywhere`, the CLI's
+`show_results.txt`).
+
+Its review (2026-11-23) found the readers wrong about it, now fixed: the overview said `PASS ✅` for a run that tested nothing (now
+`NO TEST RAN`, the window's verdict "No test ran": `FinalTestSummaryReport::tested`, also for a live run stopped before its first
+step) and the seal "off" for a sealed run (its config's `execution.seal` now, "on, nothing checked"); a comparison with it said
+"none invalidate the comparison" above throughput changes of -100% (its "Results file" row invalidates now) and, with it as the
+baseline, "+0.0%" (a percentage of a baseline of 0 is "from 0"); and the head said "from the end of setup" for a file a first cycle
+stopped before its first step can also leave, when a second Ctrl+C ends TMR before the final save.

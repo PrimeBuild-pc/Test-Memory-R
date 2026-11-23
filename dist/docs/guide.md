@@ -296,7 +296,7 @@ Beside `tmr.exe`, in its folder:
 | | What it holds |
 |---|---|
 | `configs\` | your configs, and the examples |
-| `results\` | one `TMR_<date>_<time>.json` a run, saved as the run goes, so a crash keeps the cycles saved so far |
+| `results\` | one `TMR_<date>_<time>.json` a run, saved at the end of setup and as the run goes, so a crash keeps the cycles saved so far |
 | `logs\` | one `TMR_<date>_<time>.log` a run, the same name as its results file |
 | `tmr-cfg.json` | what TMR's calibrations (`tmr --calibrate-all`) measured, and of which system; `tmr --show-calibration` shows it, and whether it is this machine's |
 
@@ -308,8 +308,10 @@ and those that ran with other settings, then how each test both ran changed.
 `tmr --show-results <file>` shows a run's end again, from its results file (found the same way):
 a line saying how the run ended (it finished, was stopped, reached its time limit or halted on
 errors, with its verdict; or it never finished, killed or crashed, and its figures go up to its
-last saved cycle), which run it was, then the final summary as the console showed it. A file from
-another version of TMR is shown in this version's layout, and TMR says so above it.
+last saved cycle), which run it was, then the final summary as the console showed it. A run that
+crashed in its first cycle leaves the file saved at the end of setup: it has no cycle, so no
+figures, and its result is "no test ran". A file from another version of TMR is shown in this
+version's layout, and TMR says so above it.
 
 A results file describes the system it came from, so runs can be told apart: the CPU, the BIOS
 and the memory modules' part numbers and speeds. A run leaves out the DIMMs' serial numbers, the

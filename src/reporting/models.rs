@@ -276,6 +276,13 @@ pub struct FinalTestSummaryReport {
 }
 
 impl FinalTestSummaryReport {
+    /// Whether any test ran: a cycle, a partial one too, holds a step's figures. With none, as in a results file from the end of setup
+    /// (TODO 72) or a run stopped before its first step, a run without errors didn't pass: it tested nothing, as its verdict says
+    /// (`RunStatus::NotRun`).
+    pub fn tested(&self) -> bool {
+        self.cycles_completed > 0
+    }
+
     /// The run's errors, its tests', the seal's and WHEA's (TODO 109): the seal's are what its checks before the steps' chunks and before
     /// the steps found (each test's `seal_errors`) and its final checks
     pub fn errors(&self) -> crate::progress::ErrorCounts {

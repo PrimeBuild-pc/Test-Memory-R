@@ -763,10 +763,11 @@ pub fn results_file_never_finished() -> ResultsFile {
     ResultsFile::of("show-never-finished", &result)
 }
 
-/// The results file of a run saved at the end of setup and not after (TODO 72's `--show-results`): in progress with no cycle, WHEA
-/// monitored, by this build
+/// The results file of a run saved at the end of setup and not after (TODO 72's `--show-results`): in progress with no cycle, sealed,
+/// WHEA monitored, by this build
 pub fn results_file_from_setup() -> ResultsFile {
     let mut result = TestRunResult::new(Default::default());
+    result.run_config.execution.seal = Some("tmr-256".to_string());
     result.finalize(Duration::ZERO);
     result.set_whea_totals(crate::whea::WheaCounts::default(), true);
     stamped(&mut result);

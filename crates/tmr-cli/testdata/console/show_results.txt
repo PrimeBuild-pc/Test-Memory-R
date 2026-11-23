@@ -104,7 +104,7 @@ All                5: 1 / 1 (0 + 1), 17: 1 / 1 (1 + 0), 40: 1 / 1 (1 + 0)
 ---------------------------------------------------------------------------
 A failed check counts each bit its differences had; a bad word, each bit it had wrong. Every bit is in the results JSON.
 ## a run saved at the end of setup: exit 0
-⚠️  The run never finished: it was killed or crashed, unless it is still running; its file is from the end of setup, before its first cycle ended, so it has no figures
+⚠️  The run never finished: it was killed or crashed, unless it is still running; its file has no cycle, so no figures (it is from the end of setup, or from a first cycle stopped before its first step)
 📄 TMR_2026-11-02_14-03-07, started 2026-11-02 14:03:07 +10:00, run ID 5f0c3a9e81d24b7c9a6e0d13f2b84c57, by this build
 
 ================================================================================
@@ -112,14 +112,14 @@ A failed check counts each bit its differences had; a bad word, each bit it had 
 ----------------------------------------------
 Metric                                 Value  
 ----------------------------------------------
-Result                                PASS ✅  
+Result                           NO TEST RAN  
 Runtime (HH:MM:SS)                  00:00:00  
 Cycles Completed                           0  
 Total Data Processed                0.00 GiB  
 Overall Throughput    0.0 MiB/s (0.00 GiB/s)  
 Total Errors                               0  
   - Test                                   0  
-  - Seal                                 off  
+  - Seal                 on, nothing checked  
   - WHEA                                   0  
 ----------------------------------------------
 ## a file that doesn't load: exit 2

@@ -7763,8 +7763,9 @@ mod tests {
     }
 
     /// TODO 72: the save at the end of setup is in progress with no cycle, no steps, no outcome or status, silent; it reads everywhere TMR
-    /// reads a results file (`--show-results`, which says where it is from, `--compare-results`, the window's Compare tab, `--sanitize`);
-    /// and record=off writes nothing.
+    /// reads a results file (`--show-results`, which says where it is from, with no pass and the seal on, `--compare-results`, the
+    /// window's Compare tab, where it invalidates the comparison and takes no percentage as the baseline, `--sanitize`); and record=off
+    /// writes nothing.
     #[test]
     fn a_results_file_from_the_end_of_setup_reads_everywhere() {
         let dir = crate::results::TempDir::new("setup-save");
@@ -7773,6 +7774,7 @@ mod tests {
         let unsaved = |record: crate::results::Record| {
             let mut result = TestRunResult::new(Default::default());
             (result.metadata.filename, result.metadata.record) = (path.clone(), record);
+            result.run_config.execution.seal = Some("tmr-256".to_string());
             Mutex::new(result)
         };
 
@@ -7795,12 +7797,14 @@ mod tests {
             shown.head
         );
         assert!(shown.work.is_none(), "no thread ran");
+        assert!(!shown.summary.tested() && shown.summary.seal.is_some(), "no test ran, sealed");
 
         let finished = crate::test_support::results_file_finished();
         let console = crate::results::compare_test_results(&finished.path, &path).unwrap_or_else(|e| panic!("--compare-results: {e}"));
-        assert!(console.to_text_report().contains("saved at the end of setup"), "{}", console.to_text_report());
+        let text = console.to_text_report();
+        assert!(text.contains("⛔ NOT A LIKE-FOR-LIKE") && text.contains("saved mid-run with no cycle"), "{text}");
         let window = crate::commands::compare_results(&path, &finished.path).unwrap_or_else(|e| panic!("the Compare tab: {e}"));
-        assert!(window.text.contains("saved at the end of setup"), "{}", window.text);
+        assert!(window.text.contains("saved mid-run with no cycle") && window.text.contains(" MiB/s (from 0)"), "{}", window.text);
 
         let id = saved.metadata.run_id.expect("a run ID");
         std::fs::write(dir.file("TMR_2026-11-02_14-03-07.log"), format!("# TMR\n# run id: {id}\n")).unwrap();

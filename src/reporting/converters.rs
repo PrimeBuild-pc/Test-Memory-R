@@ -722,7 +722,10 @@ pub fn create_overall_stats_summary_report(result: &crate::results::TestRunResul
     }
 
     let sealed: Vec<&crate::results::CycleSeal> = result.cycles.iter().filter_map(|c| c.seal.as_ref()).collect();
-    let seal = (!sealed.is_empty()).then(|| SealStagesSummary { final_check_errors: sealed.iter().map(|s| s.final_check_errors).sum() });
+    // A sealed run's cycles each carry the seal's stages; one with no cycle (a file from the end of setup, TODO 72, or a run stopped
+    // before its first step) is sealed as its config records (`execution.seal`, TODO 99), with nothing checked yet
+    let sealed_run = !sealed.is_empty() || result.run_config.execution.seal.is_some();
+    let seal = sealed_run.then(|| SealStagesSummary { final_check_errors: sealed.iter().map(|s| s.final_check_errors).sum() });
     // Every operation, the ones the run did none of too (TODO 90)
     let intermediate = crate::ops::Op::ALL
         .iter()

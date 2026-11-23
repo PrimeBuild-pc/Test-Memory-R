@@ -591,16 +591,18 @@ fn sanitize(args: &[String], single: bool, out: &mut dyn Write) -> io::Result<Ru
 
 /// How the run ended, `--show-results`' first line (TODO 72): from its final save, the outcome and the verdict, with `errors` when it
 /// failed or was interrupted, and its cycles, the last one cut short when it stopped partway (`CycleResult::partial`); or, the file still
-/// marked in progress, that it never finished, its figures those of its last saved cycle, or none when it was saved at the end of setup
-/// and not after. A file from before the outcome was saved says only that it ended, and one whose keys this build doesn't know quotes
-/// them.
+/// marked in progress, that it never finished, its figures those of its last saved cycle, or none when it has no cycle: saved at the end
+/// of setup and not after, or (Ctrl+C twice) by a first cycle stopped before its first step. A file from before the outcome was saved
+/// says only that it ended, and one whose keys this build doesn't know quotes them.
 fn ending(result: &TestRunResult, errors: ErrorCounts) -> String {
     let stats = &result.overall_stats;
     let cut_short = result.cycles.last().is_some_and(|cycle| cycle.partial);
     let n = stats.cycles_completed;
     if stats.in_progress {
         let saved = match n {
-            0 => "its file is from the end of setup, before its first cycle ended, so it has no figures".to_string(),
+            0 => "its file has no cycle, so no figures (it is from the end of setup, or from a first cycle stopped before its first \
+                  step)"
+                .to_string(),
             n if cut_short => format!("its figures are up to its last saved cycle, {n}, which was cut short"),
             n => format!("its figures are up to its last saved cycle, {n}"),
         };
