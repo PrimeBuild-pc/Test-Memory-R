@@ -749,6 +749,7 @@ impl Model {
             | Setup::CpuType { .. }
             | Setup::CpuCount { .. }
             | Setup::LargePageDiagnostic { .. }
+            | Setup::ConfigRestored(_)
             | Setup::SealCalibration(_)
             | Setup::CpuTopology { .. } => {}
             Setup::Selection(selection) => {
@@ -2686,18 +2687,19 @@ mod tests {
         assert_eq!(m.opened_report().map(|report| report.title.as_str()), Some("Final summary"));
     }
 
-    /// A tmr-cfg.json that isn't a config: the System tab says so where it would say none is stored, with what became of the file, and
-    /// the window shows the run calibrating
+    /// A tmr-cfg.json that isn't a config, with no last good copy: the System tab says so where it would say none is stored, with what
+    /// became of the file, and the window shows the run calibrating
     #[test]
     fn an_unreadable_config_is_said_where_none_stored_would_be() {
         use tmr::frontend::CacheCalibrationState::Measuring;
-        use tmr::frontend::{MeasureWhy, UnreadableConfig};
+        use tmr::frontend::{LastGoodCopy, MeasureWhy, UnreadableConfig};
         let mut m = model();
         m.start();
         let unreadable = UnreadableConfig::NotAConfig {
-            path: r"C:\Program Files\TMR\tmr-cfg.json".into(),
+            path: r"C:\Program Files\TMR\settings\tmr-cfg.json".into(),
             why: "expected value at line 1 column 1".to_string(),
-            kept: Ok(r"C:\Program Files\TMR\tmr-cfg.json.unreadable".into()),
+            kept: Ok(r"C:\Program Files\TMR\settings\tmr-cfg.json.unreadable".into()),
+            last_good: LastGoodCopy::Absent,
         };
         m.apply(Setup::CacheCalibration(Measuring(MeasureWhy::Unreadable(unreadable))).into());
         assert_eq!(outline(&m.sections.system), [
@@ -2705,6 +2707,31 @@ mod tests {
              kept as tmr-cfg.json.unreadable, measured before the tests"
         ]);
         assert!(m.calibrating());
+    }
+
+    /// A tmr-cfg.json that isn't a config, its last good copy taken: the System tab says so before the calibrations, the copy's, which
+    /// the run takes as any stored one, measuring none
+    #[test]
+    fn a_config_restored_from_its_last_good_copy_is_said_before_the_calibrations() {
+        use tmr::frontend::CacheCalibrationState::Loaded;
+        use tmr::frontend::{LastGoodCopy, UnreadableConfig};
+        let mut m = model();
+        m.start();
+        let restored = UnreadableConfig::NotAConfig {
+            path: r"C:\Program Files\TMR\settings\tmr-cfg.json".into(),
+            why: "expected value at line 1 column 1".to_string(),
+            kept: Ok(r"C:\Program Files\TMR\settings\tmr-cfg.json.unreadable".into()),
+            last_good: LastGoodCopy::Taken,
+        };
+        m.apply(Setup::ConfigRestored(restored).into());
+        let at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 20, 9, 5, 0).unwrap();
+        m.apply(Setup::CacheCalibration(Loaded { at }).into());
+        assert_eq!(outline(&m.sections.system), [
+            "tmr-cfg.json was unreadable (expected value at line 1 column 1), so its calibrations are taken from its last good copy, \
+             tmr-cfg.json.bak; it is kept as tmr-cfg.json.unreadable",
+            "Cache calibration: loaded (2026-11-20 09:05)"
+        ]);
+        assert!(!m.calibrating());
     }
 
     /// A section's outline: each table's title, each line or heading as it is

@@ -591,8 +591,16 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     let mut calibrate_first = None;
     if calibrate != "off" {
         let cfg_path = crate::app_config::AppConfig::default_path();
-        // A file there but unread is said, one that isn't a config kept aside first, before the calibration measured is saved over it
+        // A file there but unread is said, one that isn't a config kept aside first, before the calibration measured is saved over it;
+        // when its last good copy was taken, on a line of its own, and the run goes by the copy's calibrations
         let (app_config, unreadable) = crate::app_config::AppConfig::load_for_setup(&cfg_path);
+        let unreadable = match unreadable {
+            Some(restored) if *restored.last_good() == crate::frontend::LastGoodCopy::Taken => {
+                fe.event(Setup::ConfigRestored(restored).into());
+                None
+            }
+            unreadable => unreadable,
+        };
         let valid = app_config.is_calibration_valid(system_info, smbios);
         let stored = app_config.calibration.as_ref().filter(|_| valid);
         // The one stored, until a new one is in
@@ -828,7 +836,7 @@ fn load_seal_calibration(
 
 /// What a run does with the cache calibration before its tests under `calibrate` (not off), and what the setup says of it: `stored`,
 /// tmr-cfg.json's when it is this machine's; `others`, whether it holds one that isn't; `unreadable`, what was wrong with a file there but
-/// unread (`AppConfig::load_for_setup`), which holds none the run can take, whatever `calibrate` says
+/// unread whose last good copy wasn't taken (`AppConfig::load_for_setup`), which holds none the run can take, whatever `calibrate` says
 fn cache_calibration_first(
     calibrate: &str, stored: Option<&crate::calibration::CalibrationResults>, others: bool,
     unreadable: Option<crate::frontend::UnreadableConfig>,
@@ -1316,6 +1324,7 @@ mod tests {
             path: "tmr-cfg.json".into(),
             why: "EOF while parsing an object at line 9 column 0".to_string(),
             kept: Ok("tmr-cfg.json.unreadable".into()),
+            last_good: crate::frontend::LastGoodCopy::Absent,
         };
         let first = |calibrate, stored, others, unreadable| match cache_calibration_first(calibrate, stored, others, unreadable) {
             (Some(Measure), CacheCalibrationState::Measuring(why)) => format!("measure: {why:?}"),

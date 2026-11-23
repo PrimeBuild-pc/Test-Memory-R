@@ -1,5 +1,6 @@
-//! The window's settings (TODO 109): `window.json` in TMR's home (beside tmr.exe, or `TMR_HOME`), beside `tmr-cfg.json`, which is the
-//! engine's record of this machine and its calibrations. What a user sets, and what the window keeps of its last session:
+//! The window's settings (TODO 109): `window.json` in the `settings\` folder of TMR's home (beside tmr.exe, or `TMR_HOME`), beside
+//! `tmr-cfg.json`, which is the engine's record of this machine and its calibrations (`tmr::settings_file`). What a user sets, and what
+//! the window keeps of its last session:
 //!
 //! | key             | what it is                                                                     | default   |
 //! |-----------------|--------------------------------------------------------------------------------|-----------|
@@ -18,12 +19,14 @@
 //! (`placement.rs`). The window writes `chart` as it changes, `parameters` at Start, `size`, `position` and `maximized` as it closes (and
 //! with any other save), and its Settings dialog's (`start_on_open`, `keep_serials`, `theme`) as they change, keeping the rest of the file
 //! (the colours, any notes) as it was, but for `serials`, which windows before `keep_serials` wrote (on, their default), dropped unread.
-//! Keys starting with `_` are notes. A missing file is the defaults; a bad key or value goes in the errors list and keeps its default; a
-//! file that isn't JSON says so, and the window doesn't write over it. A save is written whole (`tmr::atomic_file`), so a PC that goes
-//! down mid-save keeps the last one. `crates/tmr-gui/window.example.json` has every key at its default, a test keeping it so: copy it
-//! into TMR's folder as `window.json` and edit it.
+//! Keys starting with `_` are notes. A missing file is the defaults; a bad key or value goes in the errors list and keeps its default. A
+//! save is written whole, then as the file's last good copy, `window.json.bak` (`tmr::settings_file::save`), so a PC that goes down
+//! mid-save keeps the last one. A file there that can't be read or isn't JSON takes that copy when it reads, which the errors list says,
+//! and is kept as `window.json.unreadable`; with no copy that reads, it is the defaults, and the window doesn't write over it (the user's
+//! to fix). `crates/tmr-gui/window.example.json` has every key at its default, a test keeping it so: copy it into TMR's `settings\` as
+//! `window.json` and edit it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
 
@@ -73,7 +76,7 @@ pub struct Settings {
     pub maximized: bool,
     /// The file as it was read, so a save keeps what the window doesn't own: the colours, notes
     file: Map<String, Value>,
-    /// The file isn't JSON: the window doesn't write over it
+    /// The file can't be read or isn't JSON, and wasn't kept aside: the window doesn't write over it
     unreadable: bool,
 }
 
@@ -97,9 +100,27 @@ impl Default for Settings {
 /// The serials' setting as windows before `keep_serials` wrote it, on by default
 const RETIRED_SERIALS: &str = "serials";
 
-/// `window.json`, in TMR's home
+/// `window.json`, in the `settings\` of TMR's home, one still in the old place taken into it first (`tmr::settings_file::path`)
 fn path() -> PathBuf {
-    tmr::home::dir().join("window.json")
+    tmr::settings_file::path("window.json")
+}
+
+/// `text` as window.json's object, or why it isn't one
+fn object(text: &str) -> Result<Map<String, Value>, String> {
+    match serde_json::from_str::<Value>(text) {
+        Ok(Value::Object(file)) => Ok(file),
+        Ok(_) => Err("not a JSON object".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The settings file at `path` as an object: none when it isn't there, or why it can't be read or isn't one
+fn read(path: &Path) -> Result<Option<Map<String, Value>>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => object(&text).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// A screen coordinate: a whole number of pixels that fits Win32's
@@ -111,32 +132,54 @@ impl Settings {
     /// `window.json`'s settings and colours, over the defaults, and what it gets wrong, for the window's errors list: it opens before
     /// Start sets up its logger, and maybe with no console
     pub fn load() -> (Self, Palettes, Vec<String>) {
-        let mut problems = Vec::new();
-        let (settings, palettes) = match std::fs::read_to_string(path()) {
-            Ok(text) => Self::parse(&text, &mut problems),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::default(), Palettes::DEFAULT),
-            Err(e) => {
-                problems.push(format!("{}: {e}", path().display()));
-                (Settings { unreadable: true, ..Self::default() }, Palettes::DEFAULT)
-            }
-        };
-        (settings, palettes, problems)
+        Self::load_from(&path())
     }
 
-    /// `text`'s settings and colours over the defaults; what it gets wrong into `problems`, each keeping its default
-    fn parse(text: &str, problems: &mut Vec<String>) -> (Self, Palettes) {
-        let mut settings = Self::default();
-        let mut file = match serde_json::from_str::<Value>(text) {
-            Ok(Value::Object(file)) => file,
-            Ok(_) => {
-                problems.push("not a JSON object: the defaults, and the window won't write over it".to_string());
-                return (Settings { unreadable: true, ..settings }, Palettes::DEFAULT);
+    /// The settings file at `path`'s, over the defaults, and what it gets wrong. One there that can't be read or isn't JSON takes its
+    /// last good copy (`tmr::settings_file::backup_of`) when that reads, said first, and is kept aside, the window writing over it only
+    /// once it is (`tmr::settings_file::keep_aside`); with no copy that reads, the defaults, and the window doesn't write over it.
+    fn load_from(path: &Path) -> (Self, Palettes, Vec<String>) {
+        let mut problems = Vec::new();
+        let why = match read(path) {
+            Ok(Some(file)) => {
+                let (settings, palettes) = Self::over_defaults(file, &mut problems);
+                return (settings, palettes, problems);
             }
-            Err(e) => {
-                problems.push(format!("{e}: the defaults, and the window won't write over it"));
-                return (Settings { unreadable: true, ..settings }, Palettes::DEFAULT);
+            Ok(None) => return (Self::default(), Palettes::DEFAULT, problems),
+            Err(why) => why,
+        };
+        let named = |path: &Path| path.file_name().map_or_else(|| path.display().to_string(), |name| name.display().to_string());
+        let backup = tmr::settings_file::backup_of(path);
+        let copy = named(&backup);
+        let file = match read(&backup) {
+            Ok(Some(file)) => file,
+            not_taken => {
+                let no_good =
+                    not_taken.err().map_or_else(String::new, |bad| format!("; its last good copy, {copy}, is no good either ({bad})"));
+                problems.push(format!("{why}: the defaults, and the window won't write over it{no_good}"));
+                return (Settings { unreadable: true, ..Self::default() }, Palettes::DEFAULT, problems);
             }
         };
+        let kept = tmr::settings_file::keep_aside(path);
+        problems.push(match &kept {
+            Ok(kept) => format!("{why}: its last good copy, {copy}, is taken; it is kept as {}", named(kept)),
+            Err(e) => {
+                format!("{why}: its last good copy, {copy}, is taken; it couldn't be kept aside ({e}), so the window won't write over it")
+            }
+        });
+        let (settings, palettes) = Self::over_defaults(file, &mut problems);
+        (Settings { unreadable: kept.is_err(), ..settings }, palettes, problems)
+    }
+
+    /// `text`'s settings and colours over the defaults, what it gets wrong into `problems`; why when it isn't a JSON object
+    #[cfg(test)]
+    fn parse(text: &str, problems: &mut Vec<String>) -> Result<(Self, Palettes), String> {
+        object(text).map(|file| Self::over_defaults(file, problems))
+    }
+
+    /// `file`'s settings and colours over the defaults; what it gets wrong into `problems`, each keeping its default
+    fn over_defaults(mut file: Map<String, Value>, problems: &mut Vec<String>) -> (Self, Palettes) {
+        let mut settings = Self::default();
         // The setting before `keep_serials`, which every window.json has had (`true`, its default, as the window wrote it): not read, so a
         // file written then doesn't keep the serials, and gone from the next save
         file.remove(RETIRED_SERIALS);
@@ -206,13 +249,18 @@ impl Settings {
         text
     }
 
-    /// Writes `window.json`, whole (`tmr::atomic_file::write`: in place where its folder takes no new file, an install for all users),
-    /// unless the file there isn't JSON (the user's to fix); why it couldn't, otherwise
+    /// Writes `window.json`, whole, then its last good copy (`tmr::settings_file::save`: in place where `settings\` takes no new file),
+    /// unless the file there couldn't be read or isn't JSON and wasn't kept aside (the user's to fix); why it couldn't, otherwise
     pub fn save(&self) -> Result<(), String> {
+        self.save_to(&path())
+    }
+
+    /// `save`, to the settings file at `path`
+    fn save_to(&self, path: &Path) -> Result<(), String> {
         if self.unreadable {
             return Ok(());
         }
-        tmr::atomic_file::write(&path(), self.text().as_bytes()).map(drop)
+        tmr::settings_file::save(path, self.text().as_bytes()).map(drop)
     }
 }
 
@@ -225,7 +273,7 @@ mod tests {
         let colours = crate::palette::example_colours();
         format!(
             "{{\n  \"_about\": [\n    \
-             \"Copy this file into TMR's folder (beside tmr.exe, or TMR_HOME) as window.json and edit it.\",\n    \
+             \"Copy this file into the settings folder in TMR's home (beside tmr.exe, or TMR_HOME) as window.json and edit it.\",\n    \
              \"It is read when the window opens. Keys starting with _ are notes.\",\n    \
              \"chart: the throughput chart shows. theme: system, light or dark.\",\n    \
              \"start_on_open: the run starts as the window opens, as --start does.\",\n    \
@@ -259,20 +307,20 @@ mod tests {
             path.display()
         );
         let mut problems = Vec::new();
-        let (settings, palettes) = Settings::parse(&text, &mut problems);
+        let (settings, palettes) = Settings::parse(&text, &mut problems).expect("an object");
         assert_eq!((settings.chart, settings.theme, settings.start_on_open, settings.parameters), (true, Theme::System, false, None));
         assert_eq!((settings.position, settings.maximized), (None, false));
         assert_eq!((palettes.dark, palettes.light, problems.len()), (Palettes::DEFAULT.dark, Palettes::DEFAULT.light, 0), "{problems:?}");
     }
 
     /// The file's settings over the defaults, a bad one keeping its default and saying so; a save keeps what it doesn't own, the colours
-    /// and the notes, and a file that isn't JSON is the defaults and isn't written over
+    /// and the notes; a file that isn't a JSON object says why
     #[test]
     fn a_settings_file_over_the_defaults_and_saved_with_what_it_had() {
         let mut problems = Vec::new();
         let text = r##"{"_note": "mine", "chart": false, "theme": "dark", "start_on_open": "yes", "size": [1600, 1000.4],
                         "parameters": "memory=50%", "colours": {"dark": {"accent": "#FF0000"}}, "zoom": 2}"##;
-        let (mut settings, palettes) = Settings::parse(text, &mut problems);
+        let (mut settings, palettes) = Settings::parse(text, &mut problems).expect("an object");
         assert_eq!((settings.chart, settings.theme, settings.start_on_open), (false, Theme::Dark, false));
         assert_eq!((settings.size, settings.parameters.as_deref()), (Some((1600.0, 1000.4)), Some("memory=50%")));
         assert_eq!(palettes.dark.accent, windows_reactor::Color::rgb(0xFF, 0, 0));
@@ -285,9 +333,51 @@ mod tests {
             (&Value::from("mine"), &Value::from(true), &serde_json::json!([1600.0, 1000.0]), &Value::from("#FF0000"))
         );
 
-        let mut problems = Vec::new();
-        let (broken, _) = Settings::parse("{", &mut problems);
-        assert!(broken.unreadable && problems.len() == 1 && broken.save().is_ok(), "{problems:?}");
+        assert_eq!(Settings::parse("{", &mut Vec::new()).map(drop), Err("EOF while parsing an object at line 1 column 1".to_string()));
+        assert_eq!(Settings::parse("[]", &mut Vec::new()).map(drop), Err("not a JSON object".to_string()));
+    }
+
+    /// A window.json damaged (a crash while it was written in place, an edit gone wrong) takes its last good copy, the version the last
+    /// save wrote, which the errors list says first, and is kept aside, so the window writes over it, and the copy with it. One not there
+    /// is the defaults, the copy left alone; with no copy that reads, the defaults, said, and the window doesn't write over it.
+    #[test]
+    fn a_damaged_settings_file_takes_its_last_good_copy() {
+        let dir = std::env::temp_dir().join(format!("tmr-gui-last-good-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(tmr::settings_file::FOLDER).join("window.json");
+        let (copy, kept) = (tmr::settings_file::backup_of(&path), path.with_file_name("window.json.unreadable"));
+        let saved = Settings { chart: false, theme: Theme::Dark, parameters: Some("plan=stability".to_string()), ..Settings::default() };
+        saved.save_to(&path).expect("saved, settings\\ made");
+        assert_eq!(std::fs::read(&copy).expect("the copy"), std::fs::read(&path).expect("the file"), "the version just written");
+
+        std::fs::write(&path, b"{\n  \"chart\": fal").expect("damaged");
+        let (restored, _, problems) = Settings::load_from(&path);
+        assert_eq!((restored.chart, restored.theme, restored.parameters.as_deref()), (false, Theme::Dark, Some("plan=stability")));
+        assert_eq!(problems, [
+            "EOF while parsing a value at line 2 column 14: its last good copy, window.json.bak, is taken; it is kept as \
+             window.json.unreadable"
+        ]);
+        assert_eq!(std::fs::read(&kept).expect("kept aside"), b"{\n  \"chart\": fal");
+        Settings { chart: true, ..restored }.save_to(&path).expect("written over, as it is kept");
+        let (again, _, problems) = Settings::load_from(&path);
+        assert!(again.chart && problems.is_empty(), "{problems:?}");
+        assert_eq!(std::fs::read(&copy).expect("the copy"), std::fs::read(&path).expect("the file"));
+
+        std::fs::remove_file(&path).expect("deleted");
+        let (fresh, _, problems) = Settings::load_from(&path);
+        assert!(fresh == Settings::default() && problems.is_empty() && copy.exists(), "not there: the defaults, the copy left alone");
+
+        std::fs::write(&path, b"[]").expect("not an object");
+        std::fs::write(&copy, b"{").expect("nor the copy");
+        let (neither, _, problems) = Settings::load_from(&path);
+        assert!(neither.unreadable && neither.chart, "the defaults");
+        assert_eq!(problems, [
+            "not a JSON object: the defaults, and the window won't write over it; its last good copy, window.json.bak, is no good \
+             either (EOF while parsing an object at line 1 column 1)"
+        ]);
+        neither.save_to(&path).expect("nothing to write");
+        assert_eq!(std::fs::read(&path).expect("the file"), b"[]", "not written over");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Where the window closed: its position in whole pixels, either side of the primary screen's top-left, and maximized or not; a bad
@@ -295,7 +385,8 @@ mod tests {
     #[test]
     fn where_the_window_closed_read_and_written() {
         let mut problems = Vec::new();
-        let (mut settings, _) = Settings::parse(r#"{"position": [-1500, 40], "maximized": true, "chart": false}"#, &mut problems);
+        let (mut settings, _) =
+            Settings::parse(r#"{"position": [-1500, 40], "maximized": true, "chart": false}"#, &mut problems).expect("an object");
         assert_eq!((settings.position, settings.maximized, problems.len()), (Some((-1500, 40)), true, 0), "{problems:?}");
         settings.position = Some((2600, -8));
         let saved: Value = serde_json::from_str(&settings.text()).expect("JSON");
@@ -308,12 +399,12 @@ mod tests {
             [r#"{"position": [10.5, 20]}"#, r#"{"position": [10]}"#, r#"{"position": [1, 2, 3]}"#, r#"{"position": [4294967296, 0]}"#]
         {
             let mut problems = Vec::new();
-            let (settings, _) = Settings::parse(bad, &mut problems);
+            let (settings, _) = Settings::parse(bad, &mut problems).expect("an object");
             assert_eq!(settings.position, None, "{bad}");
             assert!(problems.len() == 1 && problems[0].ends_with("is not [x, y], in whole pixels"), "{bad}: {problems:?}");
         }
         let mut problems = Vec::new();
-        let (settings, _) = Settings::parse(r#"{"maximized": "yes"}"#, &mut problems);
+        let (settings, _) = Settings::parse(r#"{"maximized": "yes"}"#, &mut problems).expect("an object");
         assert_eq!((settings.maximized, &problems[..]), (false, &["maximized = \"yes\" is not true or false".to_string()][..]));
 
         let saved: Value = serde_json::from_str(&Settings::default().text()).expect("JSON");
@@ -326,11 +417,11 @@ mod tests {
     #[test]
     fn the_serials_are_kept_only_when_asked_and_the_old_key_is_dropped() {
         let mut problems = Vec::new();
-        let (settings, _) = Settings::parse(r#"{"serials": true, "chart": false}"#, &mut problems);
+        let (settings, _) = Settings::parse(r#"{"serials": true, "chart": false}"#, &mut problems).expect("an object");
         assert_eq!((settings.keep_serials, settings.chart, problems.len()), (false, false, 0), "{problems:?}");
         let saved: Value = serde_json::from_str(&settings.text()).expect("JSON");
         assert_eq!((saved.get("serials"), &saved["keep_serials"]), (None, &Value::from(false)));
-        let (settings, _) = Settings::parse(r#"{"keep_serials": true}"#, &mut problems);
+        let (settings, _) = Settings::parse(r#"{"keep_serials": true}"#, &mut problems).expect("an object");
         assert!(settings.keep_serials && problems.is_empty(), "{problems:?}");
         assert!(!Settings::default().keep_serials);
     }

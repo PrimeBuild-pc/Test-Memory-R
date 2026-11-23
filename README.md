@@ -76,7 +76,8 @@ plan, 3 cycles: any setting starts a run, `tmr` alone lists every setting, and `
 [user guide](dist/docs/guide.md), which the installer puts in TMR's `docs\` folder, has the rest.
 
 TMR keeps its files beside `tmr.exe`: `configs\`, `results\` (one JSON file a run, saved as it
-goes), `logs\` and `tmr-cfg.json` (its calibrations). `TMR_HOME` puts them in another folder. A
+goes), `logs\` and `settings\` (`tmr-cfg.json`, its calibrations, and `window.json`, the window's
+settings, each with a `.bak` copy of its last save). `TMR_HOME` puts them in another folder. A
 results file describes the system it came from; see [Privacy](#privacy) below for what that includes
 and how to leave identifiers out before you post one.
 
@@ -243,11 +244,11 @@ numbers and speeds.
 console still shows the run. It doesn't reach the local calibration cache (below); add `calibrate=off`
 too if you want a run to touch no files whatsoever.
 
-**The calibration cache.** TMR keeps a small local file, `tmr-cfg.json` (beside the exe, or under
-`TMR_HOME`), with the real system UUID and the real per-DIMM serial and part numbers, so it can tell
-when the hardware has changed and a fresh calibration is needed. Leaving the serials out doesn't reach
-it; that only affects what a run displays or writes out. This file stays on your machine and is never
-sent anywhere.
+**The calibration cache.** TMR keeps a small local file, `settings\tmr-cfg.json` (beside the exe, or
+under `TMR_HOME`), with the real system UUID and the real per-DIMM serial and part numbers, so it can
+tell when the hardware has changed and a fresh calibration is needed; `tmr-cfg.json.bak` beside it is
+a copy of its last save. Leaving the serials out doesn't reach them; that only affects what a run
+displays or writes out. These files stay on your machine and are never sent anywhere.
 
 **Sharing a log or results file.** Both describe your system as above. A run's files have no DIMM
 serial numbers, system UUID or fingerprint hashes unless it was given `--serials`, but the log names

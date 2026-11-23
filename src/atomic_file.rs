@@ -4,11 +4,12 @@
 //! last save whole, not part of this one.
 //!
 //! The file is written in place instead, flushed as well, but no longer whole if the system goes down mid-write, when the temp can't be
-//! made or the replace is refused (a viewer holding the file without letting it be deleted). In an install for all users, in Program
-//! Files, the temp can't be made by a user's TMR: users may write `tmr-cfg.json` and `window.json` but make no file beside them
-//! (`dist/tmr.iss`), so there every save of a TMR not run as administrator is in place; whole saves there would take a folder users can
-//! write for these files. Saves are rare (a setting changed, a calibration saved, Start, the window closing, a cycle's results), and none
-//! is in a test's loop.
+//! made or the replace is refused (a viewer holding the file without letting it be deleted). The two settings files are in a folder of
+//! their own, `settings\` (`settings_file`), which an install for all users makes writable by users (`dist/tmr.iss`), so their saves
+//! are whole there too; beside tmr.exe, in Program Files, a user's TMR could make no temp and wrote every save in place. In place stays
+//! for a home whose `settings\` takes no temp: a share, read-only media, an old install's files beside tmr.exe that couldn't be taken
+//! into it. Saves are rare (a setting changed, a calibration saved, Start, the window closing, a cycle's results), and none is in a
+//! test's loop.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
@@ -45,10 +46,11 @@ fn flushed(file: io::Result<File>, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// `temp` put in `path`'s place, keeping `path`'s permissions (`ReplaceFileW`, which keeps the replaced file's DACL, attributes and
-/// creation time): a rename would leave the file with the temp's, only what its folder hands down. In an install for all users the
-/// installer gives Users the right to modify `tmr-cfg.json` and `window.json` on the files themselves (`dist/tmr.iss`), so a save by a
-/// TMR run as administrator that renamed would take that right away, and no later save by a user's TMR could write them, nor make them
-/// again (review of the first version, which renamed). With no file there yet, a rename: there are no permissions to keep.
+/// creation time): a rename would leave the file with the temp's, only what its folder hands down. An install for all users gave Users
+/// the right to modify `tmr-cfg.json` and `window.json` on the files themselves, beside tmr.exe, and its upgrade moves them into
+/// `settings\` with that right (`dist/tmr.iss`), so a save by a TMR run as administrator that renamed would take it away where the
+/// folder doesn't hand it down, and no later save by a user's TMR could write them, nor make them again (review of the first version,
+/// which renamed). With no file there yet, a rename: there are no permissions to keep.
 fn replace(temp: &Path, path: &Path) -> io::Result<()> {
     use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
     use windows::Win32::Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW};
@@ -107,9 +109,10 @@ fn write_by(path: &Path, bytes: &[u8], open: impl Fn(&Path, bool) -> io::Result<
     Ok(Written::Replaced)
 }
 
-/// A folder that takes no new file for as long as it lives, as Program Files is to a user where an install for all users made
-/// `tmr-cfg.json` and `window.json` writable by users (`dist/tmr.iss`): Everyone is denied adding a file to it (`icacls`' WD, a folder's
-/// FILE_ADD_FILE), the folder alone, so what it holds can still be written, and deleted.
+/// A folder that takes no new file for as long as it lives, as Program Files was to a user where an install for all users made
+/// `tmr-cfg.json` and `window.json` beside tmr.exe writable by users, and as a share or a `settings\` made without users' right to add a
+/// file may be: Everyone is denied adding a file to it (`icacls`' WD, a folder's FILE_ADD_FILE), the folder alone, so what it holds can
+/// still be written, and deleted.
 #[cfg(test)]
 pub(crate) struct NoNewFiles<'a>(&'a Path);
 
@@ -182,9 +185,10 @@ mod tests {
         assert_eq!((fs::read(&path).unwrap(), temp.exists()), (b"in place".to_vec(), false));
     }
 
-    /// A save keeps the file's own permissions: an install for all users gives Users the right to modify `tmr-cfg.json` and `window.json`
-    /// on the files themselves (`dist/tmr.iss`), and a save that renamed its temp over the file left only what the folder hands down, so
-    /// one by a TMR run as administrator took that right away (review of the first version). Read as SDDL (`icacls /save`), which names
+    /// A save keeps the file's own permissions: an install for all users gave Users the right to modify `tmr-cfg.json` and `window.json`
+    /// on the files themselves, which its upgrade moves into `settings\` with them (`dist/tmr.iss`), and a save that renamed its temp
+    /// over the file left only what the folder hands down, so one by a TMR run as administrator took that right away (review of the
+    /// first version). Read as SDDL (`icacls /save`), which names
     /// no account in the system's language: `(A;;0x1301bf;;;BU)` is Users' modify, on the file itself (no `ID`, inherited, flag).
     #[test]
     fn a_save_keeps_the_files_own_permissions() {
@@ -205,7 +209,8 @@ mod tests {
         assert_eq!((fs::read(&path).unwrap(), temp_of(&path).exists()), (b"{\"saved\": 1}".to_vec(), false));
     }
 
-    /// In a folder that takes no new file, as Program Files is to a user in an install for all users, a save writes the file in place
+    /// In a folder that takes no new file, as Program Files was to a user's TMR beside tmr.exe in an install for all users, a save writes
+    /// the file in place
     #[test]
     fn a_folder_that_takes_no_new_file_has_its_file_written_in_place() {
         let dir = TempDir::new("atomic-no-new-files");

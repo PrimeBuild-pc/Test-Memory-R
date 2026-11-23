@@ -1720,7 +1720,7 @@ fn settings_content(
             .selected_index(settings.theme.index())
             .on_selection_changed(on_theme),
     ));
-    let kept = TextBlock::new().text("Kept in window.json, in TMR's folder, as each changes").text_wrapping(TextWrapping::Wrap);
+    let kept = TextBlock::new().text("Kept in window.json, in TMR's settings folder, as each changes").text_wrapping(TextWrapping::Wrap);
     StackPanel::new().spacing(14.0).children((start, serials, theme, kept))
 }
 

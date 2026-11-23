@@ -42,9 +42,9 @@ Windows Server 2022 doesn't ship winget: install App Installer first, or the lis
 - **Building for development testing:** `python tools/build_release.py --locked` builds locally and
   records the compiler, SDK, settings and artifact hashes in `target/release/tmr.build.json`; it
   does not wait for CI. Then `.\target\release\tmr.exe`. A built
-  exe keeps its configs, results and logs beside itself; `$env:TMR_HOME = "$PWD"` keeps them in the
-  repository's `results\` and `logs\`, which git ignores, instead of under `target\release\`,
-  which `cargo clean` empties.
+  exe keeps its configs, results, logs and settings beside itself; `$env:TMR_HOME = "$PWD"` keeps them
+  in the repository's `results\`, `logs\` and `settings\`, which git ignores, instead of under
+  `target\release\`, which `cargo clean` empties.
 - **Large pages:** `tmr.exe --setup-large-pages` from an elevated prompt once, then sign out and back in.
 
 ## Build outputs and published crates

@@ -139,6 +139,18 @@ TMR will exit now.
   Calibration: tmr-cfg.json is unreadable (EOF while parsing an object at line 9 column 0), so its calibrations are lost; it couldn't be kept aside (Access is denied. (os error 5)), so the new one is saved over it: measured on this run's memory before its tests, about 2 minutes
 ## a tmr-cfg.json that can't be read
   Calibration: tmr-cfg.json couldn't be read (The process cannot access the file because it is being used by another process. (os error 32)), so the new one isn't saved over it: measured on this run's memory before its tests, about 2 minutes
+## a tmr-cfg.json that isn't a config, nor its last good copy
+  Calibration: tmr-cfg.json was unreadable (EOF while parsing an object at line 9 column 0), and its last good copy, tmr-cfg.json.bak, is no good either (EOF while parsing a value at line 3 column 12), so its calibrations are lost; it is kept as tmr-cfg.json.unreadable: measured on this run's memory before its tests, about 2 minutes
+## a tmr-cfg.json that isn't a config, nor its last good copy, saved over
+  Calibration: tmr-cfg.json is unreadable (EOF while parsing an object at line 9 column 0), and its last good copy, tmr-cfg.json.bak, is no good either (EOF while parsing a value at line 3 column 12), so its calibrations are lost; it couldn't be kept aside (Access is denied. (os error 5)), so the new one is saved over it: measured on this run's memory before its tests, about 2 minutes
+## a tmr-cfg.json that can't be read, nor its last good copy
+  Calibration: tmr-cfg.json couldn't be read (The process cannot access the file because it is being used by another process. (os error 32)), and its last good copy, tmr-cfg.json.bak, is no good either (EOF while parsing a value at line 3 column 12), so the new one isn't saved over it: measured on this run's memory before its tests, about 2 minutes
+## a tmr-cfg.json that isn't a config, its last good copy taken
+  tmr-cfg.json was unreadable (EOF while parsing an object at line 9 column 0), so its calibrations are taken from its last good copy, tmr-cfg.json.bak; it is kept as tmr-cfg.json.unreadable
+## a tmr-cfg.json that isn't a config, its last good copy taken, not kept aside
+  tmr-cfg.json is unreadable (EOF while parsing an object at line 9 column 0), so its calibrations are taken from its last good copy, tmr-cfg.json.bak; it couldn't be kept aside (Access is denied. (os error 5)), so the next save writes over it
+## a tmr-cfg.json that can't be read, its last good copy taken
+  tmr-cfg.json couldn't be read (The process cannot access the file because it is being used by another process. (os error 32)), so its calibrations are taken from its last good copy, tmr-cfg.json.bak, and none measured is saved over it
 ## calibrate=recheck
   Calibration: Loaded (2026-10-20 09:05), rechecked before the tests, about 15 s (calibrate=recheck)
 ## the cache calibration off

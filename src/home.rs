@@ -1,8 +1,9 @@
-//! TMR's home (TODO 104): the one folder that holds what it reads and writes of its own, `configs\`, `results\`, `logs\`, `tmr-cfg.json`
-//! and the window's `window.json` (its settings and colours, TODO 109). It is the real exe's folder (the owner, 2026-10-25), so an
-//! unzipped tmr.exe keeps them beside it as TM5 did, and so does an installed one: for all users, in Program Files, the installer makes
-//! `configs\`, `results\`, `logs\`, `tmr-cfg.json` and `window.json` writable by users (`dist/tmr.iss`). `TMR_HOME` puts the home
-//! elsewhere: for `cargo run`, whose exe is under `target\`, which `cargo clean` empties, and for scripts.
+//! TMR's home (TODO 104): the one folder that holds what it reads and writes of its own, `configs\`, `results\`, `logs\` and
+//! `settings\`, which holds `tmr-cfg.json` and the window's `window.json` (its settings and colours, TODO 109), each with its last good
+//! copy (`settings_file.rs`, the owner, 2026-11-23). It is the real exe's folder (the owner, 2026-10-25), so an unzipped tmr.exe keeps
+//! them beside it as TM5 did, and so does an installed one: for all users, in Program Files, the installer makes those four folders
+//! writable by users, never the exe's folder (`dist/tmr.iss`). `TMR_HOME` puts the home elsewhere, `settings\` and all: for `cargo run`,
+//! whose exe is under `target\`, which `cargo clean` empties, and for scripts.
 //!
 //! Not the current folder, as it was: that is wherever TMR started, the shell's folder, System32 for an Explorer-style launch or an
 //! elevated prompt, Documents over WinRM. A path the user types (`config=`, `--compare-results`) still means the current folder first.
@@ -64,12 +65,16 @@ pub fn prepare() -> Result<(), String> {
     Ok(())
 }
 
-/// Whether TMR can save `path` in its home: write the file when it is there (the installer's `tmr-cfg.json`, writable by users in a
-/// folder that isn't), or make a new one in its folder when it isn't. Opening an existing file to write it, without truncating, changes
-/// nothing; a calibration checks it before it measures, rather than finding out after.
+/// Whether TMR can save `path` in its home: write the file when it is there (one writable by users in a folder that isn't, as an
+/// install for all users made `tmr-cfg.json` beside tmr.exe), or make a new one in its folder when it isn't, the folder made first, as
+/// a save makes it (`settings\`). Opening an existing file to write it, without truncating, changes nothing; a calibration checks it
+/// before it measures, rather than finding out after.
 pub(crate) fn can_save(path: &Path) -> Result<(), String> {
-    let checked =
-        if path.exists() { std::fs::OpenOptions::new().write(true).open(path).map(drop) } else { path.parent().map_or(Ok(()), probe) };
+    let checked = if path.exists() {
+        std::fs::OpenOptions::new().write(true).open(path).map(drop)
+    } else {
+        path.parent().map_or(Ok(()), |folder| std::fs::create_dir_all(folder).and_then(|()| probe(folder)))
+    };
     checked.map_err(|e| cant_write(path, &e))
 }
 
@@ -183,5 +188,8 @@ mod tests {
         std::fs::write(&saved, b"{}").unwrap();
         assert!(can_save(&saved).is_ok(), "the file there");
         assert_eq!(std::fs::read(&saved).unwrap(), b"{}", "untouched by the check");
+        let settings = folder.join(crate::settings_file::FOLDER);
+        assert!(can_save(&settings.join("tmr-cfg.json")).is_ok(), "settings\\ not made yet");
+        assert_eq!(std::fs::read_dir(&settings).unwrap().count(), 0, "made, and empty");
     }
 }

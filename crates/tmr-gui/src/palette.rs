@@ -1,6 +1,6 @@
 //! The colour palette (TODO 7, the owner's note 1: colours are a setting): built-in defaults per light/dark, overridable from the
-//! `colours` of the window's settings, `window.json` in TMR's home (`settings.rs`, TODO 109). The file is read once, when the window opens;
-//! a missing file means the defaults, and a bad key or value goes in the errors list and that one colour keeps its default.
+//! `colours` of the window's settings, `window.json` in TMR's settings folder (`settings.rs`, TODO 109). The file is read once, when the
+//! window opens; a missing file means the defaults, and a bad key or value goes in the errors list and that one colour keeps its default.
 //!
 //! `colours` holds a `"dark"` and/or a `"light"` object, each mapping a key below to a colour string, `"#RRGGBB"` or `"#AARRGGBB"` (alpha
 //! first, as XAML writes it). Keys starting with `_` are ignored, so it can carry notes. Any key left out keeps its default.

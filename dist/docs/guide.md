@@ -119,7 +119,7 @@ The Memory report's 4 KB column says which kind a run took.
   A finished step's row opens its report, and the final summary opens itself as the run ends. The
   Log tab has what the console would show; Plan, System, Threads and Memory what it prints as it
   starts; Compare compares two runs' results files. The window keeps its settings in
-  `window.json` beside tmr.exe: the chart shown or hidden, the theme, whether a run starts as it
+  `settings\window.json` beside tmr.exe: the chart shown or hidden, the theme, whether a run starts as it
   opens (`tmr --gui --start` does that once), whether serial numbers are kept, the last run's
   parameters, its colours, and its size and place on the screen as it closed, maximized or not
   (it opens there again only if that is still on a screen). Settings, in its `•••` menu, sets the
@@ -299,7 +299,17 @@ Beside `tmr.exe`, in its folder:
 | `configs\` | your configs, and the examples |
 | `results\` | one `TMR_<date>_<time>.json` a run, saved at the end of setup and as the run goes, so a crash keeps the cycles saved so far |
 | `logs\` | one `TMR_<date>_<time>.log` a run, the same name as its results file |
-| `tmr-cfg.json` | what TMR's calibrations (`tmr --calibrate-all`) measured, and of which system; `tmr --show-calibration` shows it, and whether it is this machine's |
+| `settings\` | `tmr-cfg.json`, what TMR's calibrations (`tmr --calibrate-all`) measured, and of which system (`tmr --show-calibration` shows it, and whether it is this machine's); `window.json`, the window's settings |
+
+TMR writes each file in `settings\` whole: a crash or a power cut while it saves leaves the last
+save as it was. After each save it writes a copy of that save beside it, `tmr-cfg.json.bak` and
+`window.json.bak`. If a file is damaged all the same (edited by hand and broken, or written on a
+share or a drive TMR can only write in place), TMR uses its `.bak` copy instead, says so as the run
+starts (in the window, in its list of problems), and keeps the damaged file as
+`<name>.unreadable` for you to look at or delete. A file you delete is not brought back from its
+copy: TMR starts again from its defaults. The 0.1.2 release and earlier kept `tmr-cfg.json` and
+`window.json` beside `tmr.exe`; the installer moves them into `settings\`, and TMR copies one it
+still finds there the first time it needs it, leaving the old one in place.
 
 The run's last lines say where its results file went. `tmr --compare-results <one> <other>`
 compares two results files, by their names in `results\` or by their paths. It matches the two
@@ -346,7 +356,7 @@ To keep the files somewhere else, set the `TMR_HOME` environment variable to tha
 ## Uninstalling
 
 Settings > Apps > TMR (Test Memory R), or `winget uninstall Petz.TMR`. Your configs, results, logs
-and `tmr-cfg.json` stay in TMR's folder; delete it when you no longer want them.
+and settings stay in TMR's folder; delete it when you no longer want them.
 
 ## Help
 

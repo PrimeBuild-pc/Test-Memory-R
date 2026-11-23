@@ -152,6 +152,9 @@ pub enum Setup {
     /// (`min_needs_large`) and they aren't usable; and whether this sign-in has the right they need (`right_held`, on or off), which
     /// tells why they aren't: with it, its check failed (most often no 2 MiB page from Windows), and setting the right up again won't help
     LargePageStatus { usable: bool, min_page: String, min_needs_large: bool, right_held: bool },
+    /// tmr-cfg.json was there but unreadable, and the run takes its last good copy, tmr-cfg.json.bak, in its place
+    /// (`LastGoodCopy::Taken`): what the setup says before the calibrations, which are the copy's
+    ConfigRestored(UnreadableConfig),
     /// The cache calibration the tests' sizes take, from tmr-cfg.json
     CacheCalibration(CacheCalibrationState),
     /// The seal calibration `seal-width=auto` takes. Its own event, because checking it against this machine logs
@@ -239,7 +242,8 @@ pub enum CacheCalibrationState {
 /// Why a run measures the cache calibration before its tests (`calibrate=`, TODO 22)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeasureWhy {
-    /// tmr-cfg.json is there but couldn't be read, or isn't a config: under any `calibrate=` but off, as it holds none the run can take
+    /// tmr-cfg.json is there but couldn't be read, or isn't a config, and its last good copy didn't read either: under any `calibrate=`
+    /// but off, as it holds none the run can take
     Unreadable(UnreadableConfig),
     /// `calibrate=auto` or `recheck`, and none stored
     NoneStored,
@@ -252,33 +256,71 @@ pub enum MeasureWhy {
     Always,
 }
 
-/// tmr-cfg.json there at a run's setup but not read (`MeasureWhy::Unreadable`, `AppConfig::load_for_setup`): the run takes none of its
-/// calibrations, and measures the cache's again
+/// tmr-cfg.json there at a run's setup but not read (`AppConfig::load_for_setup`), and what became of its last good copy,
+/// tmr-cfg.json.bak (`settings_file`): taken, the run has the copy's calibrations (`Setup::ConfigRestored`); else it takes none, and
+/// measures the cache's again (`MeasureWhy::Unreadable`)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnreadableConfig {
     /// It couldn't be read (access denied, another program holding it), `why`: left as it is, and not saved over
-    Unread { path: std::path::PathBuf, why: String },
+    Unread { path: std::path::PathBuf, why: String, last_good: LastGoodCopy },
     /// It isn't a config, `why`, as an edit gone wrong leaves one, or a crash while it was written in place (before TMR wrote it whole,
     /// or where it can't, `atomic_file`): copied to `<file>.unreadable`, over an older one, before anything is saved over it, `kept`; or
-    /// why it couldn't be, as in an install for all users, whose folder takes no new file from a user (`dist/tmr.iss`), and then it is
-    /// saved over
-    NotAConfig { path: std::path::PathBuf, why: String, kept: Result<std::path::PathBuf, String> },
+    /// why it couldn't be, as where its folder takes no new file (`settings_file::keep_aside`), and then it is saved over
+    NotAConfig { path: std::path::PathBuf, why: String, kept: Result<std::path::PathBuf, String>, last_good: LastGoodCopy },
+}
+
+/// A settings file's last good copy (`settings_file::backup_of`), looked to when the file is there but unreadable
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LastGoodCopy {
+    /// There is none
+    Absent,
+    /// It is no good either: it couldn't be read, or isn't a config, `why`
+    Bad(String),
+    /// It read, and is taken in the file's place
+    Taken,
 }
 
 impl UnreadableConfig {
-    /// What became of the file, as the console and the window say it before their "measured before the tests": "tmr-cfg.json was
-    /// unreadable (<why>), so its calibrations are lost; it is kept as tmr-cfg.json.unreadable"
+    /// What became of its last good copy
+    pub fn last_good(&self) -> &LastGoodCopy {
+        match self {
+            Self::Unread { last_good, .. } | Self::NotAConfig { last_good, .. } => last_good,
+        }
+    }
+
+    /// What became of the file and its last good copy, as the console and the window say it: before their "measured before the tests"
+    /// when the copy wasn't taken ("tmr-cfg.json was unreadable (<why>), so its calibrations are lost; it is kept as
+    /// tmr-cfg.json.unreadable"), on its own line when it was ("tmr-cfg.json was unreadable (<why>), so its calibrations are taken
+    /// from its last good copy, tmr-cfg.json.bak; it is kept as tmr-cfg.json.unreadable")
     pub fn text(&self) -> String {
         let name = |path: &std::path::Path| path.file_name().map_or_else(|| path.display().to_string(), |name| name.display().to_string());
+        let (path, last_good) = match self {
+            Self::Unread { path, last_good, .. } | Self::NotAConfig { path, last_good, .. } => (path, last_good),
+        };
+        let (file, copy) = (name(path), name(&crate::settings_file::backup_of(path)));
+        let taken = format!("so its calibrations are taken from its last good copy, {copy}");
+        let no_good = |bad: &str| format!("and its last good copy, {copy}, is no good either ({bad})");
         match self {
-            Self::Unread { path, why } => format!("{} couldn't be read ({why}), so the new one isn't saved over it", name(path)),
-            Self::NotAConfig { path, why, kept: Ok(kept) } => {
-                format!("{} was unreadable ({why}), so its calibrations are lost; it is kept as {}", name(path), name(kept))
+            Self::Unread { why, .. } => match last_good {
+                LastGoodCopy::Absent => format!("{file} couldn't be read ({why}), so the new one isn't saved over it"),
+                LastGoodCopy::Bad(bad) => format!("{file} couldn't be read ({why}), {}, so the new one isn't saved over it", no_good(bad)),
+                LastGoodCopy::Taken => format!("{file} couldn't be read ({why}), {taken}, and none measured is saved over it"),
+            },
+            Self::NotAConfig { why, kept, .. } => {
+                let calibrations = match last_good {
+                    LastGoodCopy::Absent => "so its calibrations are lost".to_string(),
+                    LastGoodCopy::Bad(bad) => format!("{}, so its calibrations are lost", no_good(bad)),
+                    LastGoodCopy::Taken => taken,
+                };
+                match kept {
+                    Ok(kept) => format!("{file} was unreadable ({why}), {calibrations}; it is kept as {}", name(kept)),
+                    Err(e) => {
+                        let over =
+                            if *last_good == LastGoodCopy::Taken { "the next save writes over it" } else { "the new one is saved over it" };
+                        format!("{file} is unreadable ({why}), {calibrations}; it couldn't be kept aside ({e}), so {over}")
+                    }
+                }
             }
-            Self::NotAConfig { path, why, kept: Err(e) } => format!(
-                "{} is unreadable ({why}), so its calibrations are lost; it couldn't be kept aside ({e}), so the new one is saved over it",
-                name(path)
-            ),
         }
     }
 }

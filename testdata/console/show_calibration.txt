@@ -1,12 +1,12 @@
 ## none stored
-🔍 TMR's Calibrations, from <home>\tmr-cfg.json
+🔍 TMR's Calibrations, from <home>\settings\tmr-cfg.json
 ===============================================
 
 Cache calibration: none stored: a run measures one before its tests (calibrate=auto, the default; about 2 minutes), or tmr.exe --calibrate-cache measures it now
 
 Seal calibration: none stored: seal-width=auto runs the rule's width (256 bits with AVX2, else 128) until tmr.exe --calibrate-seal measures one (--calibrate-all measures both)
 ## this machine's
-🔍 TMR's Calibrations, from <home>\tmr-cfg.json
+🔍 TMR's Calibrations, from <home>\settings\tmr-cfg.json
 ===============================================
 
 Cache calibration: this machine's: a run's cache-sized extents take their sizes from it
@@ -43,7 +43,7 @@ Width             Fill         Check                 Fill + check
 Seal width: 128, the fastest
 
 ## this machine's by one thread alone, no seal calibration
-🔍 TMR's Calibrations, from <home>\tmr-cfg.json
+🔍 TMR's Calibrations, from <home>\settings\tmr-cfg.json
 ===============================================
 
 Cache calibration: this machine's, but measured by one thread alone, before TMR measured two threads a core and every CPU at once, so a run measures one before its tests (calibrate=auto, the default; about 2 minutes), or tmr.exe --calibrate-cache measures it now
@@ -67,7 +67,7 @@ Measured 2026-11-03 14:22 UTC on 2MB large pages
 
 Seal calibration: none stored: seal-width=auto runs the rule's width (256 bits with AVX2, else 128) until tmr.exe --calibrate-seal measures one (--calibrate-all measures both)
 ## another machine's
-🔍 TMR's Calibrations, from <home>\tmr-cfg.json
+🔍 TMR's Calibrations, from <home>\settings\tmr-cfg.json
 ===============================================
 
 Cache calibration: not this machine's: measured on AMD Ryzen 7 5700X 8-Core Processor, and the CPU, its BIOS, the memory or the TSC's rate differs here, so a run measures one before its tests (calibrate=auto, the default; about 2 minutes), or tmr.exe --calibrate-cache measures it now. CPU Size is that machine's

@@ -298,7 +298,7 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     more(out, "Use debug for detailed per-thread logs")?;
     writeln!(out, "  Logs saved to: logs\\TMR_YYYY-MM-DD_HH-MM-SS.log      (local time)")?;
     writeln!(out, "  Results saved to: results\\TMR_YYYY-MM-DD_HH-MM-SS.json (same name as the log)")?;
-    writeln!(out, "  Both beside tmr.exe, as are configs\\ and tmr-cfg.json; TMR_HOME=<folder> puts them there instead")?;
+    writeln!(out, "  Both beside tmr.exe, as are configs\\ and settings\\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there")?;
     writeln!(out)?;
     writeln!(out, "RESULT COMPARISON:")?;
     writeln!(out, "  Each run's results are saved as a JSON file in the results folder, as it goes")?;
@@ -926,8 +926,8 @@ fn calibrate_seal(
 fn show_calibration(args: &[String], out: &mut dyn Write) -> io::Result<()> {
     // Serials out of what it logs unless `--serials`, before SMBIOS is first read and logged, as a session has it (TODO 105)
     crate::smbios::hide_serials_unless_kept(args);
-    let path = crate::app_config::AppConfig::default_path();
-    let config = crate::app_config::AppConfig::load(&path);
+    // From its last good copy when the file is damaged, which the header names
+    let (config, path) = crate::app_config::AppConfig::load_with_source(&crate::app_config::AppConfig::default_path());
     let (system_info, smbios) = (crate::tests::get_system_info(), crate::smbios::get_smbios());
     // Each checked only when there is one: the check logs what differs
     let ours = Ours {
@@ -1335,7 +1335,7 @@ mod tests {
         let mut text = String::new();
         for (case, config, ours) in cases {
             let mut out = Vec::new();
-            write_calibrations(&config, r"<home>\tmr-cfg.json", &here, ours, &mut out).unwrap();
+            write_calibrations(&config, r"<home>\settings\tmr-cfg.json", &here, ours, &mut out).unwrap();
             text += &format!("## {case}\n{}", String::from_utf8(out).unwrap());
         }
         crate::test_support::check("show_calibration", &text);

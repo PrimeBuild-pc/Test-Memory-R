@@ -52,6 +52,8 @@ impl Sections {
                     self.system.push(text(format!("OS: {}", os.label())));
                 }
             }
+            // tmr-cfg.json damaged, its last good copy taken: before the calibrations, which are the copy's
+            Setup::ConfigRestored(restored) => self.system.push(text(restored.text())),
             Setup::CacheCalibration(state) => self.system.push(text(match state {
                 CacheCalibrationState::Loaded { at } => format!("Cache calibration: loaded ({})", at.format("%Y-%m-%d %H:%M")),
                 CacheCalibrationState::Measuring(why) => format!("Cache calibration: {}", measuring(why)),

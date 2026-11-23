@@ -41,7 +41,8 @@ compile_error!(
 // The engine. Its public items are what tmr.exe (`crates/tmr-app`), the CLI (`crates/tmr-cli`) and the window (`crates/tmr-gui`) call:
 // `session` (a command line's setup and run), `frontend` (the interface a session is shown through, with the types its events carry),
 // `commands` (the one-shot commands), `cpu_check` (whether this CPU can run TMR), `home` (the folder TMR keeps its files in),
-// `atomic_file` (its files written whole), `logfile`, `BUILD` and `request_stop`. Everything else is private, so `dead_code` checks it.
+// `atomic_file` (its files written whole), `settings_file` (its settings files' folder, saves and last good copies), `logfile`, `BUILD`
+// and `request_stop`. Everything else is private, so `dead_code` checks it.
 // While `main.rs` held the CLI and every module here was `pub`, all of them counted as public API, and an uncalled `pub fn` was never
 // reported (TODO 69 E).
 pub mod atomic_file; // files written whole, a temp put in their place: the results, tmr-cfg.json and the window's window.json
@@ -52,6 +53,7 @@ pub mod home; // the folder TMR keeps its configs, results, logs and settings in
 pub mod logfile; // the log file, which every frontend's logger writes (TODO 29)
 pub mod sanitize; // copies of a run's results file and log without its serials, accounts and names, to post (--sanitize)
 pub mod session; // a command line's setup, then its run, through a frontend (TODO 29)
+pub mod settings_file; // tmr-cfg.json and window.json in the home's settings\: taken from the old place, saved with a last good copy
 pub use build_info::BUILD;
 pub use runner::request_stop;
 // What the CLI's tests drive the engine with, under the `test-support` feature (TODO 29)

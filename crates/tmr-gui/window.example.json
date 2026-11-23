@@ -1,6 +1,6 @@
 {
   "_about": [
-    "Copy this file into TMR's folder (beside tmr.exe, or TMR_HOME) as window.json and edit it.",
+    "Copy this file into the settings folder in TMR's home (beside tmr.exe, or TMR_HOME) as window.json and edit it.",
     "It is read when the window opens. Keys starting with _ are notes.",
     "chart: the throughput chart shows. theme: system, light or dark.",
     "start_on_open: the run starts as the window opens, as --start does.",

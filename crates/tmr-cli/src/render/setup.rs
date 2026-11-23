@@ -165,6 +165,10 @@ pub(super) fn text(setup: &Setup) -> String {
 
             let _ = writeln!(text);
         }
+        // tmr-cfg.json damaged, its last good copy taken: before the calibrations, which are the copy's
+        Setup::ConfigRestored(restored) => {
+            let _ = writeln!(text, "  {}", restored.text());
+        }
         Setup::CacheCalibration(state) => {
             let _ = match state {
                 CacheCalibrationState::Loaded { at } => writeln!(text, "  Calibration: Loaded ({})", at.format("%Y-%m-%d %H:%M")),
