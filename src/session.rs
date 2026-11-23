@@ -326,11 +326,7 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
             // Apply the override based on parameter type
             match key.as_str() {
                 "errors" => {
-                    error_mode = match params::get_string(&validated_params, "errors", "log").to_lowercase().as_str() {
-                        "halt" | "stop" => ErrorMode::Halt,
-                        "panic" | "debug" => ErrorMode::Panic,
-                        _ => ErrorMode::Log,
-                    };
+                    error_mode = error_mode_of(&validated_params);
                     log::debug!("CLI override: error_mode = {:?}", error_mode);
                 }
                 "cycles" => {
@@ -867,17 +863,18 @@ type ParsedRunConfig = (EnhancedMemoryStrategy, ErrorMode, TestSuiteTiming, Stri
 
 /// Build configuration from validated parameters (using centralized registry). What the allocation and pinning parameters set goes to `fe`,
 /// once they are read.
+/// `errors=` as the run takes it, `log` without one: by `ErrorMode::parse`, which its parameter was validated with, so `halt:N` is
+/// `HaltAfter(N)` (it used to fall to `Log` here: only a JSON config's `error_mode` reached halt:N)
+fn error_mode_of(validated: &HashMap<String, params::ParamValue>) -> ErrorMode {
+    ErrorMode::parse(&params::get_string(validated, "errors", "log")).unwrap_or(ErrorMode::Log)
+}
+
 fn build_config_from_validated_params(validated: &HashMap<String, params::ParamValue>, fe: &dyn Frontend) -> ParsedRunConfig {
     // Extract basic string parameters with defaults
     let cputype = params::get_string(validated, "cputype", "threads");
     let cpus = params::get_string(validated, "cpus", "100%");
 
-    // Build error mode
-    let error_mode = match params::get_string(validated, "errors", "log").to_lowercase().as_str() {
-        "halt" | "stop" => ErrorMode::Halt,
-        "panic" | "debug" => ErrorMode::Panic,
-        _ => ErrorMode::Log,
-    };
+    let error_mode = error_mode_of(validated);
 
     // The suite's limits: cycles=, duration= or both, whichever is reached first (the runner checks each between cycles), else 3 cycles
     let (cycles, duration) = (params::has_param(validated, "cycles"), params::has_param(validated, "duration"));
@@ -1023,6 +1020,26 @@ mod tests {
         fn ask_large_pages(&self, _: &LargePageQuestion) -> LargePageAnswer {
             LargePageAnswer::Quit
         }
+    }
+
+    /// errors= on the command line (and so the window's) takes every form `ErrorMode::parse` does: halt:N stops after N errors, as a JSON
+    /// config's error_mode always did
+    #[test]
+    fn errors_from_the_command_line_take_halt_after_n() {
+        let mode = |line: &[&str]| {
+            let args: Vec<String> = line.iter().map(|s| s.to_string()).collect();
+            let validated = params::parse_and_validate_args(&args).unwrap();
+            let (_, from_params, ..) = build_config_from_validated_params(&validated, &Quiet);
+            assert_eq!(from_params, error_mode_of(&validated), "both paths agree");
+            from_params
+        };
+        assert_eq!(mode(&["errors=halt:8"]), ErrorMode::HaltAfter(8));
+        assert_eq!(mode(&["errors=HALT:100"]), ErrorMode::HaltAfter(100));
+        assert_eq!(mode(&["errors=halt"]), ErrorMode::Halt);
+        assert_eq!(mode(&["errors=stop"]), ErrorMode::Halt);
+        assert_eq!(mode(&["errors=panic"]), ErrorMode::Panic);
+        assert_eq!(mode(&["errors=log"]), ErrorMode::Log);
+        assert_eq!(mode(&[]), ErrorMode::Log, "the default");
     }
 
     /// cycles= and duration= together limit a run to whichever is reached first, as a config's timing does (`cycles=5 duration=600` ran
