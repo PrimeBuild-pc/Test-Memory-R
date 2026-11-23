@@ -2002,7 +2002,9 @@ impl LegacyConfig {
         let gms = "Global Memory Setup";
 
         let memory_setup = LegacyMemorySetup {
-            testing_window_size_mb: num(memory, gms, "Testing Window Size (Mb)", 880)?,
+            // TM5's own default when the key is missing (mt_ini.inc: DefWindowSizeMB = 1024). In TMR it only sizes the import's blocks
+            // (codes 0-3 are fractions of it, larger blocks are capped at it): a thread's memory is its whole share, not a window
+            testing_window_size_mb: num(memory, gms, "Testing Window Size (Mb)", 1024)?,
             reserved_memory_mb: num(memory, gms, "Reserved Memory for Windows (Mb)", 128)?,
             channels: clamped(memory, gms, "Channels", num(memory, gms, "Channels", 2)?, (1, 8), warnings),
             lock_granularity_mb: clamped(
@@ -2167,6 +2169,7 @@ impl LegacyConfig {
         }
 
         self.log_repetition();
+        self.warn_cores_above(crate::cpu_topology::logical_cpu_ids().len());
         Ok(ModernConfig {
             config_format_version: CONFIG_VERSION.to_string(),
             application_name: format!("{} ({})", APP_NAME, APP_SHORT_NAME),
@@ -2337,6 +2340,21 @@ impl LegacyConfig {
 
     /// `repetition`'s passes per chunk where they aren't TM5's default 5, in one line for the import, the tests grouped by their figure:
     /// `TM5 Time (%) x global 50 = passes per chunk (TM5's default is 5): Tests 1, 3-15 at 100% = 2; Test 2 at 255% = 6`
+    /// A `.cfg` whose Cores asks for more testers than the PC has logical CPUs: TM5 runs that many testers, sharing the CPUs; TMR runs
+    /// one thread a CPU, so each takes a bigger share of the memory (`cpu_selection::thread_count` clamps the count). Said, not refused.
+    fn warn_cores_above(&self, cpus: usize) -> Option<String> {
+        let cores = self.main_section.cores as usize;
+        if cores <= cpus || cpus == 0 {
+            return None;
+        }
+        let line = format!(
+            "TM5 config: Cores={cores} is more than this PC's {cpus} logical CPUs. TM5 runs {cores} testers sharing them; TMR runs {cpus} \
+             threads, one a CPU, each with a bigger share of the memory"
+        );
+        log::warn!("{line}");
+        Some(line)
+    }
+
     fn log_repetition(&self) {
         let mut groups: Vec<(u32, u32, Vec<u32>)> = Vec::new();
         for test in self.tests.iter().filter(|t| t.id != 0 && Self::map_legacy_function(&t.function).is_ok()) {
@@ -2496,6 +2514,21 @@ mod tests {
         assert_eq!(modern.system.memory_strategy.default_extent.mode, "full_allocation");
         let meta = modern.legacy_metadata.as_ref().unwrap();
         assert_eq!((meta.tm5_window_mb, meta.tm5_lock_mb), (880, 16));
+    }
+
+    /// A .cfg's Cores above the PC's logical CPUs is said (TMR runs one thread a CPU, TM5 that many testers), never refused; a missing
+    /// Testing Window Size is TM5's 1024
+    #[test]
+    fn cores_above_the_cpus_warn_and_a_missing_window_is_tm5s_default() {
+        let mut cfg = legacy(100, Vec::new());
+        cfg.main_section.cores = 32;
+        let line = cfg.warn_cores_above(12).expect("a warning");
+        assert!(line.contains("Cores=32 is more than this PC's 12 logical CPUs") && line.contains("TMR runs 12 threads"), "{line}");
+        assert_eq!(cfg.warn_cores_above(32), None);
+        cfg.main_section.cores = 0;
+        assert_eq!(cfg.warn_cores_above(12), None, "0 is every CPU");
+        let text = "[Main Section]\nCores=0\n[Global Memory Setup]\nChannels=2\n";
+        assert_eq!(LegacyConfig::parse_legacy_format(text).unwrap().memory_setup.testing_window_size_mb, 1024);
     }
 
     /// The import's one Time (%) line lists its tests as ranges: sorted, runs of three or more joined
