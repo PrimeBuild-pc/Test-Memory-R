@@ -44,7 +44,7 @@ compile_error!(
 // `atomic_file` (its files written whole), `logfile`, `BUILD` and `request_stop`. Everything else is private, so `dead_code` checks it.
 // While `main.rs` held the CLI and every module here was `pub`, all of them counted as public API, and an uncalled `pub fn` was never
 // reported (TODO 69 E).
-pub mod atomic_file; // files written whole, a temp renamed over them: the results, tmr-cfg.json and the window's window.json
+pub mod atomic_file; // files written whole, a temp put in their place: the results, tmr-cfg.json and the window's window.json
 pub mod commands; // the one-shot commands, writing to their caller's writer (TODO 29)
 pub mod cpu_check; // whether this CPU has the features TMR is built for (TODO 104)
 pub mod frontend; // the engine's interface to whoever shows a session: its events (TODO 29)

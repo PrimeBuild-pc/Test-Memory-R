@@ -228,6 +228,11 @@ impl std::fmt::Display for ReadError {
     }
 }
 
+/// Why a config file that couldn't be read, `why`, isn't saved over (`AppConfig::save`, `load_to_save`)
+fn unread(path: &Path, why: &str) -> String {
+    format!("{} couldn't be read ({why}), so it isn't written over", path.display())
+}
+
 /// `path`, a file that isn't a config, copied to `<path>.unreadable`, over an older one, before a save writes over it: the user's to look
 /// at, or delete. Where, or why it couldn't be: in an install for all users, a user can write tmr-cfg.json but make no file beside it
 /// (`dist/tmr.iss`), and then the save writes over it. A copy, not a rename: a rename in its own folder needs no right to make a file
@@ -250,9 +255,21 @@ fn keep_aside(path: &Path) -> Result<PathBuf, String> {
 
 impl AppConfig {
     /// The config at `path`, for a look at it (`session::stored_calibration`, `--show-calibration`): the defaults when there is none, or
-    /// when the file can't be read or isn't a config, which the log says. A run's setup, which may save over it, has `load_for_setup`.
+    /// when the file can't be read or isn't a config, which the log says. A run's setup, which may save over it, has `load_for_setup`, and
+    /// a save from any other, `load_to_save`.
     pub fn load(path: &Path) -> Self {
         Self::read(path).unwrap_or_default()
+    }
+
+    /// The config at `path`, to be changed and saved back (`--calibrate-cache`, `--calibrate-seal`, the calibration a run measures):
+    /// `load`'s, but a file that can't be read is the error `save` would give, not the defaults. A save from those would write them over
+    /// the file once it could be read again (another program let go of it, during the save's question): its other calibration and the
+    /// machine's identity lost, with no copy kept (review). One that isn't a config is the defaults, as for `save`, which keeps it aside.
+    pub fn load_to_save(path: &Path) -> Result<Self, String> {
+        match Self::read(path) {
+            Err(ReadError::Unread(why)) => Err(unread(path, &why)),
+            read => Ok(read.unwrap_or_default()),
+        }
     }
 
     /// The config at `path` for a run's setup, which may save a calibration over it: `load`'s, and, when the file is there but couldn't be
@@ -296,8 +313,8 @@ impl AppConfig {
     }
 
     /// Saves the config, pretty-printed, whole (`atomic_file::write`). The file there is checked first, as a run's setup checks it
-    /// (`load_for_setup`) and a command that saves (`--calibrate-cache`) doesn't: one that isn't a config is kept aside, and one that can't
-    /// be read isn't written over. Only a calibration saves it: no cost to a test.
+    /// (`load_for_setup`) and `load_to_save` checks it only in part: one that isn't a config is kept aside, and one that can't be read
+    /// isn't written over. Only a calibration saves it: no cost to a test.
     pub fn save(&self, path: &Path) -> Result<(), String> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent()
@@ -306,7 +323,7 @@ impl AppConfig {
             std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
         }
         match Self::parse(path) {
-            Err(ReadError::Unread(why)) => return Err(format!("{} couldn't be read ({why}), so it isn't written over", path.display())),
+            Err(ReadError::Unread(why)) => return Err(unread(path, &why)),
             Err(ReadError::NotAConfig(_)) => drop(keep_aside(path)),
             Ok(_) => {}
         }
@@ -479,7 +496,8 @@ mod tests {
 
     /// A tmr-cfg.json that isn't a config, as a crash while it was written in place leaves one: a run's setup says so, and keeps a copy
     /// as tmr-cfg.json.unreadable, over an older one, so the calibration it saves loses nothing of it; a save it didn't read for
-    /// (`--calibrate-cache`) keeps it aside too. One that can't be read is said as such, not as no file, and isn't written over.
+    /// (`--calibrate-cache`) keeps it aside too. One that can't be read is said as such, not as no file, and isn't written over; a command
+    /// that saves is refused at its load (`load_to_save`), so it has no defaults to save once the file can be read again.
     #[test]
     fn a_config_that_isnt_one_is_kept_aside_and_one_unread_isnt_written_over() {
         use std::os::windows::fs::OpenOptionsExt;
@@ -505,6 +523,7 @@ mod tests {
 
         // Not text at all, as a crash can leave the file: not a config, and a save it wasn't read for keeps it aside first
         std::fs::write(&path, [0u8, 0, 0xFF, 0xFE]).unwrap();
+        assert!(AppConfig::load_to_save(&path).unwrap().machine_id.is_none(), "the defaults, for the save to keep it aside");
         AppConfig { machine_id: Some("again".to_string()), ..Default::default() }.save(&path).unwrap();
         assert_eq!((AppConfig::load(&path).machine_id.as_deref(), std::fs::read(&kept).unwrap()), (Some("again"), vec![0, 0, 0xFF, 0xFE]));
 
@@ -515,8 +534,10 @@ mod tests {
         assert!(unreadable.as_ref().unwrap().text().starts_with(&format!("tmr-cfg.json couldn't be read ({why})")));
         let refused = AppConfig::default().save(&path).unwrap_err();
         assert!(refused.contains("isn't written over"), "{refused}");
+        assert_eq!(AppConfig::load_to_save(&path).unwrap_err(), refused, "refused at the load");
         drop(held);
         assert_eq!(AppConfig::load(&path).machine_id.as_deref(), Some("again"), "as it was");
+        assert_eq!(AppConfig::load_to_save(&path).unwrap().machine_id.as_deref(), Some("again"));
     }
 
     /// In an install for all users, a user may write tmr-cfg.json but make no file beside it (`dist/tmr.iss`): a save writes it in place,

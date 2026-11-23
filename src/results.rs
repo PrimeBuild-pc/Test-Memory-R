@@ -905,11 +905,11 @@ impl TestRunResult {
         crate::home::dir().join(self.metadata.filename.replace('/', std::path::MAIN_SEPARATOR_STR)).display().to_string()
     }
 
-    /// Writes the file whole or not at all (TODO 72, `atomic_file::write`): to `<path>.tmp`, on the disk, then renamed over `path`, so a
-    /// run killed mid-write, or a system that went down, leaves its last save, not part of one. A refused rename, as when a viewer holds
-    /// the file without letting it be deleted, falls back to writing `path` in place, with a warning, as does a temp that can't be made;
-    /// the next save tries the rename again. When the viewer won't let it be written either, the save stays in the `.tmp`, and the error
-    /// names both.
+    /// Writes the file whole or not at all (TODO 72, `atomic_file::write`): to `<path>.tmp`, on the disk, then put in `path`'s place, so
+    /// a run killed mid-write, or a system that went down, leaves its last save, not part of one. A refused replace, as when a viewer
+    /// holds the file without letting it be deleted, falls back to writing `path` in place, with a warning, as does a temp that can't be
+    /// made; the next save tries the replace again. When the viewer won't let it be written either, the save stays in the `.tmp`, and
+    /// the error names both.
     pub fn save_atomic(&self, path: &str) -> Result<(), String> {
         // Indented but for record=compact (TODO 105): a file that size is read by TMR, not by eye
         let json = if self.metadata.record == Record::Compact { serde_json::to_string(self) } else { serde_json::to_string_pretty(self) }
@@ -1401,9 +1401,9 @@ mod tests {
         }
     }
 
-    /// TODO 72: a save replaces the file whole, by renaming a temp file over it, and leaves nothing of the temp file: a reader that had the
-    /// old file open, and lets it be deleted, still reads the old one, which a write in place wouldn't leave it. When a viewer holds the
-    /// file without letting it be deleted, so it can't be renamed over, the save writes it in place instead; when the viewer won't let it
+    /// TODO 72: a save replaces the file whole, by putting a temp file in its place, and leaves nothing of the temp file: a reader that had
+    /// the old file open, and lets it be deleted, still reads the old one, which a write in place wouldn't leave it. When a viewer holds
+    /// the file without letting it be deleted, so it can't be replaced, the save writes it in place instead; when the viewer won't let it
     /// be written either, the save stays in the temp file, which the error names, and the file is as it was.
     /// TODO 105: record=compact keeps only the erring threads' rows, an alarm or a seal error counting, and writes the file unindented; it
     /// loads back with the setting named; full keeps every row, indented, and names none

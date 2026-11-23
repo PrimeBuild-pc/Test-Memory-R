@@ -808,6 +808,13 @@ fn calibrate(args: &[String], out: &mut dyn Write, confirm: &mut dyn FnMut(&str)
     Ok(RunStatus::Passed)
 }
 
+/// tmr-cfg.json at `path`, which a calibration is compared with and may be saved into (`AppConfig::load_to_save`): one that can't be read
+/// is the error, before the question, so the save never starts from defaults standing in for it; with `--no-save`, which saves nothing,
+/// it is the defaults (`AppConfig::load`)
+fn stored_config(path: &std::path::Path, save: &Save) -> Result<crate::app_config::AppConfig, String> {
+    if save.first() { crate::app_config::AppConfig::load_to_save(path) } else { Ok(crate::app_config::AppConfig::load(path)) }
+}
+
 /// `--calibrate-cache`: the cache tiers, shown, saved if `save` says to and written to `--output`'s
 /// file when given.
 fn calibrate_cache(
@@ -825,7 +832,13 @@ fn calibrate_cache(
 
             // Save to tmr-cfg.json — compare with existing if present
             let cfg_path = crate::app_config::AppConfig::default_path();
-            let mut app_config = crate::app_config::AppConfig::load(&cfg_path);
+            let mut app_config = match stored_config(&cfg_path, save) {
+                Ok(config) => config,
+                Err(e) => {
+                    writeln!(out, "❌ Failed to save calibration: {}", e)?;
+                    return Ok(RunStatus::NotRun);
+                }
+            };
             let stored = app_config.calibration.is_some();
             let should_save = prompt_calibration_save(&app_config.calibration, &results, "cache", out, save)?;
             if should_save {
@@ -876,7 +889,13 @@ fn calibrate_seal(
         Ok(seal) => {
             crate::calibration::display_seal_calibration(&seal, cache_info, out)?;
             let cfg_path = crate::app_config::AppConfig::default_path();
-            let mut app_config = crate::app_config::AppConfig::load(&cfg_path);
+            let mut app_config = match stored_config(&cfg_path, save) {
+                Ok(config) => config,
+                Err(e) => {
+                    writeln!(out, "❌ Failed to save seal calibration: {}", e)?;
+                    return Ok(RunStatus::NotRun);
+                }
+            };
             let stored = app_config.seal_calibration.is_some();
             if prompt_seal_calibration_save(&app_config.seal_calibration, &seal, out, save)? {
                 app_config.set_seal_calibration(seal, system_info, smbios);

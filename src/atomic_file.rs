@@ -1,11 +1,14 @@
 //! Files written whole or not at all: a run's results file (TODO 72), and, since an overclocked PC that crashed mid-write lost its
 //! calibrations (forum feedback, 2026-11-23), `tmr-cfg.json` and the window's `window.json`. A save goes to `<file>.tmp`, flushed to the
-//! disk, then renamed over the file, so a crash, or a system that went down, leaves the last save whole, not part of this one.
+//! disk, then put in the file's place (`replace`, which keeps the file's permissions), so a crash, or a system that went down, leaves the
+//! last save whole, not part of this one.
 //!
-//! Two fallbacks write the file in place instead, flushed as well, but no longer whole if the system goes down mid-write: when the temp
-//! can't be made (an install for all users, in Program Files, where users may write `tmr-cfg.json` and `window.json` but make no file
-//! beside them, `dist/tmr.iss`), and when the rename is refused (a viewer holding the file without letting it be deleted). Saves are
-//! rare (a setting changed, a calibration saved, Start, the window closing, a cycle's results), and none is in a test's loop.
+//! The file is written in place instead, flushed as well, but no longer whole if the system goes down mid-write, when the temp can't be
+//! made or the replace is refused (a viewer holding the file without letting it be deleted). In an install for all users, in Program
+//! Files, the temp can't be made by a user's TMR: users may write `tmr-cfg.json` and `window.json` but make no file beside them
+//! (`dist/tmr.iss`), so there every save of a TMR not run as administrator is in place; whole saves there would take a folder users can
+//! write for these files. Saves are rare (a setting changed, a calibration saved, Start, the window closing, a cycle's results), and none
+//! is in a test's loop.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
@@ -14,15 +17,15 @@ use std::path::{Path, PathBuf};
 /// How a save was written
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Written {
-    /// Whole: its temp, renamed over the file
+    /// Whole: its temp, put in the file's place
     Replaced,
-    /// In place: the temp couldn't be made, or renamed over the file
+    /// In place: the temp couldn't be made, or put in the file's place
     InPlace,
 }
 
-/// Writes `bytes` as `path`, whole (the module's doc): to `<path>.tmp`, on the disk, renamed over `path`; in place, also on the disk, when
-/// the temp can't be made or the rename is refused, which the log says. A temp a crashed save left is removed first. The error names the
-/// file, and the temp when the save is left in it: a refused rename whose file won't be written in place either.
+/// Writes `bytes` as `path`, whole (the module's doc): to `<path>.tmp`, on the disk, put in `path`'s place (`replace`); in place, also on
+/// the disk, when the temp can't be made or the replace is refused, which the log says. A temp a crashed save left is removed first. The
+/// error names the file, and the temp when the save is left in it: a refused replace whose file won't be written in place either.
 pub fn write(path: &Path, bytes: &[u8]) -> Result<Written, String> {
     write_by(path, bytes, open)
 }
@@ -34,11 +37,35 @@ fn open(path: &Path, new: bool) -> io::Result<File> {
 
 /// `bytes` written to `file` and flushed to the disk (`FlushFileBuffers`) before it returns (TODO 72). NTFS logs a rename at once but
 /// writes a file's data back later, so without the flush a system that went down just after a save could keep the rename and lose the
-/// data it names. The file is closed when it returns, so it can be renamed.
+/// data it names. The file is closed when it returns, so it can be put in the file's place.
 fn flushed(file: io::Result<File>, bytes: &[u8]) -> io::Result<()> {
     let mut file = file?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+/// `temp` put in `path`'s place, keeping `path`'s permissions (`ReplaceFileW`, which keeps the replaced file's DACL, attributes and
+/// creation time): a rename would leave the file with the temp's, only what its folder hands down. In an install for all users the
+/// installer gives Users the right to modify `tmr-cfg.json` and `window.json` on the files themselves (`dist/tmr.iss`), so a save by a
+/// TMR run as administrator that renamed would take that right away, and no later save by a user's TMR could write them, nor make them
+/// again (review of the first version, which renamed). With no file there yet, a rename: there are no permissions to keep.
+fn replace(temp: &Path, path: &Path) -> io::Result<()> {
+    use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+    use windows::Win32::Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW};
+    use windows::core::{HSTRING, PCWSTR};
+    let (replaced, replacement) = (HSTRING::from(path), HSTRING::from(temp));
+    // SAFETY: both names are NUL-terminated UTF-16 that live to the end of the call (the HSTRINGs above); no backup file (a null
+    // name), no flags, and the two reserved pointers null, as the API requires
+    let replaced = unsafe { ReplaceFileW(&replaced, &replacement, PCWSTR::null(), REPLACE_FILE_FLAGS(0), None, None) };
+    match replaced {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == ERROR_FILE_NOT_FOUND.to_hresult() => fs::rename(temp, path),
+        // HRESULT_FROM_WIN32 puts the Win32 code in the low word under facility 7
+        Err(e) => {
+            let hr = e.code().0 as u32;
+            Err(io::Error::from_raw_os_error(if hr & 0xFFFF_0000 == 0x8007_0000 { (hr & 0xFFFF) as i32 } else { hr as i32 }))
+        }
+    }
 }
 
 /// `<path>.tmp`
@@ -70,7 +97,7 @@ fn write_by(path: &Path, bytes: &[u8], open: impl Fn(&Path, bool) -> io::Result<
         let _ = fs::remove_file(&temp);
         return Err(format!("Couldn't write {temp_file}, so {file} is as it was: {e}"));
     }
-    if let Err(refused) = fs::rename(&temp, path) {
+    if let Err(refused) = replace(&temp, path) {
         log::warn!("Couldn't replace {file} with {temp_file} ({refused}): writing it in place");
         flushed(open(path, false), bytes)
             .map_err(|e| format!("Couldn't replace {file} ({refused}) or write it in place ({e}): this save is in {temp_file}"))?;
@@ -89,23 +116,25 @@ pub(crate) struct NoNewFiles<'a>(&'a Path);
 #[cfg(test)]
 impl<'a> NoNewFiles<'a> {
     pub(crate) fn on(folder: &'a Path) -> Self {
-        Self::icacls(folder, &["/deny", "*S-1-1-0:(WD)"]);
+        icacls(folder, &["/deny", "*S-1-1-0:(WD)"]);
         assert!(fs::write(folder.join("probe"), b"").is_err(), "{} still takes a new file", folder.display());
         NoNewFiles(folder)
-    }
-
-    fn icacls(folder: &Path, args: &[&str]) {
-        let done = std::process::Command::new("icacls").arg(folder).args(args).output().expect("icacls");
-        let said = [&done.stdout, &done.stderr].map(|said| String::from_utf8_lossy(said).trim().to_string()).join(" ");
-        assert!(done.status.success(), "icacls {} {args:?}: {said}", folder.display());
     }
 }
 
 #[cfg(test)]
 impl Drop for NoNewFiles<'_> {
     fn drop(&mut self) {
-        Self::icacls(self.0, &["/remove:d", "*S-1-1-0"]);
+        icacls(self.0, &["/remove:d", "*S-1-1-0"]);
     }
+}
+
+/// `icacls <target> <args>`, which must succeed
+#[cfg(test)]
+fn icacls(target: &Path, args: &[&str]) {
+    let done = std::process::Command::new("icacls").arg(target).args(args).output().expect("icacls");
+    let said = [&done.stdout, &done.stderr].map(|said| String::from_utf8_lossy(said).trim().to_string()).join(" ");
+    assert!(done.status.success(), "icacls {} {args:?}: {said}", target.display());
 }
 
 #[cfg(test)]
@@ -151,6 +180,29 @@ mod tests {
         let error = write_by(&path, b"lost", unwritable).unwrap_err();
         assert!(error.contains(&*temp.to_string_lossy()) && error.contains("as it was"), "{error}");
         assert_eq!((fs::read(&path).unwrap(), temp.exists()), (b"in place".to_vec(), false));
+    }
+
+    /// A save keeps the file's own permissions: an install for all users gives Users the right to modify `tmr-cfg.json` and `window.json`
+    /// on the files themselves (`dist/tmr.iss`), and a save that renamed its temp over the file left only what the folder hands down, so
+    /// one by a TMR run as administrator took that right away (review of the first version). Read as SDDL (`icacls /save`), which names
+    /// no account in the system's language: `(A;;0x1301bf;;;BU)` is Users' modify, on the file itself (no `ID`, inherited, flag).
+    #[test]
+    fn a_save_keeps_the_files_own_permissions() {
+        let dir = TempDir::new("atomic-permissions");
+        let path = PathBuf::from(dir.file("tmr-cfg.json"));
+        let sddl = || {
+            let saved = PathBuf::from(dir.file("acl.txt"));
+            icacls(&path, &["/save", saved.to_str().expect("a UTF-8 temp path")]);
+            let bytes = fs::read(&saved).unwrap();
+            String::from_utf16_lossy(&bytes.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect::<Vec<_>>())
+        };
+        const USERS_MODIFY: &str = "(A;;0x1301bf;;;BU)";
+        fs::write(&path, b"{}").unwrap();
+        icacls(&path, &["/grant", "*S-1-5-32-545:(M)"]);
+        assert!(sddl().contains(USERS_MODIFY), "the installer's grant: {}", sddl());
+        assert_eq!(write(&path, b"{\"saved\": 1}"), Ok(Written::Replaced));
+        assert!(sddl().contains(USERS_MODIFY), "kept: {}", sddl());
+        assert_eq!((fs::read(&path).unwrap(), temp_of(&path).exists()), (b"{\"saved\": 1}".to_vec(), false));
     }
 
     /// In a folder that takes no new file, as Program Files is to a user in an install for all users, a save writes the file in place
