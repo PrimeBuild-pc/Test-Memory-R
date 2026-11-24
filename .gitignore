@@ -35,4 +35,5 @@ demo_*.json
 /configs/
 /tmr-cfg.json
 /colours.json
+/companions/
 

@@ -45,6 +45,8 @@ pub enum Command {
     Help(String),
     /// `--version`
     Version,
+    /// `--get-readings [--launch]`: download ZenTimings and LibreHardwareMonitor into companions\
+    GetReadings(Vec<String>),
 }
 
 impl Command {
@@ -69,6 +71,7 @@ impl Command {
                 "--show-calibration" => return Some(Command::ShowCalibration(args.to_vec())),
                 "--help" | "-h" | "/?" | "-?" => return Some(Command::Help(args[0].clone())),
                 "--version" | "-v" => return Some(Command::Version),
+                "--get-readings" => return Some(Command::GetReadings(args.to_vec())),
                 _ => {}
             }
         }
@@ -112,6 +115,9 @@ pub fn run(
         Command::Calibrate(args) => return calibrate(args, out, confirm),
         Command::ShowCalibration(args) => show_calibration(args, out)?,
         Command::Help(program_name) => help(out, program_name)?,
+        Command::GetReadings(args) => {
+            return crate::companions::get_readings(args.iter().any(|arg| arg == "--launch"), out);
+        }
         Command::Version => {
             writeln!(out, "Test Memory R (TMR) version {}", crate::BUILD.version)?;
             writeln!(out, "High-Performance Memory Testing Tool with TM5 Compatibility")?;
@@ -154,6 +160,8 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     cmd(out, "--calibrate-cache --yes", "  any calibration: --yes saves without asking, --no-save keeps what is")?;
     more(out, "  stored; with neither it asks, and saves if no answer can come")?;
     cmd(out, "--calibrate-all --output x.json", "  --calibrate-cache or -all: also writes the cache tiers it measured to x.json, here")?;
+    cmd(out, "--get-readings", "Download ZenTimings and LibreHardwareMonitor into companions\\ (official releases)")?;
+    more(out, "  no drivers installed; --launch starts them, and each asks before a driver")?;
     cmd(out, "--show-calibration", "What the calibrations stored (the cache tiers, the seal's widths), and whether")?;
     more(out, "  each is this machine's, which a run takes")?;
     cmd(out, "plan=stability", "The stability tests at the widest width (or width=): the default plan")?;
@@ -1345,6 +1353,9 @@ mod tests {
         assert!(crate::logfile::wanted(&args(&line)), "--remove-large-pages keeps a log file");
         let line = ["tmr.exe", "--calibrate-all", "maxpage=regular"];
         assert!(matches!(parse(&line), Some(Command::Calibrate(given)) if given == args(&line)));
+        let line = ["tmr.exe", "--get-readings", "--launch"];
+        assert!(matches!(parse(&line), Some(Command::GetReadings(given)) if given == args(&line)));
+        assert!(!crate::logfile::wanted(&args(&line)), "--get-readings keeps no log file: it is not a run");
         let line = ["tmr.exe", "--show-calibration", "--no-serials"];
         assert!(matches!(parse(&line), Some(Command::ShowCalibration(given)) if given == args(&line)));
         assert!(!crate::logfile::wanted(&args(&line)), "--show-calibration keeps no log file: it changes nothing");

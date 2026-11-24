@@ -110,6 +110,10 @@ pub(crate) enum Message {
     Notify(bool),
     /// Replace the stored calibration, or keep it: the dialog's button
     SaveAnswer(ContentDialogResult),
+    /// `--get-readings` finished: the text it wrote, or why it stopped
+    Readings(Result<String, String>),
+    /// A timings line sampled off the UI thread, so a closed port does not stall a redraw
+    ReadingsLine(String),
 }
 
 /// What the window waits on: the session's feed, and the warnings and errors it logs
@@ -157,6 +161,10 @@ pub(crate) struct Window {
     palettes: Palettes,
     /// The priority this thread, the UI's, was last set to (`follow_priority`): normal as it starts
     priority: ThreadPriority,
+    /// ••• → Get timings tools is already downloading
+    getting_readings: bool,
+    /// Timings and a DIMM temperature, sampled off this thread. Empty until a source answers, and then the hint.
+    readings_line: String,
 }
 
 /// The window's tabs (TODO 109): Run, the one it opens on, then the log, the console's startup sections, and Compare
@@ -276,6 +284,34 @@ impl Window {
                 self.model.ended(Err(format!("the engine's thread didn't start: {e}")));
             }
         }
+    }
+
+    /// ••• → Get timings tools: download the two official releases into companions\, then open that folder. No driver is installed.
+    fn get_readings(&mut self, context: &ComponentContext<Self>) {
+        if self.getting_readings {
+            return;
+        }
+        self.getting_readings = true;
+        self.model.position = "Downloading ZenTimings and LibreHardwareMonitor…".to_string();
+        context.spawn_background(|_| {
+            let mut out = Vec::new();
+            let command = tmr::commands::Command::GetReadings(vec!["tmr".into(), "--get-readings".into()]);
+            let status = tmr::commands::run(&command, &mut out, &mut |_| false, &|_| String::new());
+            let text = String::from_utf8_lossy(&out).trim().to_string();
+            match status {
+                Ok(tmr::frontend::RunStatus::Passed) => Message::Readings(Ok(text)),
+                Err(e) => {
+                    let detail = if text.is_empty() { e.to_string() } else { format!("{text}\n{e}") };
+                    Message::Readings(Err(detail))
+                }
+                Ok(_) => Message::Readings(Err(if text.is_empty() { "the download failed".into() } else { text })),
+            }
+        });
+    }
+
+    /// One sample of the timings line, off the UI thread. A miss costs the connect timeout, then the hint stays.
+    fn sample_readings(&self, context: &ComponentContext<Self>) {
+        context.spawn_background(|_| Message::ReadingsLine(crate::readings::line()));
     }
 
     /// The ••• menu's Calibrate (TODO 110): `--calibrate-all` on a thread of its own, the caches then the seal's width (the fastest
@@ -430,6 +466,10 @@ impl Window {
                 self.calibrate(context);
                 None
             }
+            MENU_READINGS if self.model.takes_parameters() && !self.model.calibrating() && !self.getting_readings => {
+                self.get_readings(context);
+                None
+            }
             MENU_SETTINGS => {
                 self.settings_open = true;
                 None
@@ -455,6 +495,7 @@ const MENU_LOGS: &str = "Open the logs folder";
 const MENU_RESULTS: &str = "Open the results file";
 const MENU_RESULTS_FOLDER: &str = "Open the results folder";
 const MENU_CALIBRATE: &str = "Calibrate the caches and the seal";
+const MENU_READINGS: &str = "Get timings tools";
 const MENU_SETTINGS: &str = "Settings";
 const MENU_ABOUT: &str = "About TMR";
 
@@ -487,8 +528,22 @@ impl Component for Window {
         model.errors.extend(problems.into_iter().map(|problem| format!("window.json: {problem}")));
         let (width, dark) = (settings.size.map_or(WIDTH, |(width, _)| width), settings.theme == Theme::Dark);
         let priority = ThreadPriority::Normal;
-        let mut window =
-            Self { model, log: None, tab: Tab::Run, about: false, settings_open: false, settings, dark, width, palettes, priority };
+        let mut window = Self {
+            model,
+            log: None,
+            tab: Tab::Run,
+            about: false,
+            settings_open: false,
+            settings,
+            dark,
+            width,
+            palettes,
+            priority,
+            getting_readings: false,
+            readings_line: String::new(),
+        };
+        // Not on this thread: a miss is a connect timeout, and the view rebuilds on every message
+        window.sample_readings(context);
         if start {
             window.start(context);
         }
@@ -533,6 +588,26 @@ impl Component for Window {
                 self.save_settings();
             }
             Message::SaveAnswer(result) => self.model.answer_save(result == ContentDialogResult::Primary),
+            Message::Readings(result) => {
+                self.getting_readings = false;
+                match result {
+                    Ok(text) => {
+                        for line in text.lines() {
+                            self.model.log.push(line.to_string());
+                        }
+                        self.model.position = "Timings tools are in companions\\".to_string();
+                        let folder = tmr::companions_dir();
+                        context.spawn_background(move |_| Message::Opened(dialogs::shell_open(folder)));
+                    }
+                    Err(e) => {
+                        self.model.log.push(e.clone());
+                        self.model.errors.push(format!("Timings tools: {e}"));
+                        self.model.position = "The timings tools were not downloaded".to_string();
+                    }
+                }
+                self.sample_readings(context);
+            }
+            Message::ReadingsLine(line) => self.readings_line = line,
             Message::Args(text) => self.model.args = text,
             Message::LargePages(result) => self.model.answer_large_pages(match result {
                 ContentDialogResult::Primary => DialogButton::Primary,
@@ -942,6 +1017,7 @@ impl Window {
             MenuItem::separator(5usize),
             // A calibration of its own, before a run or after one, never during (TODO 110): they'd measure each other
             item(self.model.takes_parameters() && !self.model.calibrating(), 8, MENU_CALIBRATE),
+            item(self.model.takes_parameters() && !self.model.calibrating() && !self.getting_readings, 9, MENU_READINGS),
             MenuItem::item(6usize, MENU_SETTINGS),
             MenuItem::item(7usize, MENU_ABOUT),
         ];
@@ -1005,8 +1081,11 @@ impl Window {
             ),
             None => "Windows didn't say how much RAM is free".to_string(),
         };
-        let readings = crate::readings::line();
-        let extra = if readings.is_empty() { String::new() } else { format!(" · {readings}") };
+        let extra = if self.readings_line.is_empty() {
+            " · no timings yet: ••• → Get timings tools".to_string()
+        } else {
+            format!(" · {}", self.readings_line)
+        };
         TextBlock::new()
             .text(format!("An unstable overclock can freeze this PC. Save your work first. {ram}{extra}"))
             .foreground(brush(p.text_secondary))

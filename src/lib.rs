@@ -44,12 +44,14 @@ compile_error!(
 // `BUILD`, `request_stop` and `memory_status` (RAM free now, before a run). Everything else is private, so `dead_code` checks it. While `main.rs` held the CLI and every module here
 // was `pub`, all of them counted as public API, and an uncalled `pub fn` was never reported (TODO 69 E).
 pub mod commands; // the one-shot commands, writing to their caller's writer (TODO 29)
+mod companions; // ZenTimings and LibreHardwareMonitor, downloaded on request (TODO 122)
 pub mod cpu_check; // whether this CPU has the features TMR is built for (TODO 104)
 pub mod frontend; // the engine's interface to whoever shows a session: its events (TODO 29)
 pub mod home; // the folder TMR keeps its configs, results, logs and settings in: beside the exe, or TMR_HOME (TODO 104)
 pub mod logfile; // the log file, which every frontend's logger writes (TODO 29)
 pub mod session; // a command line's setup, then its run, through a frontend (TODO 29)
 pub use build_info::BUILD;
+pub use companions::dir as companions_dir;
 pub use external::{ExternalReading, line as external_line, sample as external_sample};
 pub use runner::{memory_status, request_stop};
 // What the CLI's tests drive the engine with, under the `test-support` feature (TODO 29)

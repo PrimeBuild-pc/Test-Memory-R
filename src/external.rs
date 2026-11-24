@@ -77,6 +77,10 @@ fn snapshot_path() -> Option<PathBuf> {
         }
     }
     let name = "live_snapshot_device_config.json";
+    let beside = crate::companions::dir().join("ZenTimings").join(name);
+    if beside.is_file() {
+        return Some(beside);
+    }
     for var in ["LOCALAPPDATA", "ProgramData"] {
         let Some(root) = std::env::var_os(var) else { continue };
         let path = PathBuf::from(root).join("ZenTimings").join(name);
