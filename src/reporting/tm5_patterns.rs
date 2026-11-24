@@ -32,11 +32,14 @@ impl Conversion {
         let source = def.tm5_pattern.clone()?;
         let effective_numbered = def.config.native_program().is_none().then(|| {
             let pattern = PatternId::from_config(&def.config);
-            Tm5PatternSource { mode: pattern.mode, param0: pattern.param0, param1: pattern.param1, written: None }
+            Tm5PatternSource { mode: pattern.mode, param0: pattern.param0, param1: pattern.param1, written: None, legacy_inputs: false }
         });
+        let input = |value: u64| if source.legacy_inputs { u64::from(value as u32) } else { value };
         let disposition = match &effective_numbered {
             None => Disposition::ReplacedByNativeProgram,
-            Some(effective) if (effective.mode, effective.param0, effective.param1) == (source.mode, source.param0, source.param1) => {
+            Some(effective)
+                if (effective.mode, effective.param0, effective.param1) == (source.mode, input(source.param0), input(source.param1)) =>
+            {
                 Disposition::RetainedForNumberedMode
             }
             Some(_) => Disposition::OverriddenForNumberedMode,
@@ -45,7 +48,7 @@ impl Conversion {
     }
 
     fn detail(&self, label: &str, effective: &str) -> String {
-        let Tm5PatternSource { mode, param0, param1, written } = &self.source;
+        let Tm5PatternSource { mode, param0, param1, written, .. } = &self.source;
         let [param0, param1] = written.clone().unwrap_or_else(|| [format!("{param0:#x}"), format!("{param1:#x}")]);
         let status = match self.disposition {
             Disposition::ReplacedByNativeProgram => "replaced by native program",

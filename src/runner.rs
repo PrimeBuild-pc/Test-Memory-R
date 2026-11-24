@@ -7357,8 +7357,13 @@ mod tests {
         let cache_info = crate::tests::get_cache_info();
         let (mut defs, _) = create_test_definitions_from_config(&modern, cache_info).unwrap();
         assert_eq!(defs.iter().map(|d| d.id.as_deref().unwrap()).collect::<Vec<_>>(), ["1", "2", "3", "1"]);
-        let source =
-            Tm5PatternSource { mode: 2, param0: 0x77777777, param1: 0x33333333, written: Some(["0x77777777".into(), "0x33333333".into()]) };
+        let source = Tm5PatternSource {
+            mode: 2,
+            param0: 0x77777777,
+            param1: 0x33333333,
+            written: Some(["0x77777777".into(), "0x33333333".into()]),
+            legacy_inputs: false,
+        };
         assert_eq!(defs[0].tm5_pattern, Some(source));
         assert_eq!((defs[0].config.pattern_param0, defs[0].config.pattern_param1), (None, None));
         assert!(defs[2].tm5_pattern.is_none(), "a mirror's fields are not a SimpleTest conversion");
@@ -7392,6 +7397,13 @@ mod tests {
         defs[0].config.pattern_param0 = Some(1);
         defs[0].config.pattern_param1 = Some(2);
         assert_eq!(Conversion::capture(&defs[0]).unwrap().disposition, Disposition::RetainedForNumberedMode);
+        let source = defs[0].tm5_pattern.as_mut().unwrap();
+        source.param1 = u64::MAX;
+        source.legacy_inputs = true;
+        defs[0].config.pattern_param1 = Some(u64::from(u32::MAX));
+        assert_eq!(Conversion::capture(&defs[0]).unwrap().disposition, Disposition::RetainedForNumberedMode, "legacy -1");
+        defs[0].config.pattern_param1 = Some(2);
+        assert_eq!(Conversion::capture(&defs[0]).unwrap().disposition, Disposition::OverriddenForNumberedMode);
 
         // Older exported imports have no provenance: load them without inventing source values or a conversion note.
         for entry in exported["test_sequence"].as_array_mut().unwrap() {

@@ -61,6 +61,9 @@ pub struct Tm5PatternSource {
     /// Parameter spellings from the .cfg, including wide values. Older exports have only the numeric fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub written: Option<[String; 2]>,
+    /// This import selected TM5's 32-bit parameter arithmetic. The source spelling and number still describe the original .cfg.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_inputs: bool,
 }
 
 fn default_channels() -> u32 {
@@ -2043,14 +2046,14 @@ impl LegacyConfig {
             let message = "isn't UTF-8 text (a file saved as ANSI, or damage): TMR reads each byte that isn't as �".to_string();
             warnings.push(CfgWarning { line, message });
         }
-        let parsed = Self::parse_reporting(&content, &mut warnings);
+        let parsed = Self::parse_reporting(&content, &mut warnings, crate::pattern::legacy_import());
         Ok((parsed, warnings))
     }
 
     /// `parse_reporting` without its warnings, for a test that checks only what a `.cfg`'s text loads as
     #[cfg(test)]
     pub(crate) fn parse_legacy_format(content: &str) -> Result<Self, String> {
-        Self::parse_reporting(content, &mut Vec::new())
+        Self::parse_reporting(content, &mut Vec::new(), false)
     }
 
     /// A `.cfg`'s text read as TM5 reads it, through `GetPrivateProfileString` (as measured on Windows Server 2025, build 26100): names
@@ -2072,7 +2075,7 @@ impl LegacyConfig {
     /// doesn't read, a header with no `]` or with a key=value after it, a repeated section or key, a missing section, a `[TestN]` at or
     /// above `Tests`, a number wider than 32 bits, a negative Parameter or Test Block Size, an odd `Test Sequence`, and a Tests, Channels
     /// or Lock Memory Granularity TMR clamps.
-    pub(crate) fn parse_reporting(content: &str, warnings: &mut Vec<CfgWarning>) -> Result<Self, String> {
+    fn parse_reporting(content: &str, warnings: &mut Vec<CfgWarning>, legacy_patterns: bool) -> Result<Self, String> {
         // Where a key=value line goes: nowhere before the first header (TM5's own text is there), into a section TM5 reads, or nowhere,
         // in one it doesn't or a repeated one
         enum Place {
@@ -2158,10 +2161,12 @@ impl LegacyConfig {
         // A key's number (`tm5_number`), `None` when it is missing or empty: TM5 reads an empty value as a missing one. Text that isn't a
         // number is an error, not the default TM5 makes it: an unreadable Parameter used to make a strided test sequential, silently. A
         // number wider than 32 bits keeps its low 32, as TM5's register does, with a warning
-        fn number(section: &CfgSection, name: &str, key: &str, warnings: &mut Vec<CfgWarning>) -> Result<Option<Tm5Number>, String> {
+        fn number(
+            section: &CfgSection, name: &str, key: &str, warnings: &mut Vec<CfgWarning>, warn_wide: bool,
+        ) -> Result<Option<Tm5Number>, String> {
             let Some(text) = section.get(key).filter(|text| !text.is_empty()) else { return Ok(None) };
             let n = tm5_number(text).ok_or_else(|| format!("TM5 config [{name}] {key}={}: not a number", cfg_quoted(text)))?;
-            if n.wide {
+            if n.wide && warn_wide {
                 let kept = if n.hex { format!("0x{:X}", n.value) } else { n.value.to_string() };
                 let handling = if matches!(key, "Pattern Param0" | "Pattern Param1") {
                     "patterns=legacy uses that value; the original is recorded"
@@ -2177,7 +2182,7 @@ impl LegacyConfig {
         // A key TM5 takes from 0 up. A '-' is refused: TM5 checks the number without it against the range, then stores it negated, which
         // no such key reads as meant (Cycles=-3 is 253 cycles)
         fn num(section: &CfgSection, name: &str, key: &str, default: u32, warnings: &mut Vec<CfgWarning>) -> Result<u32, String> {
-            match number(section, name, key, warnings)? {
+            match number(section, name, key, warnings, true)? {
                 None => Ok(default),
                 Some(n) if n.negative => Err(format!(
                     "TM5 config [{name}] {key}={}: negative, which TM5 checks against its range without the '-' and then stores negated; \
@@ -2190,7 +2195,7 @@ impl LegacyConfig {
         // A key whose TM5 range is every 32-bit number, 0x80000000 to 0x7FFFFFFF (Pattern Mode, Pattern Param0 and Param1, Parameter,
         // Test Block Size): a negative one is its two's complement, as TM5 stores it
         fn signed(section: &CfgSection, name: &str, key: &str, default: u32, warnings: &mut Vec<CfgWarning>) -> Result<u32, String> {
-            Ok(number(section, name, key, warnings)?.map_or(default, |n| n.value))
+            Ok(number(section, name, key, warnings, true)?.map_or(default, |n| n.value))
         }
         // A value TMR takes only within `lo..=hi` is clamped into it, with a warning
         fn clamped(section: &CfgSection, name: &str, key: &str, value: u32, (lo, hi): (u32, u32), warnings: &mut Vec<CfgWarning>) -> u32 {
@@ -2312,7 +2317,7 @@ impl LegacyConfig {
                 warnings.push(CfgWarning { line: test.line_of(block), message });
             }
             let mut param = |key: &str, default: u64| -> Result<(u64, String), String> {
-                let n = number(test, name, key, warnings)?;
+                let n = number(test, name, key, warnings, legacy_patterns)?;
                 Ok((
                     n.map_or(default, |n| n.source),
                     test.get(key).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("{default:#x}")),
@@ -2422,6 +2427,7 @@ impl LegacyConfig {
                     param0: test.pattern_param0,
                     param1: test.pattern_param1,
                     written: test.written_params.clone(),
+                    legacy_inputs: legacy_patterns,
                 });
                 let (function, program, pattern) = match function.as_str() {
                     "Mem-SimpleV2-Auto" if legacy_patterns => {
@@ -3427,7 +3433,7 @@ mod tests {
     /// A `.cfg`'s text parsed, and its warnings as (line, message)
     fn cfg_warnings(text: &str) -> (Result<LegacyConfig, String>, Vec<(usize, String)>) {
         let mut warnings = Vec::new();
-        let parsed = LegacyConfig::parse_reporting(text, &mut warnings);
+        let parsed = LegacyConfig::parse_reporting(text, &mut warnings, false);
         (parsed, warnings.into_iter().map(|w| (w.line, w.message)).collect())
     }
 
@@ -3460,8 +3466,8 @@ mod tests {
         assert_eq!(parsed.unwrap().tests.len(), 3);
     }
 
-    /// The TM5 configs beside the repo (`../TM5_Source`, `../TM5_configs/bin`, `../TM5`) load, convert and plan, and warn nothing but
-    /// 1usmus_v3's four 9-digit Pattern Param1 values, of which TM5 keeps the low 32 bits. None is in git, so CI has none to check;
+    /// The TM5 configs beside the repo (`../TM5_Source`, `../TM5_configs/bin`, `../TM5`) load, convert and plan without warnings.
+    /// Legacy import warns about 1usmus_v3's four 9-digit Pattern Param1 values, of which TM5 keeps the low 32 bits. None is in git;
     /// `a_tm5_written_cfg_warns_nothing` stands in for them. The home's `configs\` is left out: a `.cfg` there is the owner's own, and
     /// may be one damaged on purpose. TM5's own default `MT.cfg` (Tests=6) runs 2, 5, 1, 4, 3, 0, 1, as TM5 does.
     #[test]
@@ -3470,9 +3476,16 @@ mod tests {
         for dir in ["../TM5_Source", "../TM5_configs/bin", "../TM5"] {
             let Ok(entries) = fs::read_dir(root.join(dir)) else { continue };
             for path in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("cfg"))) {
-                let (parsed, warnings) = cfg_warnings(&fs::read_to_string(&path).unwrap());
+                let text = fs::read_to_string(&path).unwrap();
+                let (parsed, warnings) = cfg_warnings(&text);
                 let shown = path.display();
-                let wide = warnings.iter().filter(|(_, w)| w.contains("Pattern Param1=0x") && w.contains("keeps the low 32 bits")).count();
+                assert!(warnings.is_empty(), "{shown}: {warnings:?}");
+                let mut warnings = Vec::new();
+                LegacyConfig::parse_reporting(&text, &mut warnings, true).unwrap();
+                let wide = warnings
+                    .iter()
+                    .filter(|w| w.message.contains("Pattern Param1=0x") && w.message.contains("keeps the low 32 bits"))
+                    .count();
                 let expected = if path.file_name().is_some_and(|name| name == "1usmus_v3.cfg") { 4 } else { 0 };
                 assert!(parsed.is_ok() && wide == expected && warnings.len() == wide, "{shown}: {:?} {warnings:?}", parsed.err());
                 let mut notes = Vec::new();
@@ -4078,6 +4091,7 @@ mod tests {
             let modern = source.convert_with_patterns(&mut Vec::new(), legacy).unwrap();
             let test = modern.test_sequence.iter().find(|t| t.id.as_deref() == Some("1")).unwrap();
             let recorded = test.tm5_pattern.as_ref().unwrap();
+            assert_eq!(recorded.legacy_inputs, legacy);
             assert_eq!(recorded.param1, 0xC_5055_2FE6);
             assert_eq!(recorded.written.as_ref().unwrap()[1], "0xC50552FE6");
             assert_eq!(test.pattern_param1, legacy.then_some(0x5055_2FE6));
@@ -4102,11 +4116,17 @@ mod tests {
         assert_eq!((t.pattern_param0, t.pattern_param1), (0x1E5F, 0x6E72_A941));
         let (t, warnings) = test1("Pattern Param1=0xC50552FE6").unwrap();
         assert_eq!(t.pattern_param1, 0xC_5055_2FE6);
-        assert_eq!(warnings, [(
-            6,
-            "[Test1] Pattern Param1=0xC50552FE6 is wider than 32 bits; TM5 keeps the low 32 bits, 0x50552FE6; patterns=legacy uses that value; the original is recorded"
-                .to_string()
-        )]);
+        assert!(warnings.is_empty());
+        let mut warnings = Vec::new();
+        LegacyConfig::parse_reporting(
+            "[Main Section]\nTest Sequence=1\n[Global Memory Setup]\n[Test1]\nFunction=SimpleTest\nPattern Param1=0xC50552FE6",
+            &mut warnings,
+            true,
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].line, 6);
+        assert!(warnings[0].message.contains("low 32 bits, 0x50552FE6"));
         // Test1's own defaults for empty values; a value's quotes and comment dropped
         let (t, warnings) = test1("Parameter=\nPattern Mode=\"2\"\nTime (%)=100.5 ; a comment\nTest Block Size (Mb)='0x20'").unwrap();
         assert_eq!((t.parameter, t.pattern_mode, t.time_percent, t.test_chunk_size_mb), (0, 2, 100, 32));
