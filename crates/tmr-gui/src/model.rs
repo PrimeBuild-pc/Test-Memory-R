@@ -564,6 +564,8 @@ pub struct Model {
     /// The cache calibration tmr-cfg.json holds, as the info line says it before a run (TODO 110); the window reads it as it opens, at Run
     /// again and after its own calibration
     pub stored_calibration: Option<String>,
+    /// Bits that failed this run, test and seal, for the strip under the errors list. Empty until a step reports one.
+    pub failing_mask: u64,
 }
 
 impl Model {
@@ -611,12 +613,21 @@ impl Model {
             calibrating: false,
             rechecking: false,
             stored_calibration: None,
+            failing_mask: 0,
         }
     }
 
     /// The command line Start runs: the exe's name, then the parameters box's
     pub fn command(&self) -> Vec<String> {
         std::iter::once(self.program.clone()).chain(args_of(&self.args)).collect()
+    }
+
+    /// Replace `key=` in the parameters box, or append it. Other keys stay. The box remains the only parser the run sees.
+    pub fn set_setting(&mut self, key: &str, value: &str) {
+        let prefix = format!("{key}=");
+        let mut args: Vec<String> = args_of(&self.args).into_iter().filter(|arg| !arg.starts_with(&prefix)).collect();
+        args.push(format!("{prefix}{value}"));
+        self.args = args_text(&args);
     }
 
     /// A config chosen in the Open dialog (TODO 109): `config=<path>` in the parameters box, in place of the one there
@@ -1103,11 +1114,13 @@ impl Model {
             Run::CycleStarted { cycle, .. } => self.cycle = cycle,
             Run::CycleFinished { cycle, partial } => (self.cycles_finished, self.last_partial) = (cycle, partial),
             Run::SealStage { op, errors, bits, .. } => {
+                self.failing_mask |= bits.mask();
                 if op == SealOp::FinalCheck && errors > 0 {
                     self.errors.push(format!("Cycle {} · final seal check: {errors} errors{}", self.cycle, bits.brief()));
                 }
             }
             Run::StepFinished(report) => {
+                self.failing_mask |= report.summary.failing_bits.mask() | report.summary.seal_failing_bits.mask();
                 if let Some(error) = step_errors(&report) {
                     self.errors.push(error);
                 }
@@ -1199,8 +1212,16 @@ impl Model {
         self.calibrating = false;
         self.position = match result {
             Ok(RunStatus::Passed) => "Calibrated: the next run sizes its tests from it".to_string(),
-            Ok(_) => "The calibration failed: the Log tab says why".to_string(),
-            Err(e) => format!("The calibration failed: {e}"),
+            Ok(_) => {
+                let line = "The calibration failed: the Log tab says why".to_string();
+                self.errors.push(line.clone());
+                line
+            }
+            Err(e) => {
+                let line = format!("The calibration failed: {e}");
+                self.errors.push(line.clone());
+                line
+            }
         };
     }
 

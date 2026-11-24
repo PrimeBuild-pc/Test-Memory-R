@@ -2,13 +2,15 @@
 //!
 //! Persistent configuration file (`tmr-cfg.json`) stored in TMR's home, next to the executable (`home.rs`).
 //! Holds machine identity, calibration results, UI preferences, and session state.
-//! All fields are optional — missing fields use defaults, unknown fields are preserved.
+//! All fields are optional — missing fields use defaults. A save keeps keys this build does not know, taken from the object it read.
+//! A file that is not JSON, or that this build cannot parse, is not overwritten.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::cache::SystemInfo;
 use crate::calibration::{CalibrationResults, SealCalibration};
@@ -200,41 +202,70 @@ pub struct AppConfig {
     pub seal_calibration: Option<SealCalibration>,
     // What the window keeps between sessions (its last parameters, the chart shown or not, starting on open, its size) is window.json's
     // (tmr-gui's settings.rs, TODO 109), not this file's: this one is the engine's record of the machine (TODO 7, the owner, 2026-11-04)
+    /// The object `load` read, so a save puts this build's fields over it and leaves keys it does not know. Not a field of the file.
+    #[serde(skip)]
+    pub(crate) retained: Map<String, Value>,
+    /// The file was there and could not be parsed. `save` refuses, so a calibration does not replace it with defaults.
+    #[serde(skip)]
+    pub(crate) unreadable: bool,
 }
 
 const CONFIG_FILENAME: &str = "tmr-cfg.json";
 
 impl AppConfig {
-    /// Load config from a JSON file. Returns Default if file doesn't exist.
+    /// Load config from a JSON file. A missing file is the defaults, and a later save may create it. A file that is not a JSON object,
+    /// or that this build cannot parse, is the defaults with `unreadable` set, so a save does not replace it.
     pub fn load(path: &std::path::Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => match serde_json::from_str(&contents) {
-                Ok(config) => {
-                    log::info!("Loaded app config from {}", path.display());
-                    config
-                }
-                Err(e) => {
-                    log::warn!("Failed to parse {}: {} — using defaults", path.display(), e);
-                    Self::default()
-                }
-            },
-            Err(_) => {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 log::info!("No config file at {} — using defaults", path.display());
-                Self::default()
+                return Self::default();
+            }
+            Err(e) => {
+                log::warn!("Failed to read {}: {e} — using defaults, and a save will not overwrite it", path.display());
+                return Self { unreadable: true, ..Self::default() };
+            }
+        };
+        let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&contents) else {
+            log::warn!("Failed to parse {} — using defaults, and a save will not overwrite it", path.display());
+            return Self { unreadable: true, ..Self::default() };
+        };
+        match serde_json::from_value::<AppConfig>(Value::Object(map.clone())) {
+            Ok(mut config) => {
+                config.retained = map;
+                log::info!("Loaded app config from {}", path.display());
+                config
+            }
+            Err(e) => {
+                log::warn!("Failed to parse {}: {e} — using defaults, and a save will not overwrite it", path.display());
+                Self { unreadable: true, ..Self::default() }
             }
         }
     }
 
-    /// Save config to a JSON file (pretty-printed)
+    /// Save config to a JSON file (pretty-printed). Refuses when `load` could not read the file that is already there. Keys this build
+    /// does not know, kept from that read, stay in the file.
     pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
-        // Ensure parent directory exists
+        if self.unreadable {
+            return Err(format!("{} could not be read; not overwriting it", path.display()));
+        }
         if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
             std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
         }
 
-        let json = serde_json::to_string_pretty(self).map_err(|e| format!("Failed to serialize config: {}", e))?;
+        let known = serde_json::to_value(self).map_err(|e| format!("Failed to serialize config: {e}"))?;
+        let mut file = self.retained.clone();
+        if let Value::Object(known) = known {
+            for (key, value) in known {
+                file.insert(key, value);
+            }
+        }
+        let mut json = serde_json::to_string_pretty(&Value::Object(file)).map_err(|e| format!("Failed to serialize config: {e}"))?;
+        json.push('\n');
 
         std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
 
@@ -374,11 +405,30 @@ mod tests {
 
     #[test]
     fn test_unknown_fields_preserved() {
-        // JSON with an extra field not in the struct
-        let json = r#"{"machine_id": "test", "some_future_field": 42}"#;
-        // Should parse without error (serde default behavior with #[serde(default)])
-        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let path = std::env::temp_dir().join(format!("tmr-cfg-unknown-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"machine_id": "test", "some_future_field": 42}"#).unwrap();
+        let mut config = AppConfig::load(&path);
         assert_eq!(config.machine_id.as_deref(), Some("test"));
+        config.machine_id = Some("kept".to_string());
+        config.save(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(saved.contains("some_future_field"), "{saved}");
+        assert!(saved.contains("kept"), "{saved}");
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_not_overwritten() {
+        let path = std::env::temp_dir().join(format!("tmr-cfg-bad-{}.json", std::process::id()));
+        let original = "{\"calibration\": {\"not\": \"a calibration\"}}";
+        std::fs::write(&path, original).unwrap();
+        let config = AppConfig::load(&path);
+        assert!(config.calibration.is_none());
+        let err = config.save(&path).unwrap_err();
+        let kept = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("not overwriting"), "{err}");
+        assert_eq!(kept, original);
     }
 
     #[test]

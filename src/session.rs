@@ -326,11 +326,9 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
             // Apply the override based on parameter type
             match key.as_str() {
                 "errors" => {
-                    error_mode = match params::get_string(&validated_params, "errors", "log").to_lowercase().as_str() {
-                        "halt" | "stop" => ErrorMode::Halt,
-                        "panic" | "debug" => ErrorMode::Panic,
-                        _ => ErrorMode::Log,
-                    };
+                    // The registry already accepted this (`ErrorMode::parse`), including `halt:N`. A second match that only knows
+                    // `halt`/`stop`/`panic`/`debug` turned `halt:25` into `Log`, and a CLI override of a config that had `halt:N` did too.
+                    error_mode = error_mode_of(&params::get_string(&validated_params, "errors", "log"));
                     log::debug!("CLI override: error_mode = {:?}", error_mode);
                 }
                 "cycles" => {
@@ -856,6 +854,12 @@ fn show_the_machine(fe: &dyn Frontend, system: Setup, topology: Setup) {
     fe.event(topology.into());
 }
 
+/// `errors=` as the run will use it. The parameter registry already rejected a value `ErrorMode::parse` does not accept, so a failure
+/// here is a default of `log`, the same as a missing `errors=`.
+fn error_mode_of(value: &str) -> ErrorMode {
+    ErrorMode::parse(value).unwrap_or(ErrorMode::Log)
+}
+
 /// Parsed configuration bundle produced from validated CLI parameters:
 /// `(memory_strategy, error_mode, suite_timing, cputype, cpus, pinning, alloc)`.
 type ParsedRunConfig = (EnhancedMemoryStrategy, ErrorMode, TestSuiteTiming, String, String, CpuPinningConfig, MemoryAllocationConfig);
@@ -867,12 +871,9 @@ fn build_config_from_validated_params(validated: &HashMap<String, params::ParamV
     let cputype = params::get_string(validated, "cputype", "threads");
     let cpus = params::get_string(validated, "cpus", "100%");
 
-    // Build error mode
-    let error_mode = match params::get_string(validated, "errors", "log").to_lowercase().as_str() {
-        "halt" | "stop" => ErrorMode::Halt,
-        "panic" | "debug" => ErrorMode::Panic,
-        _ => ErrorMode::Log,
-    };
+    // The registry already accepted this (`ErrorMode::parse`), including `halt:N`. Re-parsing here with a shorter match turned
+    // `errors=halt:25` into `Log`, so the monitor never saw a count to stop at.
+    let error_mode = error_mode_of(&params::get_string(validated, "errors", "log"));
 
     // The suite's limits: cycles=, duration= or both, whichever is reached first (the runner checks each between cycles), else 3 cycles
     let (cycles, duration) = (params::has_param(validated, "cycles"), params::has_param(validated, "duration"));
@@ -1035,6 +1036,17 @@ mod tests {
         assert_eq!(timing(&["duration=60"]), (None, Some(60)), "the clock alone");
         assert_eq!(timing(&["cycles=2"]), (Some(2), None), "cycles alone");
         assert_eq!(timing(&[]), (Some(3), None), "neither");
+
+        let mode = |line: &[&str]| {
+            let (_, mode, ..) = build_config_from_validated_params(&params::parse_and_validate_args(&args(line)).unwrap(), &Quiet);
+            mode
+        };
+        assert_eq!(mode(&["errors=halt:5"]), ErrorMode::HaltAfter(5), "the count the monitor stops at");
+        assert_eq!(mode(&["errors=halt"]), ErrorMode::Halt);
+        assert_eq!(mode(&["errors=stop"]), ErrorMode::Halt);
+        assert_eq!(mode(&["errors=log"]), ErrorMode::Log);
+        assert_eq!(mode(&[]), ErrorMode::Log);
+        assert!(params::parse_and_validate_args(&args(&["errors=halt:0"])).is_err(), "N at least 1");
 
         let defaulted = |line: &[&str]| {
             let mut line = args(line);

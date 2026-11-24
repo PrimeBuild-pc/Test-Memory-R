@@ -104,6 +104,10 @@ pub(crate) enum Message {
     Theme(Option<usize>),
     Scheme(ColorScheme),
     Size(WindowSize),
+    /// A common setting written into the parameters box: `plan`, `memory`, `cycles` or `errors`, and the value
+    Preset(&'static str, &'static str),
+    /// Settings: a sound at the first error and when the run ends
+    Notify(bool),
 }
 
 /// What the window waits on: the session's feed, and the warnings and errors it logs
@@ -297,7 +301,8 @@ impl Window {
             let _ = tx.send(Feed::Calibrated(result));
         });
         match calibration {
-            Ok(_) => {
+            Ok(handle) => {
+                crate::calibrate_started(handle);
                 self.model.calibration_started();
                 listen(Feeds { events: rx, log }, None, self.priority, context);
             }
@@ -328,8 +333,13 @@ impl Window {
                 }
             }
         }
+        let was_alarm = self.model.error_count.as_ref().is_some_and(|count| count.alarm);
         self.model.logged(log, dropped);
         self.model.tick(snapshot, whea);
+        let alarm = self.model.error_count.as_ref().is_some_and(|count| count.alarm);
+        if self.settings.notify && alarm && !was_alarm {
+            sound(true);
+        }
         if closed && !ended {
             // A panic ends the thread before it says how it went (a release build aborts). Whose thread: the window's own calibration's
             // feed is the only one read while the box takes parameters (before a run, or after one); a session's is read with it not
@@ -343,6 +353,9 @@ impl Window {
         // Raised at setup's selection, normal again as the session ends: here, as the model changes it, and before the log file closes
         self.follow_priority();
         if ended {
+            if self.settings.notify {
+                sound(self.model.error_count.as_ref().is_some_and(|count| count.alarm));
+            }
             // The lines logged since the waiter took the batch's, the priority's line among them: this run's Log tab's, not the next's
             let (log, dropped) = feeds.log.take();
             self.model.logged(log, dropped);
@@ -498,10 +511,20 @@ impl Component for Window {
             }
             Message::RunAgain => {}
             Message::Stop => {
-                if self.model.status == Status::Running {
+                if self.model.status == Status::Running || self.model.calibrating() {
                     tmr::request_stop();
-                    self.model.stop();
+                    if self.model.status == Status::Running {
+                        self.model.stop();
+                    } else {
+                        self.model.position = "Stopping the calibration…".to_string();
+                    }
                 }
+            }
+            Message::Preset(key, value) if self.model.takes_parameters() => self.model.set_setting(key, value),
+            Message::Preset(_, _) => {}
+            Message::Notify(on) => {
+                self.settings.notify = on;
+                self.save_settings();
             }
             Message::Args(text) => self.model.args = text,
             Message::LargePages(result) => self.model.answer_large_pages(match result {
@@ -664,12 +687,18 @@ impl Component for Window {
 // ---- view pieces -------------------------------------------------------------------------
 
 impl Window {
-    /// The badge's fill: success while running and for a pass, critical for a fail
+    /// The badge's fill. Green is a pass only: a running suite with errors is not a pass, and a clean run in progress is the accent, not
+    /// the success colour. The count itself sits beside the badge, so it stays in sight on every tab.
     fn status_fill(&self) -> Color {
         let p = self.palette();
+        if self.model.calibrating() {
+            return p.accent;
+        }
         match self.model.status {
-            Status::Running | Status::Passed => p.success,
+            Status::Passed => p.success,
             Status::Failed => p.critical,
+            Status::Running if self.model.error_count.as_ref().is_some_and(|count| count.alarm) => p.critical,
+            Status::Running => p.accent,
             Status::Ready | Status::Stopping | Status::Interrupted | Status::NotRun => p.neutral,
         }
     }
@@ -685,6 +714,7 @@ impl Window {
             .columns([
                 GridLength::Auto, // title
                 GridLength::Auto, // badge
+                GridLength::Auto, // the run's errors, on every tab
                 GridLength::STAR,
                 GridLength::Auto, // runtime
             ])
@@ -704,11 +734,12 @@ impl Window {
                     .background(brush(self.status_fill()))
                     .content(
                         TextBlock::new()
-                            .text(self.model.status.label())
+                            .text(if self.model.calibrating() { "Calibrating" } else { self.model.status.label() })
                             .font_size(12.0)
                             .font_weight(FontWeight::SEMI_BOLD)
                             .foreground(brush(p.on_status)),
                     ),
+                self.error_badge(),
                 // The runtime keeps reactor's default font: 0.100.0's TextBlock has no font family; the next release adds it (owner's note
                 // 6).
                 TextBlock::new()
@@ -717,7 +748,7 @@ impl Window {
                     .font_weight(FontWeight::SEMI_LIGHT)
                     .foreground(brush(p.text_primary))
                     .vertical_alignment(VerticalAlignment::Center)
-                    .grid_column(3)
+                    .grid_column(4)
                     // A tooltip wraps its target: the target's grid placement goes first
                     .tooltip("The suite's runtime, from its first cycle, as the console's ticker counts it"),
             ));
@@ -912,11 +943,77 @@ impl Window {
             .vertical_alignment(VerticalAlignment::Center)
             .content("•••")
             .menu(Menu::new(menu, context.callback(Message::Menu)));
-        Grid::new()
-            .grid_row(row)
+        let bar = Grid::new()
             .column_spacing(8.0)
             .columns([GridLength::Auto, GridLength::Auto, GridLength::Auto, GridLength::STAR, GridLength::Auto])
-            .children((parameters, load, self.run_button(2, context), more))
+            .children((parameters, load, self.run_button(2, context), more));
+        StackPanel::new().grid_row(row).spacing(6.0).children((bar, self.presets(context), self.caution()))
+    }
+
+    /// Plan, memory, cycles and errors, written into the same parameters box. The box stays the run's only parser.
+    fn presets(&self, context: &ViewContext<Self>) -> View {
+        let on = self.model.takes_parameters();
+        let menu = |label: &str, key: &'static str, values: &[(&'static str, &'static str)]| {
+            let items = values.iter().enumerate().map(|(i, (value, _))| MenuItem::item(i, *value)).collect::<Vec<_>>();
+            let picked = values.to_vec();
+            Button::new().is_enabled(on).content(label).menu(Menu::new(
+                items,
+                context.callback(move |which: String| {
+                    picked
+                        .iter()
+                        .find(|(value, _)| *value == which)
+                        .map_or(Message::Preset(key, ""), |(_, stored)| Message::Preset(key, stored))
+                }),
+            ))
+        };
+        StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
+            menu("Plan", "plan", &[("stability", "stability"), ("quick", "quick"), ("perf", "perf"), ("widths", "widths"), ("all", "all")]),
+            menu("Memory", "memory", &[
+                ("50%", "50%"),
+                ("80%", "80%"),
+                ("90%", "90%"),
+                ("2048MB reserve", "2048MB"),
+                ("8GiB reserve", "8GiB"),
+            ]),
+            menu("Cycles", "cycles", &[("1", "1"), ("3", "3"), ("5", "5"), ("10", "10")]),
+            menu("Errors", "errors", &[
+                ("log", "log"),
+                ("halt", "halt"),
+                ("halt:1", "halt:1"),
+                ("halt:10", "halt:10"),
+                ("halt:100", "halt:100"),
+            ]),
+        ))
+    }
+
+    /// Always visible: an unstable overclock can freeze the machine, and how much RAM is free before Start.
+    fn caution(&self) -> View {
+        let p = self.palette();
+        let ram = match tmr::memory_status() {
+            Some(status) => format!(
+                "{:.1} GiB free of {:.1}",
+                status.avail_phys as f64 / (1024.0 * 1024.0 * 1024.0),
+                status.total_phys as f64 / (1024.0 * 1024.0 * 1024.0)
+            ),
+            None => "Windows didn't say how much RAM is free".to_string(),
+        };
+        let readings = crate::readings::line();
+        let extra = if readings.is_empty() { String::new() } else { format!(" · {readings}") };
+        TextBlock::new()
+            .text(format!("An unstable overclock can freeze this PC. Save your work first. {ram}{extra}"))
+            .foreground(brush(p.text_secondary))
+            .text_wrapping(TextWrapping::Wrap)
+            .into()
+    }
+
+    /// The run's error count, beside the badge, so leaving the Run tab does not hide a failing soak.
+    fn error_badge(&self) -> TextBlock {
+        let p = self.palette();
+        let (text, colour) = match &self.model.error_count {
+            Some(count) => (count.text.clone(), if count.alarm { p.error } else { p.text_secondary }),
+            None => (String::new(), p.text_secondary),
+        };
+        TextBlock::new().text(text).foreground(brush(colour)).vertical_alignment(VerticalAlignment::Center).grid_column(2)
     }
 
     /// The run button (TODO 109): Start, then Stop in the error colour, Stopping… while the step ends, Finishing… while the session saves
@@ -926,7 +1023,9 @@ impl Window {
         let button = Button::new().width(RUN_BUTTON).grid_column(column);
         match self.model.status {
             // A calibration of the window's own first (TODO 110)
-            _ if self.model.calibrating() && self.model.takes_parameters() => button.is_enabled(false).content("Calibrating…"),
+            _ if self.model.calibrating() => {
+                button.resource_overrides(stop_colours(p)).on_click(context.callback(|()| Message::Stop)).content("Stop")
+            }
             Status::Ready => button.style(ButtonStyle::Accent).on_click(context.callback(|()| Message::Start)).content("Start"),
             Status::Running => button.resource_overrides(stop_colours(p)).on_click(context.callback(|()| Message::Stop)).content("Stop"),
             Status::Stopping => button.is_enabled(false).content("Stopping…"),
@@ -1166,7 +1265,9 @@ impl Window {
         let total = self.model.errors.total();
         let shown = if total > SHOWN as u64 { format!(" · the newest {SHOWN} shown") } else { String::new() };
         let dropped = self.model.dropped_line().map_or(String::new(), |line| format!(" · {line}"));
-        card(row, p, card_title(format!("Errors · {total}{shown}{dropped}"), p), body)
+        let strip = bit_strip(self.model.failing_mask, p);
+        let title = StackPanel::new().spacing(6.0).children((card_title(format!("Errors · {total}{shown}{dropped}"), p), strip));
+        card(row, p, title, body)
     }
 
     /// The large-page question, the console's as a dialog, open while the session's thread waits for its answer, in the words of the last
@@ -1224,6 +1325,7 @@ impl Window {
             &self.settings,
             context.callback(Message::StartOnOpen),
             context.callback(Message::Serials),
+            context.callback(Message::Notify),
             context.callback(Message::Theme),
         ))
     }
@@ -1608,7 +1710,7 @@ fn dialog_content(text: TextBlock, words: &crate::model::LargePageDialog, on_sel
 /// inside a dialog fails reactor 0.100.0 (`a_tooltip_in_a_dialog_still_fails`).
 fn settings_content(
     settings: &crate::settings::Settings, on_start: impl IntoPayloadCallback<bool>, on_serials: impl IntoPayloadCallback<bool>,
-    on_theme: impl IntoPayloadCallback<Option<usize>>,
+    on_notify: impl IntoPayloadCallback<bool>, on_theme: impl IntoPayloadCallback<Option<usize>>,
 ) -> View {
     let row = |words: &str, switch: ToggleSwitch| -> View {
         Grid::new().columns([GridLength::STAR, GridLength::Auto]).column_spacing(12.0).children((
@@ -1624,6 +1726,7 @@ fn settings_content(
         "Keep serial numbers, the DIMMs' and the system's UUID, in the run's output, log and results file (off: --no-serials)",
         ToggleSwitch::new().is_on(settings.serials).on_toggled(on_serials),
     );
+    let notify = row("Sound at the first error, and when the run ends", ToggleSwitch::new().is_on(settings.notify).on_toggled(on_notify));
     let theme = StackPanel::new().spacing(4.0).children((
         TextBlock::new().text("Theme"),
         RadioButtons::new()
@@ -1633,7 +1736,34 @@ fn settings_content(
             .on_selection_changed(on_theme),
     ));
     let kept = TextBlock::new().text("Kept in window.json, in TMR's folder, as each changes").text_wrapping(TextWrapping::Wrap);
-    StackPanel::new().spacing(14.0).children((start, serials, theme, kept))
+    StackPanel::new().spacing(14.0).children((start, serials, notify, theme, kept))
+}
+
+/// A sound, not a toast: an unpackaged window has no shortcut to hang a toast on. `alarm` is the error sound; a clean end is the asterisk.
+fn sound(alarm: bool) {
+    // windows 0.62's Win32_UI_WindowsAndMessaging feature does not expose MessageBeep. The id is the Win32 one: 0x10 hand, 0x40 asterisk.
+    unsafe extern "system" {
+        fn MessageBeep(kind: u32) -> i32;
+    }
+    // SAFETY: one integer, no pointer. It plays a system sound and returns.
+    let _ = unsafe { MessageBeep(if alarm { 0x10 } else { 0x40 }) };
+}
+
+/// 64 squares, one per data bit, filled where a check failed. Colour is not the only signal: the count sits in the errors title.
+fn bit_strip(mask: u64, p: &Palette) -> View {
+    if mask == 0 {
+        return TextBlock::new().text("").into();
+    }
+    let cells = (0u64..64).map(|bit| {
+        let on = mask & (1u64 << bit) != 0;
+        let cell = Border::new().width(8.0).height(12.0).background(brush(if on { p.error } else { p.chart_grid }));
+        (bit, View::from(cell))
+    });
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(1.0)
+        .keyed_children(cells)
+        .tooltip("Failed data bits, bit 0 on the left. A filled square is a bit a check found wrong.")
 }
 
 fn card_title(title: String, p: &Palette) -> TextBlock {
@@ -1746,8 +1876,9 @@ mod tests {
     #[test]
     fn the_settings_dialog_opens_and_closes() {
         let mut settings = crate::settings::Settings::default();
-        let content =
-            |settings: &crate::settings::Settings| super::settings_content(settings, |_: bool| {}, |_: bool| {}, |_: Option<usize>| {});
+        let content = |settings: &crate::settings::Settings| {
+            super::settings_content(settings, |_: bool| {}, |_: bool| {}, |_: bool| {}, |_: Option<usize>| {})
+        };
         let mut pump = Pump::new(RecordingRuntime::default());
         pump.mount_view(dialog(false, TextBlock::new().text("closed").into())).unwrap();
         pump.update_view(dialog(true, content(&settings))).unwrap();

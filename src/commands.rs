@@ -174,7 +174,7 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     writeln!(out, "COMMAND LINE PARAMETERS:")?;
     entry(out, "memory=20%", "Reserve 20% of the memory available now (as 20%-from-available)")?;
     entry(out, "memory=2GiB", "Reserve 2 GiB")?;
-    entry(out, "memory=2048MB", "TM5-compatible allocation (2048MB from available)")?;
+    entry(out, "memory=2048MB", "Reserve 2048 MiB from available, and test the rest (TM5's Mb; MB is 1024×1024)")?;
     entry(out, "memory=10%-from-available", "Reserve 10% from currently available memory")?;
     entry(out, "memory=8GiB-from-total", "Reserve 8 GiB from total system memory")?;
     entry(out, "memory=64GiB-target", "Target 64 GiB allocation (may fail if unavailable)")?;
@@ -328,7 +328,7 @@ fn usage(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     let cmd = |out: &mut dyn Write, args: &str, comment: &str| entry(out, format!("{program_name} {args}").trim_end(), comment);
     writeln!(out, "Quick Usage Examples:")?;
     cmd(out, "memory=10%-from-available", "Standard: Reserve 10% from currently available memory")?;
-    cmd(out, "memory=2048MB", "TM5 compatible: Reserve 2048MB from available memory")?;
+    cmd(out, "memory=2048MB", "TM5 compatible: reserve 2048 MiB from available, test the rest")?;
     cmd(out, "memory=8GiB-from-total", "Failure test: Reserve 8 GiB from total (unrealistic)")?;
     cmd(out, "memory=64GiB-target", "Failure test: Target 64 GiB allocation (may fail)")?;
     cmd(out, "cycles=5 duration=600", "5 cycles OR 10 minutes max")?;

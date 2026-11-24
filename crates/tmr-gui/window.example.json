@@ -5,6 +5,7 @@
     "chart: the throughput chart shows. theme: system, light or dark.",
     "start_on_open: the run starts as the window opens, as --start does.",
     "serials: the DIMMs' serials and the system's UUID in the run's output, log and results; false runs with --no-serials.",
+    "notify: a sound at the first error, and when the run ends. Off by default.",
     "parameters: the parameters box's text when tmr.exe is given none; the window keeps the last run's.",
     "size: [width, height], as it last closed.",
     "colours: #RRGGBB or #AARRGGBB (alpha first). Leave a key out to keep its default."
@@ -13,6 +14,7 @@
   "theme": "system",
   "start_on_open": false,
   "serials": true,
+  "notify": false,
   "parameters": null,
   "colours": {
     "_note": "egui's grey text instead of WinUI's white: dark.text_primary #8C8C8C, light.text_primary #505050.",
@@ -21,7 +23,7 @@
       "text_secondary": "info line, table headings, empty-state lines, chart axis labels, the chart's stage lines and labels",
       "error": "error bullets, a non-zero error count, the chart's error marks",
       "critical": "the 'Failed' badge fill, the Stop button",
-      "success": "the 'Running' and 'Passed' badge fill",
+      "success": "the 'Passed' badge fill",
       "neutral": "the other badges' fill: 'Ready', 'Stopping', 'Interrupted', 'Not run'",
       "on_status": "badge text, the Stop button's text",
       "accent": "the chart's throughput line",
