@@ -2503,7 +2503,6 @@ mod tests {
     /// once take the older as the baseline, and one or three say it takes two
     #[test]
     fn the_compare_tab_compares_each_pair_once() {
-        tmr::test_support::use_test_home();
         let mut tab = CompareTab::default();
         tab.set(Slot::Baseline, PathBuf::from("a.json"));
         assert_eq!(tab.next(), None, "one file");
@@ -2522,7 +2521,7 @@ mod tests {
         assert_eq!(tab.set_both(Vec::new()), Ok(()), "the dialog cancelled");
         let three = tab.set_both(vec![PathBuf::from("a.json"); 3]).expect_err("three files");
         assert!(three.starts_with("Compare takes two results files, not 3"), "{three}");
-        let dir = std::env::temp_dir().join(format!("tmr-gui-compare-{}", std::process::id()));
+        let dir = tmr::test_support::test_home().join("gui-compare");
         std::fs::create_dir_all(&dir).expect("a temp folder");
         let (older, newer) = (dir.join("older.json"), dir.join("newer.json"));
         std::fs::write(&older, "not a results file").expect("a file");

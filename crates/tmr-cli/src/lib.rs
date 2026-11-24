@@ -293,7 +293,7 @@ mod tests {
         let _turn = turn();
         let (finished, never_finished) = (tmr::test_support::results_file_finished(), tmr::test_support::results_file_never_finished());
         let from_setup = tmr::test_support::results_file_from_setup();
-        let unreadable = std::env::temp_dir().join(format!("tmr-cli-show-results-{}.json", std::process::id()));
+        let unreadable = tmr::test_support::test_home().join("unreadable-result.json");
         std::fs::write(&unreadable, r#"{"metadata": {"tmr_version": "0.1.0"}}"#).expect("a temp file");
         let unreadable = unreadable.to_str().expect("a UTF-8 temp path").to_string();
         let cases = [

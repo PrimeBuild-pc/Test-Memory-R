@@ -345,9 +345,7 @@ mod tests {
     /// is the defaults, the copy left alone; with no copy that reads, the defaults, said, and the window doesn't write over it.
     #[test]
     fn a_damaged_settings_file_takes_its_last_good_copy() {
-        tmr::test_support::use_test_home();
-        let dir = std::env::temp_dir().join(format!("tmr-gui-last-good-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = tmr::test_support::test_home().join("gui-last-good");
         let path = dir.join(tmr::settings_file::FOLDER).join("window.json");
         let (copy, kept) = (tmr::settings_file::backup_of(&path), path.with_file_name("window.json.unreadable"));
         let saved = Settings { chart: false, theme: Theme::Dark, parameters: Some("plan=stability".to_string()), ..Settings::default() };

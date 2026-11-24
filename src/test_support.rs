@@ -26,12 +26,13 @@ const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 
 /// Select a disposable home before a frontend fixture uses the engine from its dependency build.
-pub fn use_test_home() {
+pub fn test_home() -> &'static Path {
     crate::home::use_test_home();
+    crate::home::dir()
 }
 
 fn new_test_result() -> TestRunResult {
-    use_test_home();
+    test_home();
     TestRunResult::new(Default::default())
 }
 

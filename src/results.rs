@@ -1187,9 +1187,10 @@ pub(crate) struct TempDir(std::path::PathBuf);
 #[cfg(any(test, feature = "test-support"))]
 impl TempDir {
     pub(crate) fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("tmr-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = crate::test_support::test_home().join(format!("{name}-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         TempDir(dir)
     }
 
