@@ -51,6 +51,8 @@ enum Feed {
     Ended(Result<SessionEnd, String>),
     /// The window's own calibration ended (the ••• menu's, TODO 110): how it did, or the error that stopped it
     Calibrated(Result<RunStatus, String>),
+    /// A stored calibration is there: replace it, or keep it. The calibrate thread waits on `reply`.
+    SaveAsk { question: String, reply: SyncSender<bool> },
 }
 
 /// The window's frontend: each event onto the window's feed, as it comes, and its console text into the log (`transcript`). No ticks:
@@ -95,6 +97,21 @@ impl Frontend for GuiFrontend {
         }
         LargePageAnswer::Quit
     }
+}
+
+/// The calibrate thread asks the window whether to replace a stored calibration, and waits. A closed window keeps what is stored.
+pub(crate) fn ask_save(feed: &Sender<Feed>, question: &str) -> bool {
+    let (reply, answer) = mpsc::sync_channel(1);
+    if feed.send(Feed::SaveAsk { question: question.to_string(), reply }).is_ok() {
+        loop {
+            match answer.recv_timeout(ANSWER_WAIT) {
+                Ok(save) => return save,
+                Err(RecvTimeoutError::Timeout) if !WINDOW_CLOSED.load(Ordering::Relaxed) => {}
+                Err(_) => break,
+            }
+        }
+    }
+    false
 }
 
 /// The session's thread, from Start (Run again's the next's), and the exit status the last one ended with

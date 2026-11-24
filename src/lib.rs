@@ -50,6 +50,7 @@ pub mod home; // the folder TMR keeps its configs, results, logs and settings in
 pub mod logfile; // the log file, which every frontend's logger writes (TODO 29)
 pub mod session; // a command line's setup, then its run, through a frontend (TODO 29)
 pub use build_info::BUILD;
+pub use external::{ExternalReading, line as external_line, sample as external_sample};
 pub use runner::{memory_status, request_stop};
 // What the CLI's tests drive the engine with, under the `test-support` feature (TODO 29)
 #[cfg(any(test, feature = "test-support"))]
@@ -67,6 +68,7 @@ mod cpu_selection; // two-stage CPU selection: skip-cores filter + cpu-stride sp
 mod cpu_topology;
 mod error_context; // where a worker is in the run, for its error lines (TODO 74)
 mod exchange; // the page exchange: tiles that cross threads, CCDs and NUMA nodes, copied, inverted or rewritten (TODO 28)
+mod external; // timings and temperatures from tools already running (TODO 122)
 mod failing_bits; // which bit positions failed checks, from the verifies' cold path (TODO 97)
 mod formatting;
 mod latency_histogram; // TODO 105 (1): the latency tests' percentiles from a histogram a thread

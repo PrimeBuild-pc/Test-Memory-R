@@ -534,6 +534,9 @@ pub struct Model {
     facts: Facts,
     /// The large-page question, while it waits for the dialog's answer: the session's thread waits on the reply
     reply: Option<SyncSender<LargePageAnswer>>,
+    /// A stored calibration is there: replace it, or keep it (TODO 110). The calibrate thread waits on the reply.
+    save_reply: Option<SyncSender<bool>>,
+    save_question: Option<String>,
     /// What the last large-page question asked, kept after its answer, so the dialog's words hold while it closes
     question: Option<LargePageQuestion>,
     /// The grant's candidate chosen, as its radio buttons have it (`choose_target`): none chosen disables the grant
@@ -614,6 +617,8 @@ impl Model {
             rechecking: false,
             stored_calibration: None,
             failing_mask: 0,
+            save_reply: None,
+            save_question: None,
         }
     }
 
@@ -816,6 +821,27 @@ impl Model {
     /// The large-page question is waiting for its answer, in either dialog: no other dialog opens meanwhile
     pub fn large_pages_pending(&self) -> bool {
         self.reply.is_some()
+    }
+
+    /// A stored calibration is there (TODO 110): the dialog asks, and `answer_save` replies. Esc and Keep leave what is stored.
+    pub fn ask_save(&mut self, question: String, reply: SyncSender<bool>) {
+        self.save_question = Some(question);
+        self.save_reply = Some(reply);
+    }
+
+    pub fn save_pending(&self) -> bool {
+        self.save_reply.is_some()
+    }
+
+    pub fn save_question(&self) -> String {
+        self.save_question.clone().unwrap_or_default()
+    }
+
+    pub fn answer_save(&mut self, save: bool) {
+        if let Some(reply) = self.save_reply.take() {
+            let _ = reply.send(save);
+        }
+        self.save_question = None;
     }
 
     /// The large-page dialog is open

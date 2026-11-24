@@ -108,6 +108,8 @@ pub(crate) enum Message {
     Preset(&'static str, &'static str),
     /// Settings: a sound at the first error and when the run ends
     Notify(bool),
+    /// Replace the stored calibration, or keep it: the dialog's button
+    SaveAnswer(ContentDialogResult),
 }
 
 /// What the window waits on: the session's feed, and the warnings and errors it logs
@@ -276,7 +278,7 @@ impl Window {
         }
     }
 
-    /// The ••• menu's Calibrate (TODO 110): `--calibrate-all --yes` on a thread of its own, the caches then the seal's width (the fastest
+    /// The ••• menu's Calibrate (TODO 110): `--calibrate-all` on a thread of its own, the caches then the seal's width (the fastest
     /// here, which `seal-width=auto` takes), as the console runs it, what it writes and logs in the Log tab and a log file of its own; it
     /// saves what it measured (the menu item was the request), and the position line says how it did. Before a run the info line says
     /// the new one once it ends; after one it keeps that run's facts, and Run again reads the new one. Start waits for it.
@@ -288,15 +290,18 @@ impl Window {
         let (tx, rx) = mpsc::channel();
         let transcript = log.transcript();
         let exe = self.model.command().first().cloned().unwrap_or_else(|| "tmr.exe".to_string());
-        let mut line = vec![exe, "--calibrate-all".to_string(), "--yes".to_string()];
+        // No `--yes`: a stored calibration asks the window whether to replace it (TODO 110). Nothing stored is saved without a question.
+        let mut line = vec![exe, "--calibrate-all".to_string()];
         // Serials off in the Settings dialog: left out of what it shows and logs, as start()'s run has it (TODO 105)
         if !self.settings.serials {
             line.push("--no-serials".to_string());
         }
+        let ask = tx.clone();
         let calibration = std::thread::Builder::new().name("tmr-calibrate".to_string()).spawn(move || {
             let command = tmr::commands::Command::Calibrate(line);
             let mut out = logger::TranscriptWriter::new(transcript);
-            let result = tmr::commands::run(&command, &mut out, &mut |_| true, &|_| String::new()).map_err(|e| e.to_string());
+            let mut confirm = move |question: &str| crate::ask_save(&ask, question);
+            let result = tmr::commands::run(&command, &mut out, &mut confirm, &|_| String::new()).map_err(|e| e.to_string());
             out.finish();
             let _ = tx.send(Feed::Calibrated(result));
         });
@@ -325,6 +330,7 @@ impl Window {
                     self.model.ended(result);
                     ended = true;
                 }
+                Feed::SaveAsk { question, reply } => self.model.ask_save(question, reply),
                 Feed::Calibrated(result) => {
                     self.model.calibration_ended(result);
                     self.model.stored_calibration =
@@ -526,6 +532,7 @@ impl Component for Window {
                 self.settings.notify = on;
                 self.save_settings();
             }
+            Message::SaveAnswer(result) => self.model.answer_save(result == ContentDialogResult::Primary),
             Message::Args(text) => self.model.args = text,
             Message::LargePages(result) => self.model.answer_large_pages(match result {
                 ContentDialogResult::Primary => DialogButton::Primary,
@@ -680,6 +687,7 @@ impl Component for Window {
                 self.broad_dialog(context),
                 self.about_dialog(context),
                 self.settings_dialog(context),
+                self.save_dialog(context),
             ))
     }
 }
@@ -1270,6 +1278,20 @@ impl Window {
         card(row, p, title, body)
     }
 
+    /// Replace the stored calibration, or keep it (TODO 110). Primary replaces; secondary, close and Esc keep what is stored, so a
+    /// double-click or a closed window does not overwrite it. Not open while the large-page question is: WinUI opens one dialog at a time.
+    fn save_dialog(&self, context: &ViewContext<Self>) -> View {
+        let open = self.model.save_pending() && !self.model.large_pages_pending();
+        ContentDialog::new()
+            .title("Replace the stored calibration?")
+            .primary_button_text("Replace it")
+            .secondary_button_text("Keep the stored one")
+            .close_button_text("Keep the stored one")
+            .is_open(open)
+            .on_closed(context.callback(Message::SaveAnswer))
+            .content(TextBlock::new().text(self.model.save_question()).text_wrapping(TextWrapping::Wrap))
+    }
+
     /// The large-page question, the console's as a dialog, open while the session's thread waits for its answer, in the words of the last
     /// question asked (`Model::large_page_dialog`), which hold as it closes: the sign-in's, the grant's with its candidates as a list
     /// (every choice and its note in sight, as on the console; WinUI's dialog scrolls a long list), and the administrator's.
@@ -1312,7 +1334,7 @@ impl Window {
     /// Settings (TODO 105, the owner 2026-11-04): what the window keeps in window.json that a user sets, each saved as it changes; not open
     /// while the large-page question is, as WinUI opens one dialog at a time
     fn settings_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.settings_open && !self.model.large_pages_pending();
+        let open = self.settings_open && !self.model.large_pages_pending() && !self.model.save_pending();
         let dialog = ContentDialog::new()
             .title("Settings")
             .close_button_text("Close")
@@ -1334,7 +1356,7 @@ impl Window {
     /// is open, so the logo isn't decoded at each redraw; and it isn't open while the large-page question is, as WinUI opens one dialog at
     /// a time. In the dialog's own colours, as the large-page dialog's.
     fn about_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.about && !self.model.large_pages_pending();
+        let open = self.about && !self.model.large_pages_pending() && !self.model.save_pending();
         let dialog = ContentDialog::new()
             .title("About TMR")
             .close_button_text("Close")
