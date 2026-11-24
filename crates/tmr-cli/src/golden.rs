@@ -59,6 +59,7 @@ pub(crate) struct Turn(PhantomData<*const ()>);
 /// Waits for the console, and has it till the `Turn` drops: no other test's capture is on meanwhile, nor its records. A thread that has a
 /// turn can take another, a capture inside a test's turn its own.
 pub(crate) fn turn() -> Turn {
+    tmr::test_support::use_test_home();
     TURN.with_borrow_mut(|(guard, held)| {
         if guard.is_none() {
             *guard = Some(ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner));

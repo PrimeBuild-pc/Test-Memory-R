@@ -39,14 +39,16 @@ pub fn main(args: Vec<String>) -> i32 {
         .filter(|a| !matches!(a.as_str(), "--allow-admin" | "--quick-test" | "--cache-latency" | "--ram-latency"))
         .cloned()
         .collect();
-    if !matches!(tmr::commands::Command::parse(&flags), Some(tmr::commands::Command::Help(_) | tmr::commands::Command::Version))
-        && let Err(e) = tmr::home::initialize()
-    {
-        crate::console::eprint(&format!("{e}\n"));
-        return RunStatus::NotRun.exit_code();
-    }
+    let command = tmr::commands::Command::parse(&flags);
+    let log_file = match startup_log(command.as_ref(), tmr::logfile::wanted(&args), tmr::home::initialize, crate::console::eprint) {
+        Ok(wanted) => wanted,
+        Err(e) => {
+            crate::console::eprint(&format!("{e}\n"));
+            return RunStatus::NotRun.exit_code();
+        }
+    };
     // Initialize enhanced logging, with the log file for a session and the commands that change the system (`tmr::logfile::wanted`)
-    setup_logging(tmr::logfile::wanted(&args));
+    setup_logging(log_file);
 
     crate::console::print(&format!(
         "🚀 Test Memory R (TMR) v{} - High-Performance Memory Testing Tool\n{}\n",
@@ -71,6 +73,24 @@ pub fn main(args: Vec<String>) -> i32 {
         warn_if_classic();
     }
     status
+}
+
+/// A privilege grant/removal can complete with console output alone if its usual log is unavailable.
+fn startup_log(
+    command: Option<&tmr::commands::Command>, wanted: bool, home: impl FnOnce() -> std::result::Result<(), String>, warn: impl FnOnce(&str),
+) -> std::result::Result<bool, String> {
+    use tmr::commands::Command;
+    match command {
+        Some(Command::Help(_) | Command::Version | Command::DebugTopology | Command::ShowTopology) => Ok(false),
+        Some(Command::SetupLargePages(_) | Command::RemoveLargePages(_)) => {
+            if wanted && let Err(e) = home() {
+                warn(&format!("Large-page setup will continue without a log file. {e}\n"));
+                return Ok(false);
+            }
+            Ok(wanted)
+        }
+        _ => home().map(|()| wanted),
+    }
 }
 
 /// `tmr` alone is `tmr --help`, which exits 0 (TODO 121): a run takes a setting (`tmr plan=stability`), so typing the name, or a check
@@ -250,6 +270,17 @@ mod tests {
     use tmr::commands::Command;
 
     use crate::golden::{capture, check, turn};
+
+    #[test]
+    fn privilege_commands_work_when_the_home_is_unavailable() {
+        for command in [Command::SetupLargePages(vec![]), Command::RemoveLargePages(vec![])] {
+            let mut text = String::new();
+            assert_eq!(super::startup_log(Some(&command), true, || Err("storage unavailable".into()), |s| text.push_str(s)), Ok(false));
+            assert!(text.contains("storage unavailable"));
+            assert_eq!(super::startup_log(Some(&command), false, || panic!("no log requested"), |_| panic!()), Ok(false));
+        }
+        assert!(super::startup_log(None, false, || Err("storage unavailable".into()), |_| panic!()).is_err());
+    }
 
     /// TODO 72: `--show-results` on the console, each case after a `## case` line with its exit status: a run that finished, by this build,
     /// one that never finished, by another, and one saved at the end of setup and not after (`tmr::test_support::results_file_*`), each its

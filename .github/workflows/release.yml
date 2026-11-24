@@ -76,7 +76,7 @@ jobs:
       run: python tools/build_release.py --locked
 
     # What the installer installs (dist/tmr.iss): tmr.exe; docs\, the guide, the licences and the third-party notices; configs\, its
-    # README and the two demo configs. An elevated runner uses TMR's protected home.
+    # README and the two demo configs. An elevated hosted runner generates them in its own disposable, protected home.
     - name: 📂 Stage the installer's files
       shell: pwsh
       run: |
@@ -89,12 +89,18 @@ jobs:
         cargo about generate --config dist\about.toml --manifest-path crates\tmr-app\Cargo.toml --output-file "$stage\docs\THIRD-PARTY-NOTICES.html" dist\about.hbs
         if ($LASTEXITCODE -ne 0) { throw "cargo about failed" }
         Copy-Item dist\configs\* "$stage\configs"
-        $env:TMR_HOME = (Resolve-Path $stage).Path
+        $admin = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+        $elevated = $admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if ($elevated) {
+          $temp = Join-Path ([Environment]::GetFolderPath('Windows')) 'Temp'
+          $env:TMR_HOME = Join-Path $temp ("TMR-release-" + [guid]::NewGuid())
+        } else {
+          $env:TMR_HOME = (Resolve-Path $stage).Path
+        }
         & "$stage\tmr.exe" --cli --create-demo-configs
         if ($LASTEXITCODE -ne 0) { throw "tmr.exe --create-demo-configs failed" }
-        $admin = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
-        if ($admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-          $source = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'TMR Admin\configs'
+        if ($elevated) {
+          $source = Join-Path $env:TMR_HOME 'configs'
           foreach ($name in 'demo_comprehensive_test.json', 'demo_tm5_compatible.json') {
             Copy-Item -LiteralPath (Join-Path $source $name) -Destination "$stage\configs"
           }

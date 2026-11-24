@@ -303,7 +303,7 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
         out,
         "  Ordinary runs: both beside tmr.exe, as are configs\\ and settings\\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there"
     )?;
-    writeln!(out, "  Administrator runs keep these files separately in Program Files\\TMR Admin.")?;
+    writeln!(out, "  Administrator runs: Program Files\\TMR Admin by default, or a protected absolute TMR_HOME.")?;
     writeln!(out)?;
     writeln!(out, "RESULT COMPARISON:")?;
     writeln!(out, "  Each run's results are saved as a JSON file in the results folder, as it goes")?;

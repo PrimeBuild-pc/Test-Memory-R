@@ -45,7 +45,7 @@ const LOG_SHOWN: usize = 1_000;
 fn icon_path() -> Option<&'static str> {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
     PATH.get_or_init(|| {
-        let folder = if tmr::home::elevated() { tmr::home::dir().to_owned() } else { std::env::temp_dir() };
+        let folder = if tmr::home::elevated() { tmr::home::dir().join(tmr::settings_file::FOLDER) } else { std::env::temp_dir() };
         let path = folder.join("tmr-icon.ico");
         tmr::atomic_file::write(&path, crate::ICON.get()?).ok()?;
         Some(path.to_string_lossy().into_owned())
@@ -1789,7 +1789,7 @@ fn settings_content(
     let panel = StackPanel::new().spacing(14.0);
     if elevated {
         let admin = row(
-            "Allow administrator runs for my account on future window launches",
+            "Allow administrator runs without asking in this home for my account",
             ToggleSwitch::new().is_on(settings.allow_admin).on_toggled(on_admin),
         );
         panel.children((start, serials, admin, theme, kept))

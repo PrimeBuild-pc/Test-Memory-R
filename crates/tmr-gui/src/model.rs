@@ -2503,6 +2503,7 @@ mod tests {
     /// once take the older as the baseline, and one or three say it takes two
     #[test]
     fn the_compare_tab_compares_each_pair_once() {
+        tmr::test_support::use_test_home();
         let mut tab = CompareTab::default();
         tab.set(Slot::Baseline, PathBuf::from("a.json"));
         assert_eq!(tab.next(), None, "one file");

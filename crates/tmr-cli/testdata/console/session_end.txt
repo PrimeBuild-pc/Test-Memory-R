@@ -197,7 +197,7 @@ LOGGING:
   Logs saved to: logs\TMR_YYYY-MM-DD_HH-MM-SS.log      (local time)
   Results saved to: results\TMR_YYYY-MM-DD_HH-MM-SS.json (same name as the log)
   Ordinary runs: both beside tmr.exe, as are configs\ and settings\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there
-  Administrator runs keep these files separately in Program Files\TMR Admin.
+  Administrator runs: Program Files\TMR Admin by default, or a protected absolute TMR_HOME.
 
 RESULT COMPARISON:
   Each run's results are saved as a JSON file in the results folder, as it goes

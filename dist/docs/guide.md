@@ -88,16 +88,24 @@ takes the privilege away again (from you, or from the `Group:` or `User:` named)
 
 ### Running as Administrator
 
-After signing in again, a regular launch can use large pages. If you deliberately start TMR as Administrator, its settings, configs,
-logs and results live in a separate machine-wide folder, `%ProgramFiles%\TMR Admin`. TMR creates that folder with protected permissions
-and checks it before opening any files. Ordinary runs still use the executable's folder or `TMR_HOME`. Supply an explicit path to load
-an existing test config from elsewhere.
+After signing in again, a regular launch can use large pages. Administrator runs default to
+`%ProgramFiles%\TMR Admin`. To use a separate home for a development build, set `TMR_HOME` to an
+absolute path on a fixed local drive, for example `C:\Program Files\TMR Dev` on a standard install.
+Use a fresh folder under an existing administrator-controlled directory. TMR creates its private
+subfolders on first use and checks them on each launch. A folder writable by ordinary programs
+under your Windows account cannot hold elevated settings. You can still load a test config from
+your checkout by giving its path.
 
-An elevated test asks once per launch, after large-page setup. Choose **Yes** to continue. In the elevated window, **Settings → Allow
-administrator runs** remembers this choice for your account on this machine. Clear the switch to ask again. Consent is stored separately
-from window preferences and their backups. If elevated settings are damaged, TMR reports the file and leaves it in place. For an unattended
-console run, pass `--allow-admin`, for example `tmr --allow-admin plan=quick`. Without it, a headless elevated run exits with status 2.
-The setup and removal commands run independently of test consent. Granting the right ends setup so you can sign in again.
+If the default home's permissions have changed, close TMR and rename `TMR Admin` to keep the old
+files. The next launch creates a fresh home. `--setup-large-pages` and `--remove-large-pages` can
+still run from the console while the home is unavailable. Their output then goes to the console.
+
+After large-page setup, an elevated test asks for confirmation. Choose **Yes** to continue.
+Under **Settings → Allow administrator runs**, the window can remember that choice for your account
+in this home. Changing the switch takes effect immediately. TMR stores consent separately from
+window preferences and their backups. It leaves damaged elevated settings in place for inspection.
+For an unattended console run, pass `--allow-admin`, for example `tmr --allow-admin plan=quick`.
+A headless elevated test without the flag exits with status 2.
 
 ## Running a test
 
@@ -295,8 +303,10 @@ Otherwise TMR reads a `.cfg` as TM5 does:
   test once.
 - **Numbers.** Hex is written with `0x`, an `h` after it, or a letter A-F in it; anything else is
   decimal, and a fraction is dropped. Pattern Param0 and Param1 written as digits only are decimal.
-  The import report keeps the original Pattern Param0/1 spelling. Native programs supply their own data.
-  With `patterns=legacy`, the generator uses the low 32 bits, so 1usmus_v3's 9-digit values run as their last 8 digits. Quotes around a value and a `;` comment after it are dropped.
+  The import report keeps the original Pattern Param0/1 spelling. Native programs supply their own
+  data. With `patterns=legacy`, the generator uses the low 32 bits and warns about wider values.
+  For example, 1usmus_v3's 9-digit hex values use their last 8 digits. Quotes around a value and a
+  `;` comment after it are dropped.
 - **Odd values.** A SimpleTest Pattern Mode TMR doesn't have runs as TM5 runs it, by its lowest
   byte (1 or 2, else 0); TMR's own mode numbers (10, 11, 13, 15-17, 20, 21, 30-33) keep their
   meaning. A negative Parameter runs as 0, and a negative Test Block Size as TM5's shift to bytes
@@ -312,7 +322,7 @@ A crash can damage a `.cfg` with no visible sign, so TMR warns, naming the file 
 about NUL bytes (what a crash leaves), a line that is neither a `[section]` nor a `key=value`, a
 key or section TM5 doesn't read, a key before the first section, a header without its `]`, a
 repeated section or key, text that isn't UTF-8, a missing section, a `[TestN]` at or above Tests,
-a number wider than 32 bits, a negative Parameter or Test Block Size, an unusual Test Sequence
+a number truncated to 32 bits, a negative Parameter or Test Block Size, an unusual Test Sequence
 separator or a number of 256 or more in it, and a Tests, Channels or Lock Memory Granularity
 outside what TMR takes. These are warnings, not errors: the file loads, read as TM5 reads it. The
 first of a repeated key or section counts, a header without its `]` still starts its section, and

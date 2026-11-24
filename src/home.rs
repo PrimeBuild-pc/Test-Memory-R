@@ -17,14 +17,57 @@ struct Home {
 static HOME: OnceLock<Result<Home, String>> = OnceLock::new();
 
 fn selected() -> Result<&'static Home, String> {
+    #[cfg(test)]
+    use_test_home();
     HOME.get_or_init(|| {
-        let elevated = elevation().map_err(|e| format!("Cannot determine process elevation: {e}"))?;
-        let path = if elevated { admin::open()? } else { ordinary_home() };
-        let admin_sid = if elevated { Some(crate::memory::lsa::Token::read()?.user.to_string()) } else { None };
-        Ok(Home { path, admin_sid })
+        if !elevation().map_err(|e| format!("Cannot determine process elevation: {e}"))? {
+            return Ok(Home { path: ordinary_home(), admin_sid: None });
+        }
+        let path = admin::open(from_var().as_deref())?;
+        Ok(Home { path, admin_sid: Some(crate::memory::lsa::Token::read()?.user.to_string()) })
     })
     .as_ref()
     .map_err(Clone::clone)
+}
+
+/// The engine tests and the frontend fixtures use a fresh, process-wide temporary home, including when the test runner is elevated.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn use_test_home() {
+    static TEMP: OnceLock<PathBuf> = OnceLock::new();
+    extern "C" fn clean() {
+        if let Some(dir) = TEMP.get() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    unsafe extern "C" {
+        fn atexit(callback: extern "C" fn()) -> i32;
+    }
+    let home = HOME.get_or_init(|| {
+        // SAFETY: the CRT calls this static function at process exit, once all the libtest threads have finished using their shared home.
+        if unsafe { atexit(clean) } != 0 {
+            return Err("Couldn't register temporary test-home cleanup".into());
+        }
+        let elevated = elevation().map_err(|e| e.to_string())?;
+        let base = if elevated { admin::system_temp()? } else { std::env::temp_dir() };
+        // SAFETY: CoCreateGuid returns the new GUID by value and needs no COM apartment.
+        let id = unsafe { windows::Win32::System::Com::CoCreateGuid() }.map_err(|e| e.to_string())?;
+        let path = base.join(format!("tmr-test-home-{id:?}"));
+        if elevated {
+            admin::create_test_directory(&path)?;
+        } else {
+            std::fs::create_dir(&path).map_err(|e| e.to_string())?;
+        }
+        TEMP.set(path.clone()).expect("only this initializer owns the freshly created temporary directory");
+        let admin_sid = if elevated {
+            admin::open(Some(&path))?;
+            Some(crate::memory::lsa::Token::read()?.user.to_string())
+        } else {
+            None
+        };
+        Ok(Home { path, admin_sid })
+    });
+    home.as_ref().expect("initialize temporary test home");
+    assert!(TEMP.get().is_some(), "a frontend fixture used the installed home before selecting test storage");
 }
 
 /// Called before either frontend reads settings or opens a log. Failure stops startup.
@@ -37,7 +80,7 @@ pub fn elevated() -> bool {
     selected().expect("TMR home must be available before use").admin_sid.is_some()
 }
 
-/// Each administrator consents for their own account. The rest of the elevated home is shared on this machine.
+/// Elevated window preferences are per home and Windows account.
 pub fn window_settings_name() -> String {
     selected()
         .expect("TMR home must be available before use")
@@ -48,7 +91,7 @@ pub fn window_settings_name() -> String {
 
 fn consent_path() -> Option<PathBuf> {
     let home = selected().ok()?;
-    Some(home.path.join("settings").join(format!("allow-window-{}", home.admin_sid.as_ref()?)))
+    Some(home.path.join("settings").join(format!("allow-window-{}.consent", home.admin_sid.as_ref()?)))
 }
 
 /// Read the per-account administrator-window switch afresh. An absent or invalid record requires a prompt.

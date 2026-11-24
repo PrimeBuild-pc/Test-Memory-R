@@ -25,6 +25,16 @@ pub use crate::runner::test_support::{FakeCycle, Flip, GoldenRun};
 const MIB: u64 = 1 << 20;
 const GIB: u64 = 1 << 30;
 
+/// Select a disposable home before a frontend fixture uses the engine from its dependency build.
+pub fn use_test_home() {
+    crate::home::use_test_home();
+}
+
+fn new_test_result() -> TestRunResult {
+    use_test_home();
+    TestRunResult::new(Default::default())
+}
+
 /// The built-in plan a plain run takes (`plan=stability`)
 pub fn default_plan() -> &'static crate::plans::Plan {
     crate::plans::find(crate::plans::DEFAULT).expect("the default plan is built in")
@@ -511,7 +521,7 @@ impl PerfStep {
 pub(crate) fn perf_run_of(steps: &[PerfStep], loaded: &[Option<crate::loaded::LoadedSummary>]) -> TestRunResult {
     use crate::formatting::ByteSize;
     use crate::run_context::{CalibratedTier, CalibrationSnapshot, NumaThreadCount, TestConfigSnapshot};
-    let mut result = TestRunResult::new(Default::default());
+    let mut result = new_test_result();
     result.run_config.tests = steps
         .iter()
         .map(|s| TestConfigSnapshot {
@@ -644,7 +654,7 @@ pub(crate) fn run_with_errors() -> TestRunResult {
         final_check_errors: errors,
         final_check_failing_bits,
     };
-    let mut result = TestRunResult::new(Default::default());
+    let mut result = new_test_result();
     let first = vec![step(1, 0, "Mem-StuckBit256_A"), latency(2), TestSummary { ops, ..step(3, 0, "Mem-StuckBit256_A") }];
     result.add_cycle(1, 31, first, Some(seal(0, FailingBits::default())), false);
     let bad = TestSummary {
@@ -715,7 +725,7 @@ fn clean_run() -> TestRunResult {
         final_check_bytes: 960 * MIB,
         ..Default::default()
     };
-    let mut result = TestRunResult::new(Default::default());
+    let mut result = new_test_result();
     for cycle in 1..=2 {
         let stuck_bit = |n: usize, mib_s: f64| step(n, 0, "Mem-StuckBit256_A", 480 * MIB, mib_s);
         let steps = vec![stuck_bit(1, 100.6), latency.clone(), TestSummary { ops, ..stuck_bit(3, 101.6) }];
@@ -766,7 +776,7 @@ pub fn results_file_never_finished() -> ResultsFile {
 /// The results file of a run saved at the end of setup and not after (TODO 72's `--show-results`): in progress with no cycle, sealed,
 /// WHEA monitored, by this build
 pub fn results_file_from_setup() -> ResultsFile {
-    let mut result = TestRunResult::new(Default::default());
+    let mut result = new_test_result();
     result.run_config.execution.seal = Some("tmr-256".to_string());
     result.finalize(Duration::ZERO);
     result.set_whea_totals(crate::whea::WheaCounts::default(), true);
