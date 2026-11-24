@@ -47,31 +47,20 @@ impl Frontend for CliFrontend {
     /// Asks on the console, what was typed ahead dropped before each read (`console::flush_input`). A console that can't be written to is
     /// no answer, as the input's end is: TMR quits, granting nothing and running nothing on 4 KiB pages unasked (TODO 113).
     fn ask_large_pages(&self, question: &LargePageQuestion) -> LargePageAnswer {
-        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) || !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        let Some(mut out) = crate::console::prompt_writer() else {
             crate::console::eprint(
-                "Large-page setup requires an interactive console. Use --setup-large-pages first, then sign in again. An unattended elevated test also requires --allow-admin.\n",
+                "Large-page setup needs an interactive console. Run --setup-large-pages and sign in again, or select minpage=reg-page maxpage=reg-page.\n",
             );
             return LargePageAnswer::Quit;
-        }
-        let asked = crate::prompts::large_pages(
-            question,
-            &mut std::io::stdin().lock(),
-            &mut crate::console::stdout(),
-            &crate::console::flush_input,
-        );
+        };
+        let asked = crate::prompts::large_pages(question, &mut std::io::stdin().lock(), &mut out, &crate::console::flush_input);
         asked.unwrap_or(LargePageAnswer::Quit)
     }
 
     fn confirm_admin_run(&self) -> bool {
-        use std::io::IsTerminal;
-        std::io::stdin().is_terminal()
-            && std::io::stdout().is_terminal()
-            && crate::prompts::admin_run(
-                &mut std::io::stdin().lock(),
-                &mut crate::console::stdout(),
-                tmr::home::dir(),
-                &crate::console::flush_input,
-            )
+        crate::console::prompt_writer().is_some_and(|mut out| {
+            crate::prompts::admin_run(&mut std::io::stdin().lock(), &mut out, tmr::home::dir(), &crate::console::flush_input)
+        })
     }
 
     /// The ticker, redrawn every 2 seconds. Anything WHEA reported since the last draw is printed above it. On a stdout that isn't a
