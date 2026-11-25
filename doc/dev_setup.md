@@ -44,7 +44,12 @@ Windows Server 2022 doesn't ship winget: install App Installer first, or the lis
   does not wait for CI. Then `.\target\release\tmr.exe`. A built
   exe keeps its configs, results, logs and settings beside itself; `$env:TMR_HOME = "$PWD"` keeps them
   in the repository's `results\`, `logs\` and `settings\`, which git ignores, instead of under
-  `target\release\`, which `cargo clean` empties.
+  `target\release\`, which `cargo clean` empties. That is for a console started normally. Run as
+  administrator (an elevated console, or an account that is always elevated, as the built-in
+  Administrator on a cloud VM is), TMR uses `%ProgramFiles%\TMR Admin`, or a `TMR_HOME` only
+  administrators can change, which a checkout in your profile isn't: `$env:TMR_HOME =
+  "$env:ProgramFiles\TMR Dev"` keeps a development build's elevated runs apart. Such a run asks
+  before it tests; `--allow-admin` skips the question (the user guide, "Where TMR keeps its files").
 - **Large pages:** `tmr.exe --setup-large-pages` from an elevated prompt once, then sign out and back in.
 
 ## Build outputs and published crates

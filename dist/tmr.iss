@@ -10,6 +10,8 @@
 ; (src/settings_file.rs). Users can't write in Program Files, and TMR runs its tests unelevated, so for all users those four folders are
 ; made writable by users: never the exe's folder or the exe, since anyone able to replace tmr.exe could have an admin run their program.
 ; settings\ is a folder of its own so a save can write its temp beside the file, and put it in the file's place whole (src/atomic_file.rs).
+; Run as administrator, TMR never uses those four: it makes a home of its own, %ProgramFiles%\TMR Admin (src/home/admin.rs), which
+; setup neither makes nor removes. The demo configs go to examples\, which only administrators can write.
 ; An upgrade never overwrites a config or a setting, and an uninstall leaves what TMR and the user made.
 
 #ifndef AppVersion

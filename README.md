@@ -77,9 +77,11 @@ plan, 3 cycles: any setting starts a run, `tmr` alone lists every setting, and `
 
 TMR keeps its files beside `tmr.exe`: `configs\`, `results\` (one JSON file a run, saved as it
 goes), `logs\` and `settings\` (`tmr-cfg.json`, its calibrations, and `window.json`, the window's
-settings, each with a `.bak` copy of its last save). `TMR_HOME` selects another folder. Elevated runs
-default to `%ProgramFiles%\TMR Admin` and require administrator-controlled storage. They ask before
-testing. Unattended elevated runs take `--allow-admin`. A
+settings, each with a `.bak` copy of its last save). `TMR_HOME` puts them in another folder. Run as
+administrator, which only the large-page setup needs, TMR keeps a separate set in
+`%ProgramFiles%\TMR Admin` (or a `TMR_HOME` only administrators can change) and asks before it
+tests; `--allow-admin` skips the question, as a run with no console to answer from needs. The
+[user guide](dist/docs/guide.md#where-tmr-keeps-its-files) has the details. A
 results file describes the system it came from; see [Privacy](#privacy) below for what that includes
 and how to leave identifiers out before you post one.
 
@@ -247,7 +249,7 @@ console still shows the run. It doesn't reach the local calibration cache (below
 too if you want a run to touch no files whatsoever.
 
 **The calibration cache.** TMR keeps a small local file, `settings\tmr-cfg.json` (beside the exe, or
-under `TMR_HOME`), with the real system UUID and the real per-DIMM serial and part numbers, so it can
+under `TMR_HOME`; run as administrator, in its own home, `%ProgramFiles%\TMR Admin` by default), with the real system UUID and the real per-DIMM serial and part numbers, so it can
 tell when the hardware has changed and a fresh calibration is needed; `tmr-cfg.json.bak` beside it is
 a copy of its last save. Leaving the serials out doesn't reach them; that only affects what a run
 displays or writes out. These files stay on your machine and are never sent anywhere.

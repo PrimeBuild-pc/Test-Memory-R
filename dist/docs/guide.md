@@ -21,7 +21,7 @@ change between versions. The project's page has the details:
   first (the two commands below), then `winget install Petz.TMR --scope machine`: with `--scope`,
   winget asks the same scope of each package TMR depends on, and neither runtime offers both.
 - **The bare `tmr.exe`**, from the same releases: put it in a folder of its own that you can write
-  to. TMR keeps its files beside it.
+  to. TMR keeps its files beside it ([run as administrator, elsewhere](#where-tmr-keeps-its-files)).
 
 TMR needs:
 
@@ -88,24 +88,24 @@ takes the privilege away again (from you, or from the `Group:` or `User:` named)
 
 ### Running as Administrator
 
-After signing in again, a regular launch can use large pages. Administrator runs default to
-`%ProgramFiles%\TMR Admin`. To use a separate home for a development build, set `TMR_HOME` to an
-absolute path on a fixed local drive, for example `C:\Program Files\TMR Dev` on a standard install.
-Use a fresh folder under an existing administrator-controlled directory. TMR creates its private
-subfolders on first use and checks them on each launch. A folder writable by ordinary programs
-under your Windows account cannot hold elevated settings. You can still load a test config from
-your checkout by giving its path.
+Once the privilege is granted and you have signed in again, run TMR normally: it needs
+administrator rights only to grant or remove the privilege. Started as administrator anyway (Run
+as administrator, an elevated console, or an account that is always elevated, such as the
+built-in Administrator), TMR still runs, with two differences:
 
-If the default home's permissions have changed, close TMR and rename `TMR Admin` to keep the old
-files. The next launch creates a fresh home. `--setup-large-pages` and `--remove-large-pages` can
-still run from the console while the home is unavailable. Their output then goes to the console.
+- **It keeps its files in a home of its own**, `%ProgramFiles%\TMR Admin` unless `TMR_HOME` names
+  another, not beside `tmr.exe`: its own configs, results, logs, calibrations and window settings
+  (see [Where TMR keeps its files](#where-tmr-keeps-its-files)).
+- **It asks before it tests**, after the large-page check: "Run memory tests as Administrator
+  using <folder>?" Only yes runs the tests; anything else exits, having run nothing. In the
+  window, **Settings → Allow administrator runs without asking** stops the question for your
+  account, in that home, from when you switch it on. On the console, `--allow-admin` does the
+  same for one run, for example `tmr --allow-admin plan=quick`, and a run with no console to
+  answer from (a script, a scheduled task, a remote session) needs it: without it, the run exits
+  with status 2. A config can't set it.
 
-After large-page setup, an elevated test asks for confirmation. Choose **Yes** to continue.
-Under **Settings → Allow administrator runs**, the window can remember that choice for your account
-in this home. Changing the switch takes effect immediately. TMR stores consent separately from
-window preferences and their backups. It leaves damaged elevated settings in place for inspection.
-For an unattended console run, pass `--allow-admin`, for example `tmr --allow-admin plan=quick`.
-A headless elevated test without the flag exits with status 2.
+`--setup-large-pages` and `--remove-large-pages` never ask, and granting the privilege ends the run
+so you can sign in again.
 
 ## Running a test
 
@@ -140,11 +140,13 @@ The Memory report's 4 KB column says which kind a run took.
   A finished step's row opens its report, and the final summary opens itself as the run ends. The
   Log tab has what the console would show; Plan, System, Threads and Memory what it prints as it
   starts; Compare compares two runs' results files. The window keeps its settings in
-  `settings\window.json` beside tmr.exe: the chart shown or hidden, the theme, whether a run starts as it
-  opens (`tmr --gui --start` does that once), whether serial numbers are kept, the last run's
+  `settings\window.json` in TMR's home (beside tmr.exe, or as [below](#where-tmr-keeps-its-files);
+  run as administrator, one for each Windows account): the chart shown or hidden, the theme,
+  whether a run starts as it opens (`tmr --gui --start` does that once), whether serial numbers are kept, the last run's
   parameters, its colours, and its size and place on the screen as it closed, maximized or not
   (it opens there again only if that is still on a screen). Settings, in its `•••` menu, sets the
-  theme, starting on open and the serial numbers. The line above the box, the header's last, says
+  theme, starting on open and the serial numbers, and, run as administrator, whether it asks
+  before testing. The line above the box, the header's last, says
   before a run what cache calibration it finds; the first run on a machine measures one before its
   tests (about 2 minutes), or Calibrate the caches and the seal, in the same menu, measures it
   now, with the seal's fastest width.
@@ -332,10 +334,12 @@ its `-` and then stores it negated, so `Cycles=-3` would run 253 cycles.
 
 ### TMR JSON configs
 
-The installer includes `demo_comprehensive_test.json` and `demo_tm5_compatible.json` in
-`examples\` beside the executable. Ordinary runs find these by name after checking your own configs. They show system and per-test
-settings. `tmr --create-demo-configs` writes editable copies into the active home's `configs\`. Run one with
-`tmr config=demo_tm5_compatible.json`, and use `--startup-debug` to inspect an edited config
+The installer puts `demo_comprehensive_test.json` and `demo_tm5_compatible.json` in `examples\`,
+beside `tmr.exe`. They show TMR's system and per-test settings, and make starting points for your
+own plans. Run one with `tmr config=demo_tm5_compatible.json`: a run started normally looks for a
+name in the current folder, then in its home's `configs\`, then in `examples\`. Run as
+administrator it doesn't look in `examples\`, so give it the path. `tmr --create-demo-configs`
+writes copies to edit into the home's `configs\`. Use `--startup-debug` to inspect an edited config
 before running it.
 
 For access-order comparisons, the installer also includes
@@ -346,7 +350,30 @@ and how to add these per-test settings to your own config.
 
 ## Where TMR keeps its files
 
-Beside `tmr.exe`, in its folder:
+TMR keeps its files in one folder, its home. Which folder that is depends on how TMR was started:
+
+| Started | Its home |
+|---|---|
+| normally | the folder `tmr.exe` is in; or `TMR_HOME`, when it names a folder |
+| as administrator | `%ProgramFiles%\TMR Admin`; or `TMR_HOME`, when it names a folder only administrators can change |
+
+`TMR_HOME` is an environment variable (`setx TMR_HOME D:\tmr`, then open a new console). Run as
+administrator, TMR takes it only when it is a full path (`C:\...`, not a relative one or a share)
+on a local drive, only administrators can change that folder, and nobody else can move or replace
+a folder above it. A folder in your user profile (Documents, Downloads, a git checkout there)
+doesn't qualify: your own account can change it. A folder in `C:\Program Files`, such as
+`C:\Program Files\TMR Dev`, does. TMR makes the home's four folders, and `TMR Admin` itself, with
+permissions only administrators and Windows itself can change, and checks them at every start. If
+they are no longer as TMR made them, it stops and says so: close TMR and rename the folder to keep
+what is in it (or point `TMR_HOME` at a new one), and the next start makes a new home.
+`--setup-large-pages` and `--remove-large-pages` still run meanwhile, with no log file.
+
+Run as administrator, TMR starts with none of the files of its normal runs: its own calibrations,
+results and logs, and window settings for each Windows account. A config from elsewhere still
+runs, given its path. A damaged settings file there is reported and left as it is, not set aside
+as `<name>.unreadable` and replaced.
+
+In its home:
 
 | | What it holds |
 |---|---|
@@ -367,8 +394,9 @@ writes each save in place, so a crash while it saves can still damage the file, 
 TMR starts from its defaults.
 
 A file you delete is not brought back from its copy: TMR starts again from its defaults. The 0.1.2
-release and earlier kept `tmr-cfg.json` and `window.json` beside `tmr.exe`. Your next ordinary launch copies each old file into
-`settings\` when both its new file and backup are absent. The old file stays in place. Administrator launches start with separate settings.
+release and earlier kept `tmr-cfg.json` and `window.json` beside `tmr.exe`. The next run started
+normally copies each into `settings\`, when that has neither the file nor its `.bak`, and leaves
+the old one in place. A run as administrator copies none: it has settings of its own.
 
 The run's last lines say where its results file went. `tmr --compare-results <one> <other>`
 compares two results files, by their names in `results\` or by their paths. It matches the two
@@ -411,13 +439,11 @@ UUID and the fingerprints by TMR's own lines for them (each DIMM's, the system's
 identity check) rather than from a results file, so one only a line of another kind has, as in an
 older build's log, stays.
 
-To keep an ordinary run's files somewhere else, set the `TMR_HOME` environment variable to that folder
-(`setx TMR_HOME D:\tmr`, then open a new console).
-
 ## Uninstalling
 
 Settings > Apps > TMR (Test Memory R), or `winget uninstall Petz.TMR`. Your configs, results, logs
-and settings stay in TMR's folder; delete it when you no longer want them.
+and settings stay in TMR's folder, and so do a `TMR_HOME` folder and `%ProgramFiles%\TMR Admin`,
+when TMR was run as administrator; delete them when you no longer want them.
 
 ## Help
 
