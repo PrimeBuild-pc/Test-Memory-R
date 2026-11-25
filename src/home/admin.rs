@@ -101,9 +101,15 @@ pub(super) fn create_test_directory(path: &Path) -> Result<(), String> {
     directory(path, Access::Private, true)
 }
 
+/// Where an elevated test process makes its throwaway home: `%ProgramFiles%\TMR Tests`, made with TMR's own permissions and left in
+/// place, each process's home in it removed at exit. Program Files is administrator-controlled on a standard Windows, as the default
+/// home needs; `C:\Windows\Temp` isn't on GitHub's runners (CI, 2026-11-25: every elevated test's home was refused there).
 #[cfg(any(test, feature = "test-support"))]
-pub(super) fn system_temp() -> Result<PathBuf, String> {
-    Ok(known_folder(&windows::Win32::UI::Shell::FOLDERID_Windows)?.join("Temp"))
+pub(super) fn test_parent() -> Result<PathBuf, String> {
+    let parent = known_folder(&FOLDERID_ProgramFiles)?.join("TMR Tests");
+    validate_location(&parent)?;
+    private_directory(&parent)?;
+    Ok(parent)
 }
 
 fn create_children(home: &Path) -> Result<(), String> {
@@ -328,7 +334,7 @@ mod tests {
         if !crate::memory::privileges::is_elevated() {
             return;
         }
-        assert!(home::dir().starts_with(system_temp().unwrap()));
+        assert!(home::dir().starts_with(test_parent().unwrap()));
         let p = home::dir().join("settings").join(format!("test-corrupt-{}.json", std::process::id()));
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&p).unwrap();
         file.write_all(b"invalid JSON").unwrap();

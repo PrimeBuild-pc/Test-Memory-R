@@ -48,7 +48,7 @@ pub(crate) fn use_test_home() {
             return Err("Couldn't register temporary test-home cleanup".into());
         }
         let elevated = elevation().map_err(|e| e.to_string())?;
-        let base = if elevated { admin::system_temp()? } else { std::env::temp_dir() };
+        let base = if elevated { admin::test_parent()? } else { std::env::temp_dir() };
         // SAFETY: CoCreateGuid returns the new GUID by value and needs no COM apartment.
         let id = unsafe { windows::Win32::System::Com::CoCreateGuid() }.map_err(|e| e.to_string())?;
         let path = base.join(format!("tmr-test-home-{id:?}"));

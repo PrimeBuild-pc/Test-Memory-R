@@ -66,6 +66,11 @@ jobs:
     - name: 🚧 Build release version
       run: python tools/build_release.py
 
+    # The installer's demo configs, made as release.yml's staging makes them, so a tag finds that step working: the release
+    # tmr.exe makes them in a throwaway home, in Program Files here, as the runner is elevated
+    - name: 📄 Make the demo configs as the release does
+      run: python tools/demo_configs.py target/release/tmr.exe target/demo-configs
+
     - name: Keep the build manifest
       uses: actions/upload-artifact@v7
       with:

@@ -25,9 +25,12 @@ such a folder too. The owner chose the full change over narrower fixes to each f
 - **The installer** gives the four folders users-modify only when it makes them in an install for all users (a per-user install's are
   plain, and an upgrade keeps a folder's permissions). The demo configs go to `examples\`, which only administrators can write. The
   installer moves no settings: the first normal run copies them in.
-- **Tests** take a throwaway home per process, removed at exit: under `%TEMP%` normally; elevated, `C:\Windows\Temp\tmr-test-home-<GUID>`,
-  since the elevated check refuses a folder in the profile and the tests are to run the elevated code as it runs. `release.yml`
-  generates the demo configs in such a home on its elevated runner.
+- **Tests** take a throwaway home per process, removed at exit: under `%TEMP%` normally; elevated,
+  `%ProgramFiles%\TMR Tests\tmr-test-home-<GUID>` (the parent made with TMR's permissions and left in place), since the elevated check
+  refuses a folder in the profile and the tests are to run the elevated code as it runs. First `C:\Windows\Temp`, which passes on the
+  dev box, but GitHub's runner gives other accounts the right to change it: CI failed 121 tests on it (2026-11-25), fixed in the commit
+  after 41218f7. `tools/demo_configs.py` makes the installer's demo configs in such a home (Program Files, elevated), for
+  `release.yml`'s staging and on every push, so a tag finds that step proven.
 - **The hardware kit** (`hw-pass\`, the test-host skill's scripts) adds `--allow-admin` and fetches from the admin home.
 
 ## Commits
