@@ -13,13 +13,14 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tmr::commands::ResultsComparison;
 use tmr::frontend::{ColumnAlignment, Event, ProgressSnapshot, ProgressTracker, Run, TableData, ThreadPriority};
 use windows_reactor::*;
 
 use crate::dialogs::{self, Open};
+use crate::lang::{self, Phrase};
 use crate::logger::{self, LogLine, LogLines};
 use crate::model::{Bar, DialogButton, Model, Opened, Slot, Status, StepRow};
 use crate::palette::{Palette, Palettes, brush};
@@ -94,8 +95,10 @@ pub(crate) enum Message {
     Compared((PathBuf, PathBuf), Result<ResultsComparison, String>),
     /// The chart's ▾: shown or hidden, which `window.json` keeps (TODO 109)
     Chart,
-    /// An item of the `…` menu: its label
-    Menu(String),
+    /// The hamburger: open or close the menu panel, which drops down in the page
+    ToggleMenu,
+    /// An item of that panel
+    MenuPick(crate::lang::Menu),
     /// A file or a folder opened, or why the shell couldn't
     Opened(Result<(), String>),
     /// The ••• menu's Sanitize, or with `true` its Sanitize one file: the results file or the log the Open dialog gave, none when it was
@@ -125,6 +128,20 @@ pub(crate) enum Message {
     Readings(Result<String, String>),
     /// A timings line sampled off the UI thread, so a closed port does not stall a redraw
     ReadingsLine(String),
+    /// The language chosen in Settings
+    Language(Option<usize>),
+    /// Settings: look up the latest GitHub release
+    CheckUpdates,
+    /// The lookup finished: the release, or why it couldn't
+    UpdateChecked(Result<crate::update::Release, String>),
+    /// Open a page: the repository, or the release the check found
+    OpenUrl(String),
+    /// Open the release the check found
+    OpenRelease,
+    /// The last-run note was dismissed, or its results file was opened
+    UnfinishedClosed(ContentDialogResult),
+    /// The heartbeat wrote. Nothing to show.
+    Journaled,
 }
 
 /// What the window waits on: the session's feed, and the warnings and errors it logs
@@ -180,6 +197,17 @@ pub(crate) struct Window {
     getting_readings: bool,
     /// Timings and a DIMM temperature, sampled off this thread. Empty until a source answers, and then the hint.
     readings_line: String,
+    /// When the last heartbeat was written. A crash keeps that note.
+    journal_lock: Option<std::fs::File>,
+    last_journal: Option<Instant>,
+    /// When timings were last sampled. Empty stays on a slow retry: a miss is a connect timeout.
+    last_readings: Option<Instant>,
+    /// A run that did not finish, shown once at the next open
+    unfinished: Option<crate::journal::Note>,
+    /// Settings' check for a newer release
+    update: crate::update::Status,
+    /// The hamburger's panel is open. It sits in the page, under the command bar, so it opens downward and the rest moves down.
+    menu_open: bool,
 }
 
 /// The window's tabs (TODO 109): Run, the one it opens on, then the log, the console's startup sections, and Compare
@@ -197,16 +225,16 @@ enum Tab {
 impl Tab {
     const ALL: [Tab; 7] = [Tab::Run, Tab::Log, Tab::Plan, Tab::System, Tab::Threads, Tab::Memory, Tab::Compare];
 
-    fn label(self) -> &'static str {
-        match self {
-            Tab::Run => "Run",
-            Tab::Log => "Log",
-            Tab::Plan => "Plan",
-            Tab::System => "System",
-            Tab::Threads => "Threads",
-            Tab::Memory => "Memory",
-            Tab::Compare => "Compare",
-        }
+    fn label(self, language: crate::lang::Language) -> &'static str {
+        lang::tab(language, self.index())
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    fn from_label(label: &str) -> Option<Self> {
+        lang::tab_index(label).and_then(|index| Self::ALL.get(index).copied())
     }
 }
 
@@ -216,8 +244,8 @@ const HEIGHT: f64 = 960.0;
 
 /// The run button's width: it says Start, Stop, Stopping…, Finishing… or Run again, and keeps its place
 const RUN_BUTTON: f64 = 112.0;
-/// The command bar's buttons beside the parameters box, Load config and the run button, with their spacing, and the menu's at the right
-const COMMANDS_WIDTH: f64 = 128.0 + RUN_BUTTON + 48.0 + 3.0 * 8.0;
+/// The command bar's buttons beside the parameters box, Load config and the run button, with their spacing, and the hamburger at the right
+const COMMANDS_WIDTH: f64 = 128.0 + RUN_BUTTON + 40.0 + 3.0 * 8.0;
 /// The parameters box's widest: the parameters a run takes fit, and the buttons stay beside it
 const PARAMETERS_MAX: f64 = 640.0;
 
@@ -258,6 +286,57 @@ impl Window {
         self.palettes.get(self.dark)
     }
 
+    fn t(&self, phrase: Phrase) -> &'static str {
+        lang::text(self.settings.language, phrase)
+    }
+
+    /// A note of where the run is, and a fresh timings line, every couple of seconds, flushed. A crash keeps the last one. A run that ends
+    /// closes it, and a write still in flight cannot reopen it.
+    fn heartbeat(&mut self, context: &ComponentContext<Self>, ended: bool) {
+        if ended {
+            if self.journal_lock.is_some() {
+                crate::journal::close();
+            }
+            self.unfinished = None;
+            self.last_journal = None;
+            return;
+        }
+        let running = matches!(self.model.status, Status::Running | Status::Stopping) || self.model.calibrating();
+        if !running {
+            return;
+        }
+        self.sample_if_due(context);
+        let due = self.last_journal.is_none_or(|at| at.elapsed() >= Duration::from_secs(2));
+        if !due || self.journal_lock.is_none() {
+            return;
+        }
+        self.last_journal = Some(Instant::now());
+        let note = self.note();
+        let ticket = crate::journal::ticket();
+        context.spawn_background(move |_| {
+            crate::journal::save_with(ticket, &note);
+            Message::Journaled
+        });
+    }
+
+    /// Timings and a DIMM temperature, while a run is going. A source that answered is sampled with the note; none yet, every 15 s, so a
+    /// closed port's timeout is not paid on every note.
+    fn sample_if_due(&mut self, context: &ComponentContext<Self>) {
+        let every = if self.readings_line.is_empty() { 15 } else { 2 };
+        if self.last_readings.is_none_or(|at| at.elapsed() >= Duration::from_secs(every)) {
+            self.sample_readings(context);
+        }
+    }
+
+    fn note(&self) -> crate::journal::Note {
+        crate::journal::now(
+            self.model.position.clone(),
+            self.model.error_count.as_ref().map(|count| count.text.clone()).unwrap_or_default(),
+            self.readings_line.clone(),
+            self.model.results_path().map(str::to_string),
+        )
+    }
+
     /// Runs the parameters box's command line on the session's own thread, its events to the window's feed. The log file opens now, with
     /// the window's logger, so its name pairs with the run's results.
     fn start(&mut self, context: &ComponentContext<Self>) {
@@ -295,6 +374,8 @@ impl Window {
             Ok(session) => {
                 crate::session_started(session);
                 self.model.start();
+                self.unfinished = None;
+                self.heartbeat(context, false);
                 listen(Feeds { events: rx, log }, None, self.priority, context);
             }
             // As calibrate()'s: the logger's side waits for the next run, and the log file is done with
@@ -330,7 +411,8 @@ impl Window {
     }
 
     /// One sample of the timings line, off the UI thread. A miss costs the connect timeout, then the hint stays.
-    fn sample_readings(&self, context: &ComponentContext<Self>) {
+    fn sample_readings(&mut self, context: &ComponentContext<Self>) {
+        self.last_readings = Some(Instant::now());
         context.spawn_background(|_| Message::ReadingsLine(crate::readings::line()));
     }
 
@@ -370,6 +452,8 @@ impl Window {
             Ok(handle) => {
                 crate::calibrate_started(handle);
                 self.model.calibration_started();
+                self.unfinished = None;
+                self.heartbeat(context, false);
                 listen(Feeds { events: rx, log }, None, self.priority, context);
             }
             Err(e) => {
@@ -408,6 +492,7 @@ impl Window {
         if self.settings.notify && alarm && !was_alarm {
             sound(true);
         }
+        self.heartbeat(context, ended);
         if closed && !ended {
             // A panic ends the thread before it says how it went (a release build aborts). Whose thread: the window's own calibration's
             // feed is the only one read while the box takes parameters (before a run, or after one); a session's is read with it not
@@ -489,23 +574,23 @@ impl Window {
         }
     }
 
-    /// An item of the `…` menu: a file or a folder to open, on a thread of its own, or About
-    fn menu(&mut self, label: &str, context: &ComponentContext<Self>) {
-        let path = match label {
-            MENU_LOG => self.model.log_path.clone(),
-            MENU_LOGS => Some(tmr::home::logs()),
-            MENU_RESULTS => self.model.results_path().map(PathBuf::from),
-            MENU_RESULTS_FOLDER => Some(tmr::home::results()),
-            MENU_CALIBRATE if self.model.takes_parameters() && !self.model.calibrating() => {
+    /// An item of the hamburger's panel: a file or a folder to open, on a thread of its own, or About
+    fn menu(&mut self, item: crate::lang::Menu, context: &ComponentContext<Self>) {
+        let path = match item {
+            lang::Menu::Log => self.model.log_path.clone(),
+            lang::Menu::Logs => Some(tmr::home::logs()),
+            lang::Menu::Results => self.model.results_path().map(PathBuf::from),
+            lang::Menu::ResultsFolder => Some(tmr::home::results()),
+            lang::Menu::Calibrate if self.model.takes_parameters() && !self.model.calibrating() => {
                 self.calibrate(context);
                 None
             }
-            MENU_READINGS if self.model.takes_parameters() && !self.model.calibrating() && !self.getting_readings => {
+            lang::Menu::Readings if self.model.takes_parameters() && !self.model.calibrating() && !self.getting_readings => {
                 self.get_readings(context);
                 None
             }
-            MENU_SANITIZE | MENU_SANITIZE_SINGLE => {
-                let single = label == MENU_SANITIZE_SINGLE;
+            lang::Menu::Sanitize | lang::Menu::SanitizeSingle => {
+                let single = item == lang::Menu::SanitizeSingle;
                 let ask = Open {
                     title: if single {
                         "Sanitize one file: a results file or a log, alone, its pair not looked for"
@@ -520,15 +605,15 @@ impl Window {
                 context.spawn_background(move |_| Message::SanitizeChosen(single, dialogs::open(owner, ask)));
                 None
             }
-            MENU_SETTINGS => {
+            lang::Menu::Settings => {
                 self.settings_open = true;
                 None
             }
-            MENU_ABOUT => {
+            lang::Menu::About => {
                 self.about = true;
                 None
             }
-            _ => None,
+            lang::Menu::Calibrate | lang::Menu::Readings => None,
         };
         if let Some(path) = path {
             context.spawn_background(move |_| Message::Opened(dialogs::shell_open(path)));
@@ -539,23 +624,15 @@ impl Window {
 /// The Open dialog's filter for results files
 const RESULTS_FILES: (&str, &str) = ("TMR results", "*.json");
 
-/// The `…` menu's items, by their labels, which the menu gives back
-const MENU_LOG: &str = "Open the log";
-const MENU_LOGS: &str = "Open the logs folder";
-const MENU_RESULTS: &str = "Open the results file";
-const MENU_RESULTS_FOLDER: &str = "Open the results folder";
-const MENU_CALIBRATE: &str = "Calibrate the caches and the seal";
-const MENU_READINGS: &str = "Get timings tools";
-const MENU_SANITIZE: &str = "Sanitize a results file and its log…";
-const MENU_SANITIZE_SINGLE: &str = "Sanitize one file…";
-const MENU_SETTINGS: &str = "Settings";
-const MENU_ABOUT: &str = "About TMR";
-
 /// The window's size and place, as it closes, into `window.json` (TODO 109): the next window opens as this one was
 impl Drop for Window {
     fn drop(&mut self) {
         self.keep_placement();
         let _ = self.settings.save();
+        // Closed on a run: the last note is this moment, not the one a couple of seconds ago, and it stays open for the next launch
+        if self.journal_lock.is_some() && (matches!(self.model.status, Status::Running | Status::Stopping) || self.model.calibrating()) {
+            crate::journal::save(&self.note());
+        }
     }
 }
 
@@ -583,6 +660,8 @@ impl Component for Window {
         model.errors.extend(problems.into_iter().map(|problem| format!("window.json: {problem}")));
         let (width, dark) = (settings.size.map_or(WIDTH, |(width, _)| width), settings.theme == Theme::Dark);
         let priority = ThreadPriority::Normal;
+        let journal_lock = crate::journal::claim();
+        let unfinished = journal_lock.as_ref().and_then(|_| crate::journal::unfinished());
         let mut window = Self {
             model,
             log: None,
@@ -599,9 +678,15 @@ impl Component for Window {
             priority,
             getting_readings: false,
             readings_line: String::new(),
+            journal_lock,
+            last_journal: None,
+            last_readings: None,
+            unfinished,
+            update: crate::update::Status::Idle,
+            menu_open: false,
         };
         window.sample_readings(context);
-        if start {
+        if start && window.unfinished.is_none() {
             window.start(context);
         }
         window
@@ -644,7 +729,7 @@ impl Component for Window {
                 self.settings.notify = on;
                 self.save_settings();
             }
-            Message::SaveAnswer(result) => self.model.answer_save(result == ContentDialogResult::Primary),
+            Message::SaveAnswer(result) => self.model.answer_save(result == ContentDialogResult::Secondary),
             Message::Readings(result) => {
                 self.getting_readings = false;
                 match result {
@@ -652,7 +737,7 @@ impl Component for Window {
                         for line in text.lines() {
                             self.model.log.push(line.to_string());
                         }
-                        self.model.position = "Timings tools are in companions\\".to_string();
+                        self.model.position = "Timings tools are ready. See Log for setup instructions.".to_string();
                         let folder = tmr::companions_dir();
                         context.spawn_background(move |_| Message::Opened(dialogs::shell_open(folder)));
                     }
@@ -665,6 +750,43 @@ impl Component for Window {
                 self.sample_readings(context);
             }
             Message::ReadingsLine(line) => self.readings_line = line,
+            Message::Language(Some(index)) => {
+                self.settings.language = crate::lang::Language::at(index);
+                self.save_settings();
+            }
+            Message::Language(None) => {}
+            Message::CheckUpdates if !matches!(self.update, crate::update::Status::Checking) => {
+                self.update = crate::update::Status::Checking;
+                context.spawn_background(|_| Message::UpdateChecked(crate::update::fetch()));
+            }
+            Message::CheckUpdates => {}
+            Message::UpdateChecked(result) => {
+                self.update = match result {
+                    Ok(release) => crate::update::judge(tmr::BUILD.version, &release),
+                    Err(why) => crate::update::Status::Failed(why),
+                };
+            }
+            Message::OpenUrl(url) => {
+                context.spawn_background(move |_| Message::Opened(dialogs::shell_open(PathBuf::from(url))));
+            }
+            Message::OpenRelease => {
+                if let crate::update::Status::Available { url, .. } = &self.update {
+                    let url = url.clone();
+                    context.spawn_background(move |_| Message::Opened(dialogs::shell_open(PathBuf::from(url))));
+                }
+            }
+            Message::Journaled => {}
+            Message::UnfinishedClosed(result) => {
+                // None: a new run hid the dialog. Closing the file here would mark that run finished.
+                if let Some(note) = self.unfinished.take() {
+                    crate::journal::close();
+                    if result == ContentDialogResult::Primary
+                        && let Some(path) = note.results
+                    {
+                        context.spawn_background(move |_| Message::Opened(dialogs::shell_open(PathBuf::from(path))));
+                    }
+                }
+            }
             Message::Args(text) => self.model.args = text,
             Message::LargePages(result) => self.model.answer_large_pages(match result {
                 ContentDialogResult::Primary => DialogButton::Primary,
@@ -679,7 +801,7 @@ impl Component for Window {
             // Only while the parameters box takes one
             Message::LoadConfig if self.model.takes_parameters() => {
                 let ask = Open {
-                    title: "Load a config: TMR's (.json) or TM5's (.cfg)",
+                    title: self.t(Phrase::LoadConfigTitle),
                     filter: ("TMR and TM5 configs", "*.cfg;*.json"),
                     folder: tmr::home::configs(),
                     multiple: false,
@@ -698,8 +820,8 @@ impl Component for Window {
             Message::ConfigChosen(Err(e)) => self.model.errors.push(format!("Load config: the Open dialog failed: {e}")),
             Message::Choose(slot) => {
                 let title = match slot {
-                    Slot::Baseline => "Compare: the baseline's results file",
-                    Slot::Compared => "Compare: the results file to compare with the baseline",
+                    Slot::Baseline => self.t(Phrase::CompareBaseline),
+                    Slot::Compared => self.t(Phrase::CompareOther),
                 };
                 let ask = Open { title, filter: RESULTS_FILES, folder: tmr::home::results(), multiple: false };
                 let owner = dialogs::owner();
@@ -712,12 +834,8 @@ impl Component for Window {
                 }
             }
             Message::ChooseBoth => {
-                let ask = Open {
-                    title: "Compare two results files: choose both, the second with Ctrl",
-                    filter: RESULTS_FILES,
-                    folder: tmr::home::results(),
-                    multiple: true,
-                };
+                let ask =
+                    Open { title: self.t(Phrase::CompareBothTitle), filter: RESULTS_FILES, folder: tmr::home::results(), multiple: true };
                 let owner = dialogs::owner();
                 context.spawn_background(move |_| Message::ChosenBoth(dialogs::open(owner, ask)));
             }
@@ -743,7 +861,11 @@ impl Component for Window {
                 self.settings.chart = !self.settings.chart;
                 self.save_settings();
             }
-            Message::Menu(label) => self.menu(&label, context),
+            Message::ToggleMenu => self.menu_open = !self.menu_open,
+            Message::MenuPick(item) => {
+                self.menu_open = false;
+                self.menu(item, context);
+            }
             Message::Opened(Ok(())) => {}
             Message::Opened(Err(e)) => self.model.errors.push(e),
             // Copies of the pair the file names, or of the file alone, beside it, on a pool thread: reading and scrubbing a long run's
@@ -793,7 +915,7 @@ impl Component for Window {
             }
             Message::Theme(None) => {}
             Message::Tab(label) => {
-                if let Some(tab) = Tab::ALL.into_iter().find(|tab| label.as_deref() == Some(tab.label())) {
+                if let Some(tab) = label.as_deref().and_then(Tab::from_label) {
                     self.tab = tab;
                 }
             }
@@ -858,6 +980,7 @@ impl Component for Window {
                 self.settings_dialog(context),
                 self.save_dialog(context),
                 self.sanitized_dialog(context),
+                self.unfinished_dialog(context),
             ))
     }
 }
@@ -886,50 +1009,49 @@ impl Window {
     fn header(&self, row: i32, context: &ViewContext<Self>) -> View {
         let p = self.palette();
         let info = self.model.info_line();
-        let top = Grid::new()
-            .grid_row(0)
-            .column_spacing(14.0)
-            .columns([
-                GridLength::Auto, // title
-                GridLength::Auto, // badge
-                GridLength::Auto, // the run's errors, on every tab
-                GridLength::STAR,
-                GridLength::Auto, // runtime
-            ])
-            .children((
+        let status = if self.model.calibrating() {
+            self.t(Phrase::Calibrating)
+        } else {
+            lang::status(self.settings.language, self.model.status as usize)
+        };
+        // The badge and the clock are one group: the clock's digits share the status word's centre, not the title's. A tooltip wraps its
+        // target, so the clock's alignment is on the stack, not on the text the tooltip wraps.
+        let badge = Border::new()
+            .vertical_alignment(VerticalAlignment::Center)
+            .corner_radius(12.0)
+            .padding(Thickness::new(10.0, 4.0, 10.0, 4.0))
+            .background(brush(self.status_fill()))
+            .content(
                 TextBlock::new()
-                    .text("Test Memory R")
-                    .font_size(28.0)
+                    .text(status)
+                    .font_size(12.0)
                     .font_weight(FontWeight::SEMI_BOLD)
-                    .foreground(brush(p.text_primary))
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .grid_column(0),
-                Border::new()
-                    .grid_column(1)
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .corner_radius(12.0)
-                    .padding(Thickness::new(10.0, 3.0, 10.0, 4.0))
-                    .background(brush(self.status_fill()))
-                    .content(
-                        TextBlock::new()
-                            .text(if self.model.calibrating() { "Calibrating" } else { self.model.status.label() })
-                            .font_size(12.0)
-                            .font_weight(FontWeight::SEMI_BOLD)
-                            .foreground(brush(p.on_status)),
-                    ),
-                self.error_badge(),
-                // The runtime keeps reactor's default font: 0.100.0's TextBlock has no font family; the next release adds it (owner's note
-                // 6).
-                TextBlock::new()
-                    .text(self.model.runtime_line())
-                    .font_size(20.0)
-                    .font_weight(FontWeight::SEMI_LIGHT)
-                    .foreground(brush(p.text_primary))
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .grid_column(4)
-                    // A tooltip wraps its target: the target's grid placement goes first
-                    .tooltip("The suite's runtime, from its first cycle, as the console's ticker counts it"),
-            ));
+                    .foreground(brush(p.on_status))
+                    .vertical_alignment(VerticalAlignment::Center),
+            );
+        let clock = TextBlock::new()
+            .text(self.model.runtime_line())
+            .font_size(16.0)
+            .font_weight(FontWeight::SEMI_BOLD)
+            .foreground(brush(p.text_primary))
+            .vertical_alignment(VerticalAlignment::Center)
+            .tooltip(self.t(Phrase::RuntimeTip));
+        let status_line = StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(1)
+            .children((badge, self.error_badge(), clock));
+        let top = Grid::new().grid_row(0).column_spacing(12.0).columns([GridLength::Auto, GridLength::Auto, GridLength::STAR]).children((
+            TextBlock::new()
+                .text("Test Memory R")
+                .font_size(28.0)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .foreground(brush(p.text_primary))
+                .vertical_alignment(VerticalAlignment::Center)
+                .grid_column(0),
+            status_line,
+        ));
         // The time left on the right, under the runtime, from the suite's start. The run's errors are with the other figures that change as
         // it runs, beside the cycle (`position`, TODO 109).
         let mut counts: Vec<(u64, View)> = Vec::new();
@@ -974,7 +1096,7 @@ impl Window {
         let p = self.palette();
         let (Some(s), Some(memory)) = (&self.model.system, self.model.memory_line()) else {
             return TextBlock::new()
-                .text("System info: at Start")
+                .text(self.t(Phrase::SystemInfo))
                 .foreground(brush(p.text_secondary))
                 .horizontal_alignment(HorizontalAlignment::Right)
                 .into();
@@ -1090,46 +1212,96 @@ impl Window {
         let box_width = (self.width - 2.0 * PAGE_MARGIN_X - COMMANDS_WIDTH).clamp(200.0, PARAMETERS_MAX);
         let parameters = TextBox::new()
             .text(self.model.args.clone())
-            .placeholder_text("Parameters, as on the command line: memory=50% cycles=3 (none: the defaults)")
+            .placeholder_text(self.t(Phrase::Parameters))
             .is_enabled(takes)
             .width(box_width)
             .on_text_changed(context.callback(Message::Args))
             .grid_column(0)
-            .tooltip(
-                "What Start runs, in tmr.exe's key=value syntax (tmr.exe --help lists them). \
-                 Quote one with a space in it: \"config=C:\\My configs\\x.cfg\"",
-            );
+            .automation_name(self.t(Phrase::Parameters))
+            .tooltip(self.t(Phrase::ParametersTip));
         // A config's path into the box, as `config=`, from the home's configs\ (TODO 109)
-        let load =
-            Button::new().is_enabled(takes).grid_column(1).on_click(context.callback(|()| Message::LoadConfig)).content("Load config…");
-        let item = |on: bool, key: usize, label: &str| if on { MenuItem::item(key, label) } else { MenuItem::disabled(key, label) };
-        let menu = [
-            item(self.model.log_path.is_some(), 0, MENU_LOG),
-            MenuItem::item(1usize, MENU_LOGS),
-            MenuItem::separator(2usize),
-            item(self.model.results_path().is_some(), 3, MENU_RESULTS),
-            MenuItem::item(4usize, MENU_RESULTS_FOLDER),
-            // Copies of a run's pair to post, beside it, or of one file alone (the owner, 2026-11-23)
-            MenuItem::item(9usize, MENU_SANITIZE),
-            MenuItem::item(10usize, MENU_SANITIZE_SINGLE),
-            MenuItem::separator(5usize),
-            // A calibration of its own, before a run or after one, never during (TODO 110): they'd measure each other
-            item(self.model.takes_parameters() && !self.model.calibrating(), 8, MENU_CALIBRATE),
-            item(self.model.takes_parameters() && !self.model.calibrating() && !self.getting_readings, 9, MENU_READINGS),
-            MenuItem::item(6usize, MENU_SETTINGS),
-            MenuItem::item(7usize, MENU_ABOUT),
-        ];
+        let load = Button::new()
+            .is_enabled(takes)
+            .grid_column(1)
+            .on_click(context.callback(|()| Message::LoadConfig))
+            .content(self.t(Phrase::LoadConfig));
+        // A hamburger, not a flyout: the panel opens downward in the page, and the rest moves down with it. A flyout at the top of the
+        // window opens upward when the screen has no room below.
+        let glyph = if self.menu_open { Symbol::Cancel } else { Symbol::GlobalNavigationButton };
         let more = Button::new()
             .grid_column(4)
             .style(ButtonStyle::Subtle)
+            .width(40.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .content("•••")
-            .menu(Menu::new(menu, context.callback(Message::Menu)));
+            .on_click(context.callback(|()| Message::ToggleMenu))
+            .automation_name(self.t(Phrase::MenuButton))
+            .content(SymbolIcon::new().symbol(glyph))
+            .tooltip(self.t(Phrase::MenuButton));
         let bar = Grid::new()
             .column_spacing(8.0)
             .columns([GridLength::Auto, GridLength::Auto, GridLength::Auto, GridLength::STAR, GridLength::Auto])
             .children((parameters, load, self.run_button(2, context), more));
-        StackPanel::new().grid_row(row).spacing(6.0).children((bar, self.presets(context), self.caution()))
+        let mut parts: Vec<(u64, View)> = vec![(0, bar)];
+        if self.menu_open {
+            parts.push((1, self.menu_panel(context)));
+        }
+        parts.push((2, self.presets(context)));
+        parts.push((3, self.caution()));
+        StackPanel::new().grid_row(row).spacing(8.0).keyed_children(parts)
+    }
+
+    /// The hamburger's panel, in the page under the command bar. Three groups, so a log, a calibration and Settings are not one flat list.
+    fn menu_panel(&self, context: &ViewContext<Self>) -> View {
+        let p = self.palette();
+        let ready = self.model.takes_parameters() && !self.model.calibrating();
+        let group = |column: i32, title: Phrase, items: &[(lang::Menu, bool)]| {
+            let mut rows: Vec<(u64, View)> = vec![(
+                0,
+                TextBlock::new()
+                    .text(self.t(title))
+                    .font_size(12.0)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .foreground(brush(p.text_secondary))
+                    .into(),
+            )];
+            for (i, (item, on)) in items.iter().enumerate() {
+                let item = *item;
+                rows.push((
+                    1 + i as u64,
+                    Button::new()
+                        .is_enabled(*on)
+                        .horizontal_alignment(HorizontalAlignment::Stretch)
+                        .on_click(context.callback(move |()| Message::MenuPick(item)))
+                        .content(lang::menu_label(self.settings.language, item)),
+                ));
+            }
+            StackPanel::new().grid_column(column).spacing(6.0).keyed_children(rows)
+        };
+        let files = group(0, Phrase::MenuFiles, &[
+            (lang::Menu::Log, self.model.log_path.is_some()),
+            (lang::Menu::Logs, true),
+            (lang::Menu::Results, self.model.results_path().is_some()),
+            (lang::Menu::ResultsFolder, true),
+            (lang::Menu::Sanitize, true),
+            (lang::Menu::SanitizeSingle, true),
+        ]);
+        let tools = group(1, Phrase::MenuTools, &[
+            (lang::Menu::Calibrate, ready),
+            (lang::Menu::Readings, ready && !self.getting_readings && !tmr::home::elevated()),
+        ]);
+        let app = group(2, Phrase::MenuApp, &[(lang::Menu::Settings, true), (lang::Menu::About, true)]);
+        Border::new()
+            .background(brush(p.card_background))
+            .border_brush(brush(p.card_stroke))
+            .border_thickness(1.0)
+            .corner_radius(8.0)
+            .padding(Thickness::new(12.0, 10.0, 12.0, 12.0))
+            .content(
+                Grid::new()
+                    .columns([GridLength::Star(1.0), GridLength::Star(1.0), GridLength::Star(1.0)])
+                    .column_spacing(16.0)
+                    .children((files, tools, app)),
+            )
     }
 
     /// Plan, memory, cycles and errors, written into the same parameters box. The box stays the run's only parser.
@@ -1149,16 +1321,22 @@ impl Window {
             ))
         };
         StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).children((
-            menu("Plan", "plan", &[("stability", "stability"), ("quick", "quick"), ("perf", "perf"), ("widths", "widths"), ("all", "all")]),
-            menu("Memory", "memory", &[
-                ("50%", "50%"),
-                ("80%", "80%"),
-                ("90%", "90%"),
-                ("2048MB reserve", "2048MB"),
-                ("8GiB reserve", "8GiB"),
+            menu(self.t(Phrase::Plan), "plan", &[
+                ("stability", "stability"),
+                ("quick", "quick"),
+                ("perf", "perf"),
+                ("widths", "widths"),
+                ("all", "all"),
             ]),
-            menu("Cycles", "cycles", &[("1", "1"), ("3", "3"), ("5", "5"), ("10", "10")]),
-            menu("Errors", "errors", &[
+            menu(self.t(Phrase::Memory), "memory", &[
+                ("50% reserve", "50%"),
+                ("80% reserve", "80%"),
+                ("90% reserve", "90%"),
+                ("2 GiB reserve", "2048MB"),
+                ("8 GiB reserve", "8GiB"),
+            ]),
+            menu(self.t(Phrase::Cycles), "cycles", &[("1", "1"), ("3", "3"), ("5", "5"), ("10", "10")]),
+            menu(self.t(Phrase::Errors), "errors", &[
                 ("log", "log"),
                 ("halt", "halt"),
                 ("halt:1", "halt:1"),
@@ -1172,20 +1350,20 @@ impl Window {
     fn caution(&self) -> View {
         let p = self.palette();
         let ram = match tmr::memory_status() {
-            Some(status) => format!(
-                "{:.1} GiB free of {:.1}",
+            Some(status) => lang::ram(
+                self.settings.language,
                 status.avail_phys as f64 / (1024.0 * 1024.0 * 1024.0),
-                status.total_phys as f64 / (1024.0 * 1024.0 * 1024.0)
+                status.total_phys as f64 / (1024.0 * 1024.0 * 1024.0),
             ),
-            None => "Windows didn't say how much RAM is free".to_string(),
+            None => self.t(Phrase::NoRam).to_string(),
         };
         let extra = if self.readings_line.is_empty() {
-            " · no timings yet: ••• → Get timings tools".to_string()
+            format!(" · {}", self.t(Phrase::NoTimings))
         } else {
             format!(" · {}", self.readings_line)
         };
         TextBlock::new()
-            .text(format!("An unstable overclock can freeze this PC. Save your work first. {ram}{extra}"))
+            .text(format!("{} {ram}{extra}", self.t(Phrase::Caution)))
             .foreground(brush(p.text_secondary))
             .text_wrapping(TextWrapping::Wrap)
             .into()
@@ -1198,7 +1376,7 @@ impl Window {
             Some(count) => (count.text.clone(), if count.alarm { p.error } else { p.text_secondary }),
             None => (String::new(), p.text_secondary),
         };
-        TextBlock::new().text(text).foreground(brush(colour)).vertical_alignment(VerticalAlignment::Center).grid_column(2)
+        TextBlock::new().text(text).foreground(brush(colour)).vertical_alignment(VerticalAlignment::Center)
     }
 
     /// The run button (TODO 109): Start, then Stop in the error colour, Stopping… while the step ends, Finishing… while the session saves
@@ -1209,25 +1387,28 @@ impl Window {
         match self.model.status {
             // A calibration of the window's own first (TODO 110)
             _ if self.model.calibrating() => {
-                button.resource_overrides(stop_colours(p)).on_click(context.callback(|()| Message::Stop)).content("Stop")
+                button.resource_overrides(stop_colours(p)).on_click(context.callback(|()| Message::Stop)).content(self.t(Phrase::Stop))
             }
-            Status::Ready => button.style(ButtonStyle::Accent).on_click(context.callback(|()| Message::Start)).content("Start"),
-            Status::Running => button.resource_overrides(stop_colours(p)).on_click(context.callback(|()| Message::Stop)).content("Stop"),
-            Status::Stopping => button.is_enabled(false).content("Stopping…"),
+            Status::Ready => {
+                button.style(ButtonStyle::Accent).on_click(context.callback(|()| Message::Start)).content(self.t(Phrase::Start))
+            }
+            Status::Running => {
+                button.resource_overrides(stop_colours(p)).on_click(context.callback(|()| Message::Stop)).content(self.t(Phrase::Stop))
+            }
+            Status::Stopping => button.is_enabled(false).content(self.t(Phrase::Stopping)),
             _ if self.model.session_over() => {
-                button.style(ButtonStyle::Accent).on_click(context.callback(|()| Message::RunAgain)).content("Run again")
+                button.style(ButtonStyle::Accent).on_click(context.callback(|()| Message::RunAgain)).content(self.t(Phrase::RunAgain))
             }
-            _ => button.is_enabled(false).content("Finishing…"),
+            _ => button.is_enabled(false).content(self.t(Phrase::Finishing)),
         }
     }
 
     /// The tabs (TODO 109): Run, the window's own view, then the log, the console's startup sections and Compare. A SelectorBar: 0.100.0's
     /// NavigationView can clear its selection on a stale event (#5210), and a Pivot would build every tab's view each redraw.
     fn tab_bar(&self, row: i32, context: &ViewContext<Self>) -> View {
-        let items = Tab::ALL
-            .iter()
-            .enumerate()
-            .map(|(i, &tab)| (i as u64, View::from(SelectorBarItem::new().text(tab.label()).is_selected(tab == self.tab))));
+        let items = Tab::ALL.iter().enumerate().map(|(i, &tab)| {
+            (i as u64, View::from(SelectorBarItem::new().text(tab.label(self.settings.language)).is_selected(tab == self.tab)))
+        });
         SelectorBar::new()
             .grid_row(row)
             .on_selected_text_changed(context.callback(Message::Tab))
@@ -1286,7 +1467,7 @@ impl Window {
         let p = self.palette();
         let log = &self.model.log;
         let body: View = if log.is_empty() {
-            TextBlock::new().text("The log's lines: from Start").foreground(brush(p.text_secondary)).into()
+            TextBlock::new().text(self.t(Phrase::LogHint)).foreground(brush(p.text_secondary)).into()
         } else {
             let lines = log.last(LOG_SHOWN).map(|(number, text)| {
                 // `[12:00:00 WARN tmr::tests] ...`: the level follows the 10-character stamp
@@ -1336,7 +1517,7 @@ impl Window {
             rows.push((i as u64, if self.model.opens(i) { clickable(line, Opened::Step(i)) } else { line }));
         }
         let body: View = if rows.is_empty() {
-            TextBlock::new().text("No steps finished yet").foreground(brush(p.text_secondary)).margin(Thickness::xy(8.0, 6.0)).into()
+            TextBlock::new().text(self.t(Phrase::NoSteps)).foreground(brush(p.text_secondary)).margin(Thickness::xy(8.0, 6.0)).into()
         } else {
             ScrollViewer::new().vertical_scroll_bar_visibility(ScrollBarVisibility::Auto).content(StackPanel::new().keyed_children(rows))
         };
@@ -1427,7 +1608,7 @@ impl Window {
     fn error_list(&self, row: i32) -> View {
         let p = self.palette();
         let body: View = if self.model.errors.is_empty() {
-            TextBlock::new().text("No errors so far").foreground(brush(p.text_secondary)).into()
+            TextBlock::new().text(self.t(Phrase::NoErrors)).foreground(brush(p.text_secondary)).into()
         } else {
             let entries = self.model.errors.newest(SHOWN).map(|(number, text)| {
                 (
@@ -1460,13 +1641,37 @@ impl Window {
     fn save_dialog(&self, context: &ViewContext<Self>) -> View {
         let open = self.model.save_pending() && !self.model.large_pages_pending();
         ContentDialog::new()
-            .title("Replace the stored calibration?")
-            .primary_button_text("Replace it")
-            .secondary_button_text("Keep the stored one")
-            .close_button_text("Keep the stored one")
+            .title(self.t(Phrase::ReplaceTitle))
+            .primary_button_text(self.t(Phrase::Keep))
+            .secondary_button_text(self.t(Phrase::Replace))
             .is_open(open)
             .on_closed(context.callback(Message::SaveAnswer))
             .content(TextBlock::new().text(self.model.save_question()).text_wrapping(TextWrapping::Wrap))
+    }
+
+    /// The last run did not finish (a crash, a reset, or the window closed on it). The note is what was flushed, not a picture of the
+    /// moment the machine died. Close marks it seen.
+    fn unfinished_dialog(&self, context: &ViewContext<Self>) -> View {
+        let open =
+            self.unfinished.is_some() && !self.model.large_pages_pending() && !self.model.save_pending() && self.admin_answer.is_none();
+        let mut dialog = ContentDialog::new()
+            .title(self.t(Phrase::UnfinishedTitle))
+            .close_button_text(self.t(Phrase::Close))
+            .is_open(open)
+            .on_closed(context.callback(Message::UnfinishedClosed));
+        if self.unfinished.as_ref().is_some_and(|note| note.results.is_some()) {
+            dialog = dialog.primary_button_text(self.t(Phrase::OpenTheResults));
+        }
+        if !open {
+            return dialog.content(TextBlock::new());
+        }
+        let note = self.unfinished.as_ref();
+        let body = note.map(|note| {
+            let readings = if note.readings.is_empty() { String::new() } else { format!("\n{}", note.readings) };
+            let errors = if note.errors.is_empty() { String::new() } else { format!("\n{}", note.errors) };
+            format!("{}\n\n{}{}\n{}{readings}", self.t(Phrase::UnfinishedBody), note.written, errors, note.position)
+        });
+        dialog.content(TextBlock::new().text(body.unwrap_or_default()).text_wrapping(TextWrapping::Wrap))
     }
 
     /// The large-page question, the console's as a dialog, open while the session's thread waits for its answer, in the words of the last
@@ -1529,10 +1734,14 @@ impl Window {
     /// Settings (TODO 105, the owner 2026-11-04): what the window keeps in window.json that a user sets, each saved as it changes; not open
     /// while the large-page question is, as WinUI opens one dialog at a time
     fn settings_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.settings_open && !self.model.large_pages_pending() && !self.model.save_pending() && self.admin_answer.is_none();
+        let open = self.settings_open
+            && !self.model.large_pages_pending()
+            && !self.model.save_pending()
+            && self.admin_answer.is_none()
+            && self.unfinished.is_none();
         let dialog = ContentDialog::new()
-            .title("Settings")
-            .close_button_text("Close")
+            .title(self.t(Phrase::Settings))
+            .close_button_text(self.t(Phrase::Close))
             .is_open(open)
             .on_closed(context.callback(|_: ContentDialogResult| Message::SettingsClosed));
         if !open {
@@ -1542,10 +1751,14 @@ impl Window {
             &self.settings,
             context.callback(Message::StartOnOpen),
             context.callback(Message::KeepSerials),
-            tmr::home::elevated(),
-            context.callback(Message::AllowAdmin),
+            tmr::home::elevated().then(|| context.callback(Message::AllowAdmin)),
             context.callback(Message::Notify),
-            context.callback(Message::Theme),
+            (context.callback(Message::Theme), context.callback(Message::Language)),
+            Updates {
+                status: &self.update,
+                on_check: context.callback(|()| Message::CheckUpdates),
+                on_open: context.callback(|()| Message::OpenRelease),
+            },
         ))
     }
 
@@ -1556,6 +1769,8 @@ impl Window {
         let open = self.sanitized.is_some()
             && !self.model.large_pages_pending()
             && self.admin_answer.is_none()
+            && self.unfinished.is_none()
+            && !self.model.save_pending()
             && !self.about
             && !self.settings_open;
         let (title, text) = match &self.sanitized {
@@ -1575,34 +1790,68 @@ impl Window {
     /// is open, so the logo isn't decoded at each redraw; and it isn't open while the large-page question is, as WinUI opens one dialog at
     /// a time. In the dialog's own colours, as the large-page dialog's.
     fn about_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.about && !self.model.large_pages_pending() && !self.model.save_pending() && self.admin_answer.is_none();
+        let open = self.about
+            && !self.model.large_pages_pending()
+            && !self.model.save_pending()
+            && self.admin_answer.is_none()
+            && self.unfinished.is_none();
         let dialog = ContentDialog::new()
-            .title("About TMR")
-            .close_button_text("Close")
+            .title(self.t(Phrase::About))
+            .close_button_text(self.t(Phrase::Close))
             .is_open(open)
             .on_closed(context.callback(|_: ContentDialogResult| Message::AboutClosed));
         if !open {
             return dialog.content(TextBlock::new());
         }
-        let build = tmr::BUILD;
-        let commit = build.commit.get(..12).unwrap_or(build.commit);
-        let changes = if build.dirty { ", with changes" } else { "" };
-        let line = |text: String| View::from(TextBlock::new().text(text).text_wrapping(TextWrapping::Wrap).is_text_selection_enabled(true));
+        let line = |text: String| {
+            View::from(
+                TextBlock::new()
+                    .text(text)
+                    .text_wrapping(TextWrapping::Wrap)
+                    .is_text_selection_enabled(true)
+                    .horizontal_alignment(HorizontalAlignment::Center),
+            )
+        };
         let mut parts: Vec<(u64, View)> = Vec::new();
         if let Some(png) = crate::ICON.get().and_then(|ico| largest_png(ico)) {
-            let logo = Image::new().source_data(EncodedImage::new(png)).width(128.0).height(128.0);
+            let logo = Image::new().source_data(EncodedImage::new(png)).width(72.0).height(72.0);
             parts.push((0, logo.horizontal_alignment(HorizontalAlignment::Center).into()));
         }
-        parts.push((1, TextBlock::new().text("Test Memory R (TMR)").font_size(20.0).font_weight(FontWeight::SEMI_BOLD).into()));
-        parts.push((2, line("A memory tester for Windows: is this overclock stable?".to_string())));
-        parts.push((3, line(format!("Version {} ({} build) · commit {commit}{changes}", build.version, build.profile))));
-        parts.push((4, line(build.rustc.to_string())));
-        parts.push((5, line(format!("Licence: {}, at your choice", env!("CARGO_PKG_LICENSE").replace(" OR ", " or ")))));
-        let repository = env!("CARGO_PKG_REPOSITORY");
-        if let Ok(link) = HyperlinkButton::new().navigate_uri(repository) {
-            parts.push((6, link.content(repository.trim_start_matches("https://"))));
-        }
-        dialog.content(StackPanel::new().spacing(6.0).keyed_children(parts))
+        parts.push((
+            1,
+            TextBlock::new()
+                .text("Test Memory R")
+                .font_size(20.0)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .into(),
+        ));
+        parts.push((2, line(lang::version_line(self.settings.language, tmr::BUILD.version))));
+        let author = env!("CARGO_PKG_AUTHORS").split(':').next().unwrap_or("");
+        parts.push((3, line(lang::by_line(self.settings.language, author))));
+        let repository = env!("CARGO_PKG_REPOSITORY").to_string();
+        parts.push((4, line(tmr::BUILD.describe())));
+        parts.push((5, line(format!("Licence: {}", env!("CARGO_PKG_LICENSE")))));
+        // Keep the text visible so the link has a name in the accessibility tree.
+        let mark_bytes: &'static [u8] = if self.dark { include_bytes!("github-light.png") } else { include_bytes!("github-dark.png") };
+        let mark = Image::new().source_data(EncodedImage::from_static(mark_bytes)).width(22.0).height(22.0);
+        parts.push((
+            6,
+            Button::new()
+                .style(ButtonStyle::Subtle)
+                .automation_name("GitHub")
+                .horizontal_alignment(HorizontalAlignment::Center)
+                .on_click(context.callback(move |()| Message::OpenUrl(repository.clone())))
+                .content(
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(8.0)
+                        .children((mark, TextBlock::new().text("GitHub").vertical_alignment(VerticalAlignment::Center))),
+                ),
+        ));
+        dialog.content(
+            StackPanel::new().spacing(8.0).min_width(280.0).horizontal_alignment(HorizontalAlignment::Center).keyed_children(parts),
+        )
     }
 
     /// The Compare tab (TODO 109): the baseline and the run to compare with it, each chosen in the Open dialog or the run's own results
@@ -1634,7 +1883,11 @@ impl Window {
                 ),
                 (
                     key(2),
-                    Button::new().grid_row(r).grid_column(2).on_click(context.callback(move |()| Message::Choose(slot))).content("Choose…"),
+                    Button::new()
+                        .grid_row(r)
+                        .grid_column(2)
+                        .on_click(context.callback(move |()| Message::Choose(slot)))
+                        .content(self.t(Phrase::Choose)),
                 ),
                 (
                     key(3),
@@ -1643,20 +1896,20 @@ impl Window {
                         .grid_row(r)
                         .grid_column(3)
                         .on_click(context.callback(move |()| Message::ThisRun(slot)))
-                        .content("This run"),
+                        .content(self.t(Phrase::ThisRun)),
                 ),
             ]
         };
         let mut cells: Vec<(u64, View)> = Vec::new();
-        cells.extend(slot(0, "Baseline", Slot::Baseline, tab.baseline.as_ref()));
-        cells.extend(slot(1, "Compared", Slot::Compared, tab.compared.as_ref()));
+        cells.extend(slot(0, self.t(Phrase::Baseline), Slot::Baseline, tab.baseline.as_ref()));
+        cells.extend(slot(1, self.t(Phrase::Compared), Slot::Compared, tab.compared.as_ref()));
         let actions = StackPanel::new().orientation(Orientation::Horizontal).spacing(8.0).grid_row(2).grid_column(1).grid_column_span(3);
         let actions = actions.children((
-            Button::new().on_click(context.callback(|()| Message::ChooseBoth)).content("Choose both…"),
+            Button::new().on_click(context.callback(|()| Message::ChooseBoth)).content(self.t(Phrase::ChooseBoth)),
             Button::new()
                 .is_enabled(tab.baseline.is_some() && tab.compared.is_some())
                 .on_click(context.callback(|()| Message::Swap))
-                .content("Swap"),
+                .content(self.t(Phrase::Swap)),
         ));
         cells.push((20, actions));
         let files = Grid::new()
@@ -1949,46 +2202,96 @@ fn dialog_content(text: TextBlock, words: &crate::model::LargePageDialog, on_sel
 
 /// The Settings dialog's content: a row a switch, its words on the left; the theme's choices; and where they're kept. No tooltip: one
 /// inside a dialog fails reactor 0.100.0 (`a_tooltip_in_a_dialog_still_fails`).
+/// The update check's state and its two buttons, so Settings' builder stays within a handful of arguments
+struct Updates<'a, C, O> {
+    status: &'a crate::update::Status,
+    on_check: C,
+    on_open: O,
+}
+
 fn settings_content(
     settings: &crate::settings::Settings, on_start: impl IntoPayloadCallback<bool>, on_serials: impl IntoPayloadCallback<bool>,
-    elevated: bool, on_admin: impl IntoPayloadCallback<bool>, on_notify: impl IntoPayloadCallback<bool>,
-    on_theme: impl IntoPayloadCallback<Option<usize>>,
+    administrator: Option<impl IntoPayloadCallback<bool>>, on_notify: impl IntoPayloadCallback<bool>,
+    appearance: (impl IntoPayloadCallback<Option<usize>>, impl IntoPayloadCallback<Option<usize>>),
+    updates: Updates<impl IntoUnitCallback, impl IntoUnitCallback>,
 ) -> View {
     let row = |words: &str, switch: ToggleSwitch| -> View {
         Grid::new().columns([GridLength::STAR, GridLength::Auto]).column_spacing(12.0).children((
             TextBlock::new().text(words).text_wrapping(TextWrapping::Wrap).vertical_alignment(VerticalAlignment::Center),
-            Border::new().grid_column(1).content(switch),
+            Border::new().grid_column(1).content(switch.automation_name(words)),
         ))
     };
-    let start = row(
-        "Start the run as the window opens, with the parameters given or the last run's",
-        ToggleSwitch::new().is_on(settings.start_on_open).on_toggled(on_start),
-    );
-    let serials = row(
-        "Keep the DIMMs' serial numbers, the system's UUID and the machine's fingerprints in the run's output, log and results file, \
-         as --serials does (off: left out)",
-        ToggleSwitch::new().is_on(settings.keep_serials).on_toggled(on_serials),
-    );
-    let notify = row("Sound at the first error, and when the run ends", ToggleSwitch::new().is_on(settings.notify).on_toggled(on_notify));
+    let (on_theme, on_language) = appearance;
+    let say = |phrase| lang::text(settings.language, phrase);
+    let start = row(say(Phrase::StartOnOpen), ToggleSwitch::new().is_on(settings.start_on_open).on_toggled(on_start));
+    let serials = row(say(Phrase::Serials), ToggleSwitch::new().is_on(settings.keep_serials).on_toggled(on_serials));
+    let notify = row(say(Phrase::Notify), ToggleSwitch::new().is_on(settings.notify).on_toggled(on_notify));
     let theme = StackPanel::new().spacing(4.0).children((
-        TextBlock::new().text("Theme"),
+        TextBlock::new().text(say(Phrase::Theme)),
         RadioButtons::new()
-            .items_source(crate::settings::Theme::LABELS)
+            .items_source([say(Phrase::AsWindows), say(Phrase::Light), say(Phrase::Dark)])
             .max_columns(3)
             .selected_index(settings.theme.index())
             .on_selection_changed(on_theme),
     ));
-    let kept = TextBlock::new().text("Saved in TMR's settings folder as each setting changes").text_wrapping(TextWrapping::Wrap);
+    let language = StackPanel::new().spacing(4.0).children((
+        TextBlock::new().text(say(Phrase::LanguageLabel)),
+        RadioButtons::new()
+            .items_source(crate::lang::Language::LABELS)
+            .max_columns(3)
+            .selected_index(settings.language.index())
+            .on_selection_changed(on_language),
+    ));
+    let kept = TextBlock::new().text(say(Phrase::Kept)).text_wrapping(TextWrapping::Wrap);
+    let updates = update_row(settings.language, updates);
     let panel = StackPanel::new().spacing(14.0);
-    if elevated {
+    if let Some(on_admin) = administrator {
         let admin = row(
             "Allow administrator runs without asking in this home for my account",
             ToggleSwitch::new().is_on(settings.allow_admin).on_toggled(on_admin),
         );
-        panel.children((start, serials, admin, notify, theme, kept))
+        panel.children((start, serials, admin, notify, theme, language, kept, updates))
     } else {
-        panel.children((start, serials, notify, theme, kept))
+        panel.children((start, serials, notify, theme, language, kept, updates))
     }
+}
+
+/// Settings' check for a newer release. The result stays in the dialog; a newer one opens its page. No download.
+fn update_row(language: crate::lang::Language, updates: Updates<impl IntoUnitCallback, impl IntoUnitCallback>) -> View {
+    let say = |phrase| lang::text(language, phrase);
+    let Updates { status: update, on_check, on_open } = updates;
+    let checking = matches!(update, crate::update::Status::Checking);
+    let rule = Border::new().height(1.0).margin(Thickness::new(0.0, 6.0, 0.0, 2.0)).background(ThemeBrush::CardStroke);
+    let heading = TextBlock::new().text(say(Phrase::Updates)).font_weight(FontWeight::SEMI_BOLD);
+    let button = Button::new().is_enabled(!checking).on_click(on_check).content(say(if checking {
+        Phrase::CheckingUpdates
+    } else {
+        Phrase::CheckUpdates
+    }));
+    let note = match update {
+        crate::update::Status::Idle => None,
+        crate::update::Status::Checking => None,
+        crate::update::Status::Current { version } | crate::update::Status::Ahead { version } => {
+            let text = if matches!(update, crate::update::Status::Ahead { .. }) {
+                lang::ahead_of_release(language, version)
+            } else {
+                lang::up_to_date(language, version)
+            };
+            Some(TextBlock::new().text(text).text_wrapping(TextWrapping::Wrap).into())
+        }
+        crate::update::Status::Available { version, url: _ } => Some(StackPanel::new().spacing(8.0).children((
+            TextBlock::new().text(lang::update_available(language, version)).text_wrapping(TextWrapping::Wrap),
+            Button::new().on_click(on_open).content(say(Phrase::OpenRelease)),
+        ))),
+        crate::update::Status::Failed(why) => {
+            Some(TextBlock::new().text(lang::update_failed(language, why)).text_wrapping(TextWrapping::Wrap).into())
+        }
+    };
+    let mut parts: Vec<(u64, View)> = vec![(0, rule.into()), (1, heading.into()), (2, button)];
+    if let Some(note) = note {
+        parts.push((3, note));
+    }
+    StackPanel::new().spacing(10.0).keyed_children(parts)
 }
 
 /// The Sanitize dialog's content: what `tmr::sanitize::sanitize` (or `sanitize_single`) said, selectable
@@ -2134,7 +2437,15 @@ mod tests {
     fn the_settings_dialog_opens_and_closes() {
         let mut settings = crate::settings::Settings::default();
         let content = |settings: &crate::settings::Settings| {
-            super::settings_content(settings, |_: bool| {}, |_: bool| {}, true, |_: bool| {}, |_: bool| {}, |_: Option<usize>| {})
+            super::settings_content(
+                settings,
+                |_: bool| {},
+                |_: bool| {},
+                Some(|_: bool| {}),
+                |_: bool| {},
+                (|_: Option<usize>| {}, |_: Option<usize>| {}),
+                super::Updates { status: &crate::update::Status::Idle, on_check: || {}, on_open: || {} },
+            )
         };
         let mut pump = Pump::new(RecordingRuntime::default());
         pump.mount_view(dialog(false, TextBlock::new().text("closed").into())).unwrap();

@@ -22,6 +22,8 @@
 
 mod chart;
 mod dialogs;
+mod journal;
+mod lang;
 mod logger;
 mod model;
 mod palette;
@@ -31,6 +33,7 @@ mod report;
 mod sections;
 mod settings;
 mod sysinfo;
+mod update;
 mod window;
 
 use std::sync::atomic::{AtomicBool, Ordering};

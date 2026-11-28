@@ -132,18 +132,6 @@ pub enum Status {
 }
 
 impl Status {
-    pub fn label(self) -> &'static str {
-        match self {
-            Status::Ready => "Ready",
-            Status::Running => "Running",
-            Status::Stopping => "Stopping",
-            Status::Passed => "Passed",
-            Status::Failed => "Failed",
-            Status::Interrupted => "Interrupted",
-            Status::NotRun => "Not run",
-        }
-    }
-
     fn of(status: RunStatus) -> Self {
         match status {
             RunStatus::Passed => Status::Passed,
