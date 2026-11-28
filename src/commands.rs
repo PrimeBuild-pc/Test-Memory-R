@@ -1227,7 +1227,7 @@ mod tests {
         // And every flag a session takes, and the frontends' (`--gui` and `--cli`, tmr-app's launch.rs; `--start`, the window's), each named
         // on a line, but --help itself and the short forms of it and of --version
         let words: Vec<&str> = text.split(|c: char| c.is_whitespace() || ",;:()".contains(c)).collect();
-        let flags: Vec<&str> = crate::session::KNOWN_FLAGS.into_iter().chain(["--gui", "--cli", "--start"]).collect();
+        let flags: Vec<&str> = crate::session::KNOWN_FLAGS.into_iter().chain(["--gui", "--cli", "--start", "--launch"]).collect();
         for flag in flags.iter().filter(|flag| !["--help", "-h", "-?", "-v"].contains(flag)) {
             assert!(words.contains(flag), "--help names no {flag}");
         }

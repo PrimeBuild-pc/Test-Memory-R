@@ -31,9 +31,9 @@ pub(crate) const CACHE_LATENCY_FILTER: &str =
 /// The flags that pick a mode's defaults, which `run` takes out before it looks for a one-shot command (`logfile::wanted` too)
 pub(crate) const MODE_FLAGS: [&str; 3] = ["--ram-latency", "--cache-latency", "--quick-test"];
 /// Every flag a session takes, exactly: any other is refused before anything runs (`Stopped::UnknownFlags`); `--help` names each
-pub(crate) const KNOWN_FLAGS: [&str; 31] = [
+pub(crate) const KNOWN_FLAGS: [&str; 30] = [
     "--ram-latency", "--cache-latency", "--quick-test", "--calibrate-cache", "--calibrate-curve", "--calibrate-seal", "--calibrate-all",
-    "--show-calibration", "--get-readings", "--launch", "--output", "--yes", "--no-save", "--create-demo-configs", "--compare-results",
+    "--show-calibration", "--get-readings", "--output", "--yes", "--no-save", "--create-demo-configs", "--compare-results",
     "--show-results", "--sanitize", "--sanitize-single", "--debug-topology", "--show-topology", "--setup-large-pages",
     "--remove-large-pages", "--startup-debug", "--allow-admin", "--disable-pinning", "--serials", "--help", "-h", "-?", "--version", "-v",
 ];

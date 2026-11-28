@@ -180,15 +180,8 @@ impl ReserveAmount {
         } else if s.ends_with("mib") || s.ends_with("mb") {
             let num_str = if s.ends_with("mib") { &s[..s.len() - 3] } else { &s[..s.len() - 2] };
             match num_str.parse::<f64>() {
-                Ok(mib) => {
-                    let bytes = if s.ends_with("mib") {
-                        (mib * 1024.0 * 1024.0) as u64 // MiB (binary)
-                    } else {
-                        // The same 1024×1024 as `memory=2048MB` (LegacyTM5) and as a TM5 cfg's Mb. `MiB` is the explicit spelling of it.
-                        (mib * BYTES_PER_MIB as f64) as u64
-                    };
-                    Ok(ReserveAmount::Bytes(bytes))
-                }
+                // Match the legacy TM5 memory setting: MB and MiB both use 1024 × 1024 bytes.
+                Ok(mib) => Ok(ReserveAmount::Bytes((mib * BYTES_PER_MIB as f64) as u64)),
                 Err(_) => Err(format!("Invalid MiB/MB format: {}", s)),
             }
         } else {

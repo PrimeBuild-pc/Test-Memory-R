@@ -1,10 +1,17 @@
 //! Optional timings tools (TODO 122): ZenTimings and LibreHardwareMonitor, downloaded from their official GitHub releases into
-//! `companions\` in TMR's home. TMR does not install their drivers and does not start them unless `--launch` is given: each asks for that
+//! a per-user companions folder. TMR does not install their drivers and does not start them unless `--launch` is given: each asks for that
 //! itself. ZenTimings is GPL-3.0 and wants an administrator; LibreHardwareMonitor is MPL-2.0. Neither is part of TMR.
 
+use std::ffi::OsString;
 use std::io::{self, Write};
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::{PCWSTR, w};
 
 use crate::runner::RunStatus;
 
@@ -15,17 +22,25 @@ const ZEN_SHA: &str = "c49f5a4a66a2c438d8b2bddfde5338df67ad8bed835a5f2e3ad421b21
 
 const LHM_ZIP: &str = "LibreHardwareMonitor.zip";
 const LHM_URL: &str = "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/download/v0.9.6/LibreHardwareMonitor.zip";
-/// SHA-256 of that zip, measured from the official asset. The release does not publish one.
+/// SHA-256 of the official GitHub release asset.
 const LHM_SHA: &str = "086d9f1b5a99e643edc2cfaaac16051685b551e4c5ac0b32a57c58c0e529c001";
 
-/// `companions\` in TMR's home, where the two tools are unpacked.
+/// Per-user companions folder, or the companions folder in an explicit TMR_HOME.
 pub fn dir() -> PathBuf {
-    crate::home::dir().join("companions")
+    if std::env::var_os("TMR_HOME").is_some_and(|value| !value.is_empty()) {
+        return crate::home::dir().join("companions");
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .map_or_else(|| crate::home::dir().to_path_buf(), |folder| PathBuf::from(folder).join("TMR"))
+        .join("companions")
 }
 
 /// Download both tools, check the hashes, unpack them, and say how to turn on the readings TMR uses. One already unpacked is left as it is.
 /// `--launch` starts the two programs; their own windows ask before a driver is installed.
 pub fn get_readings(launch: bool, out: &mut dyn Write) -> io::Result<RunStatus> {
+    if crate::home::elevated() {
+        return Err(io::Error::other("Open TMR as a standard user to download or start the timings tools."));
+    }
     let root = dir();
     std::fs::create_dir_all(&root).map_err(|e| io::Error::other(format!("{}: {e}", root.display())))?;
     writeln!(out, "Timings tools, from their official GitHub releases, into {}", root.display())?;
@@ -58,11 +73,29 @@ pub fn get_readings(launch: bool, out: &mut dyn Write) -> io::Result<RunStatus> 
 fn present_or_fetch(
     name: &str, url: &str, zip_name: &str, sha_url: Option<&str>, expect: &str, root: &Path, out: &mut dyn Write,
 ) -> io::Result<PathBuf> {
-    if let Some(exe) = find_exe(&root.join(name)) {
+    let into = root.join(format!("{name}-{}", &expect[..12]));
+    let executable = format!("{name}.exe");
+    let exe = into.join(&executable);
+    let _lock = crate::settings_file::lock(&into).map_err(io::Error::other)?;
+    if exe.is_file() {
         writeln!(out, "{name} is already in {}", exe.display())?;
         return Ok(exe);
     }
-    fetch(name, url, zip_name, sha_url, expect, root, out)
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_nanos();
+    let staging = root.join(format!(".{name}-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&staging)?;
+    let result = (|| {
+        let unpacked = fetch(name, url, zip_name, sha_url, expect, &staging, out)?;
+        if !unpacked.join(executable).is_file() {
+            return Err(io::Error::other(format!("{name}: the verified archive did not contain the expected executable")));
+        }
+        std::fs::rename(unpacked, into)?;
+        Ok(exe)
+    })();
+    if let Err(error) = std::fs::remove_dir_all(&staging) {
+        log::warn!("Could not remove {}: {error}", staging.display());
+    }
+    result
 }
 
 fn fetch(
@@ -86,18 +119,15 @@ fn fetch(
         return Err(io::Error::other(format!("{name}: hash {got}, expected {expect}. The file was not unpacked.")));
     }
     writeln!(out, "  hash {got}")?;
-    let into = root.join(name);
-    if into.exists() {
-        std::fs::remove_dir_all(&into).map_err(|e| io::Error::other(format!("{}: {e}", into.display())))?;
-    }
-    std::fs::create_dir_all(&into).map_err(|e| io::Error::other(e.to_string()))?;
+    let into = root.join("unpacked");
+    std::fs::create_dir(&into)?;
     unpack(&zip, &into)?;
-    Ok(find_exe(&into).unwrap_or(into))
+    Ok(into)
 }
 
 fn download(url: &str, dest: &Path) -> io::Result<()> {
-    let status = Command::new("curl.exe")
-        .args(["--fail", "--location", "--silent", "--show-error", "--output"])
+    let status = Command::new(system_tool("curl.exe")?)
+        .args(["--disable", "--fail", "--location", "--silent", "--show-error", "--max-time", "120", "--output"])
         .arg(dest)
         .arg(url)
         .status()
@@ -106,7 +136,7 @@ fn download(url: &str, dest: &Path) -> io::Result<()> {
 }
 
 fn unpack(zip: &Path, into: &Path) -> io::Result<()> {
-    let status = Command::new("tar.exe")
+    let status = Command::new(system_tool("tar.exe")?)
         .args(["-xf"])
         .arg(zip)
         .args(["-C"])
@@ -117,7 +147,7 @@ fn unpack(zip: &Path, into: &Path) -> io::Result<()> {
 }
 
 fn file_sha256(path: &Path) -> io::Result<String> {
-    let output = Command::new("certutil.exe")
+    let output = Command::new(system_tool("certutil.exe")?)
         .args(["-hashfile"])
         .arg(path)
         .arg("SHA256")
@@ -135,34 +165,26 @@ fn hex_token(text: &str) -> Option<String> {
         .map(|word| word.to_ascii_lowercase())
 }
 
-fn find_exe(dir: &Path) -> Option<PathBuf> {
-    let mut found = None;
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) {
-            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-            if !name.to_ascii_lowercase().contains("unins") {
-                return Some(path);
-            }
-        }
-        if path.is_dir() && found.is_none() {
-            found = find_exe(&path);
-        }
-    }
-    found
+fn system_tool(name: &str) -> io::Result<PathBuf> {
+    let root = std::env::var_os("SystemRoot").ok_or_else(|| io::Error::other("Windows did not provide SystemRoot"))?;
+    Ok(PathBuf::from(root).join("System32").join(name))
+}
+
+/// The pinned ZenTimings build writes its live snapshot beside the executable.
+pub(crate) fn zen_snapshot() -> PathBuf {
+    dir().join(format!("ZenTimings-{}", &ZEN_SHA[..12])).join("live_snapshot_device_config.json")
 }
 
 fn start_program(exe: &Path, out: &mut dyn Write) -> io::Result<()> {
-    if exe.extension().and_then(|ext| ext.to_str()).is_none_or(|ext| !ext.eq_ignore_ascii_case("exe")) {
-        writeln!(out, "No program to start in {}", exe.display())?;
-        return Ok(());
+    let wide = |value: OsString| value.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let path = wide(exe.as_os_str().to_os_string());
+    let folder = wide(exe.parent().unwrap_or(Path::new(".")).as_os_str().to_os_string());
+    // SAFETY: the executable and working directory are NUL-terminated buffers valid throughout the call.
+    let result = unsafe { ShellExecuteW(None, w!("open"), PCWSTR(path.as_ptr()), PCWSTR::null(), PCWSTR(folder.as_ptr()), SW_SHOWNORMAL) };
+    if result.0 as isize <= 32 {
+        return Err(io::Error::other(format!("Could not start {} (Windows Shell error {})", exe.display(), result.0 as isize)));
     }
-    match Command::new(exe).spawn() {
-        Ok(_) => writeln!(out, "Started {}", exe.display())?,
-        Err(e) => writeln!(out, "Could not start {}: {e}", exe.display())?,
-    }
-    Ok(())
+    writeln!(out, "Started {}", exe.display())
 }
 
 #[cfg(test)]

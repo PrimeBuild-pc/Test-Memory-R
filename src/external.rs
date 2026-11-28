@@ -4,8 +4,9 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -47,22 +48,40 @@ pub fn line() -> String {
 }
 
 fn zen_timings() -> Option<(Option<String>, Option<f64>)> {
-    let text = std::fs::read_to_string(snapshot_path()?).ok()?;
-    parse_zen(&text)
-}
-
-pub(crate) fn parse_zen(text: &str) -> Option<(Option<String>, Option<f64>)> {
-    let value: Value = serde_json::from_str(text).ok()?;
-    if value.get("readings").and_then(|r| r.get("stale")).and_then(Value::as_bool) == Some(true) {
+    let file = std::fs::File::open(snapshot_path()?).ok()?;
+    let mut text = String::new();
+    file.take((MAX_RESPONSE + 1) as u64).read_to_string(&mut text).ok()?;
+    if text.len() > MAX_RESPONSE {
         return None;
     }
-    let timings = value.pointer("/config/timings/per_dct/0/timings")?;
-    let cl = number(timings, "CL")?;
-    let rcd = number(timings, "RCDRD").or_else(|| number(timings, "RCD"))?;
-    let rp = number(timings, "RP")?;
-    let ras = number(timings, "RAS")?;
-    let dimm_c = value.pointer("/readings/dimm_temp_c").and_then(Value::as_f64);
-    Some((Some(format!("{cl}-{rcd}-{rp}-{ras}")), dimm_c))
+    parse_zen(&text, Utc::now())
+}
+
+fn parse_zen(text: &str, now: DateTime<Utc>) -> Option<(Option<String>, Option<f64>)> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    if value.pointer("/readings/stale")?.as_bool()? {
+        return None;
+    }
+    let sampled = DateTime::parse_from_rfc3339(value.pointer("/readings/sampled_at")?.as_str()?).ok()?;
+    let age = now - sampled.with_timezone(&Utc);
+    if age < TimeDelta::zero() || age > TimeDelta::seconds(30) {
+        return None;
+    }
+    let timings = value.pointer("/config/timings/per_dct/0/timings").and_then(|timings| {
+        let cl = number(timings, "CL")?;
+        let rcd = number(timings, "RCDRD").or_else(|| number(timings, "RCD"))?;
+        let rp = number(timings, "RP")?;
+        let ras = number(timings, "RAS")?;
+        Some(format!("{cl}-{rcd}-{rp}-{ras}"))
+    });
+    let dimm_c = value
+        .pointer("/readings/dimm")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|dimm| dimm.get("spd_hub_temp_c").and_then(Value::as_f64).or_else(|| dimm.get("dimm_temp_c").and_then(Value::as_f64)))
+        .max_by(f64::total_cmp);
+    (timings.is_some() || dimm_c.is_some()).then_some((timings, dimm_c))
 }
 
 fn number(timings: &Value, key: &str) -> Option<i64> {
@@ -77,7 +96,7 @@ fn snapshot_path() -> Option<PathBuf> {
         }
     }
     let name = "live_snapshot_device_config.json";
-    let beside = crate::companions::dir().join("ZenTimings").join(name);
+    let beside = crate::companions::zen_snapshot();
     if beside.is_file() {
         return Some(beside);
     }
@@ -96,50 +115,61 @@ fn libre_hardware() -> Option<f64> {
     parse_libre(&body)
 }
 
-pub(crate) fn parse_libre(body: &str) -> Option<f64> {
+fn parse_libre(body: &str) -> Option<f64> {
     let value: Value = serde_json::from_str(body).ok()?;
-    let mut found = None;
-    walk(&value, &mut found);
-    found
+    warmest_dimm(&value, false)
 }
 
-fn walk(value: &Value, found: &mut Option<f64>) {
-    if found.is_some() {
-        return;
-    }
-    let Some(obj) = value.as_object() else { return };
-    let text = obj.get("Text").and_then(Value::as_str).unwrap_or("");
-    let reading = obj.get("Value").and_then(Value::as_str).unwrap_or("");
-    if text.contains("DIMM")
-        && let Some(temp) = celsius(reading)
-    {
-        *found = Some(temp);
-        return;
-    }
-    if let Some(children) = obj.get("Children").and_then(Value::as_array) {
-        for child in children {
-            walk(child, found);
-        }
-    }
+fn warmest_dimm(node: &Value, in_dimm: bool) -> Option<f64> {
+    let name = node.get("Text").and_then(Value::as_str).unwrap_or("");
+    let in_dimm = in_dimm || name.to_ascii_lowercase().contains("dimm");
+    let reading = if in_dimm && node.get("Type").and_then(Value::as_str) == Some("Temperature") {
+        node.get("RawValue").and_then(|raw| {
+            raw.as_f64().or_else(|| raw.as_str()?.trim().replace(',', ".").parse::<f64>().ok()).filter(|value| value.is_finite())
+        })
+    } else {
+        None
+    };
+    node.get("Children")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|child| warmest_dimm(child, in_dimm))
+        .chain(reading)
+        .max_by(f64::total_cmp)
 }
 
-fn celsius(reading: &str) -> Option<f64> {
-    let number: String = reading.chars().take_while(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '-').collect();
-    number.parse().ok()
-}
+const MAX_RESPONSE: usize = 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_millis(200);
 
 fn http_get(host: &str, path: &str) -> Option<String> {
     let addr: SocketAddr = host.parse().ok()?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(200)).ok()?;
-    stream.set_read_timeout(Some(Duration::from_millis(200))).ok()?;
-    stream.set_write_timeout(Some(Duration::from_millis(200))).ok()?;
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let mut stream = TcpStream::connect_timeout(&addr, REQUEST_TIMEOUT).ok()?;
+    stream.set_write_timeout(Some(remaining(deadline)?)).ok()?;
     let request = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     stream.write_all(request.as_bytes()).ok()?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).ok()?;
+    let mut chunk = [0; 4096];
+    loop {
+        stream.set_read_timeout(Some(remaining(deadline)?)).ok()?;
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        if buf.len() + read > MAX_RESPONSE {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..read]);
+    }
     let text = String::from_utf8(buf).ok()?;
-    let (_, body) = text.split_once("\r\n\r\n")?;
-    body.starts_with('{').then(|| body.to_string())
+    let (header, body) = text.split_once("\r\n\r\n")?;
+    (header.split_whitespace().nth(1) == Some("200")).then(|| body.to_string())
+}
+
+fn remaining(deadline: Instant) -> Option<Duration> {
+    let left = deadline.saturating_duration_since(Instant::now());
+    (!left.is_zero()).then_some(left)
 }
 
 #[cfg(test)]
@@ -147,16 +177,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_zen_snapshot_is_the_primaries_and_a_stale_one_is_nothing() {
-        let fresh = r#"{"readings":{"stale":false,"dimm_temp_c":42.4},"config":{"timings":{"per_dct":[{"timings":{"CL":30,"RCDRD":38,"RP":38,"RAS":56}}]}}}"#;
-        assert_eq!(parse_zen(fresh), Some((Some("30-38-38-56".into()), Some(42.4))));
-        let stale = r#"{"readings":{"stale":true},"config":{"timings":{"per_dct":[{"timings":{"CL":30,"RCDRD":38,"RP":38,"RAS":56}}]}}}"#;
-        assert_eq!(parse_zen(stale), None);
+    fn zen_uses_fresh_primaries_and_the_warmest_dimm() {
+        let now = "2026-11-25T18:00:25Z".parse().unwrap();
+        let fresh = r#"{"readings":{"sampled_at":"2026-11-25T18:00:00Z","stale":false,"dimm":[{"spd_hub_temp_c":42.4},{"spd_hub_temp_c":45}]},"config":{"timings":{"per_dct":[{"timings":{"CL":30,"RCDRD":38,"RP":38,"RAS":56}}]}}}"#;
+        assert_eq!(parse_zen(fresh, now), Some((Some("30-38-38-56".into()), Some(45.0))));
+        assert_eq!(parse_zen(&fresh.replace("false", "true"), now), None);
+        assert_eq!(parse_zen(fresh, now + TimeDelta::seconds(6)), None);
     }
 
     #[test]
-    fn libre_hardware_monitor_gives_the_first_dimm_temperature() {
-        let body = r#"{"Text":"PC","Children":[{"Text":"CPU","Value":"70 °C","Children":[]},{"Text":"DIMM #1","Value":"46.5 °C"}]}"#;
+    fn libre_uses_raw_celsius_from_temperature_sensors() {
+        let body = r#"{"Text":"PC","Children":[{"Text":"CPU","Type":"Temperature","RawValue":"70"},{"Text":"DIMM #1","Children":[{"Text":"Voltage","Type":"Voltage","RawValue":"90"},{"Text":"Temperature","Type":"Temperature","Value":"115.7 °F","RawValue":"46,5"}]}]}"#;
         assert_eq!(parse_libre(body), Some(46.5));
     }
 }
