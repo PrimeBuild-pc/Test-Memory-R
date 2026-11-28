@@ -1,0 +1,91 @@
+# TODO 135: forum feedback still to decide (overclock.net, 2026-11-20 to 23)
+
+The thread "TMR (Test Memory R): an open-source TM5-style memory tester, looking for testers" drew feedback from three users
+(igor_kavinski, Veii, Bam_Bam). Each suggestion was checked against the code on 2026-11-23, every claim re-checked by a second agent.
+The owner decided them on 2026-11-23 (below the table); item 6 waits on the owner's call. What was built or decided is listed at
+the end.
+
+## Still to decide
+
+| # | Suggestion (who) | Today | Proposal | Size | The owner's call |
+|---|---|---|---|---|---|
+| 1 | A hash of the loaded config (Veii: "basic hashing as first validator") | Not recorded: the results keep the `config=` path and the config's declared name only | SHA-256 of the bytes `load_config` reads, with the size, in the results (`RunConfigSnapshot`), the setup line and the log; `--compare-results` flags two runs whose names match but hashes differ. Optional: a table of the common community `.cfg`s' published hashes ("matches the published 1usmus_v3") | Small | The `sha2` crate (a new dependency: Cargo.lock, `cargo audit`) or CNG `BCryptHash` through the `windows` crate (one feature). Whether to keep a known-config table, and who keeps it current |
+| 2 | Stop after about 7-8 errors by default (Veii: "2 is too little, 10 has a high likelihood of a BSOD") | `errors=log` by default; `errors=halt:N` stops at N or more (the monitor checks twice a second). An error is one bad 64-bit word, so one failing check can add hundreds | An `errors` default on the built-in plans, or a session default; or count failing checks rather than words for N (TODO 128) | Small | Which plans, if any (it changes "run the whole plan", and a halted short run's results are partial); what N counts |
+| 3 | A memory slider (Veii, RunMemtestPro's mouse-drag; the owner on the thread: "wouldn't be too hard") | The window has only the free-text parameter box; Reactor 0.100.0 has a `Slider` | A row under the command bar, "Memory tested [slider] 90% of available, about 28.4 of 31.6 GiB", writing `memory=10%-from-available` into the box (as `config=` is set today); another `memory=` form greys it ("set in the box") | Medium | What it measures: the share of available memory to test (recommended), GiB to test, or GiB to leave free |
+| 4 | A denser, narrower window (Veii: "a bit wide for screenshotting") | Resizable, remembers its size and place; opens at 860x960 DIPs, minimum 720x680. The header (title plus the system panel) sets the default, the Results table the minimum | Open at about 760x820, minimum about 600; below about 760 the system panel moves under the title; below about 640 drop Seal and WHEA from the Results table; tighter spacing. Needs a look at 100%, 125% and 150% scaling | Small to medium | The narrowest width; what moves or hides; one denser look or a setting |
+| 5 | Select and copy several lines in the Log tab (Bam_Bam) | One TextBlock a line, so a selection can't cross lines; the three-dot menu's "Open the log" is the workaround | Now: "Copy the log" in the three-dot menu (the clipboard through the `windows` crate). Later: one selectable text block (losing the red WARN/ERROR lines), or a read-only TextBox once Reactor has `is_read_only` (TODO 111) | Small | Whether the menu item is enough until Reactor's next release |
+| 6 | Keep a config's test size and add testers, opt-in (Veii: config-makers' intent first) | The import matches TM5 run as admin with AWE, as the shipped configs (Capable=0x0) run: one tester a CPU, each walking its whole share a window at a time. TM5's other mode (Capable bit 0x2, or no admin rights) runs about available / (window - window/8) testers, each capped at the window | An opt-in `testers=window` (or the `.cfg`'s own Capable=0x2) splitting each thread's span into window-sized testers: TM5's AWE-off block sizes, not more coverage. Smaller fidelity fixes either way: an out-of-range value reset to TM5's default as TM5 does (not clamped), code 0 floored to the Lock Granularity as TM5 does, a missing window taken as 1024, a warning when Cores exceeds the CPUs | Medium (the fixes small) | Whether to follow the `.cfg`'s Capable bits; whether the opt-in mode is worth building, since it changes block sizes, not coverage |
+| 7 | Desktop screenshots on a timer during a run (Veii, as DangWang does) | None | An opt-in engine thread beside the monitor: a GDI capture of the virtual desktop every N minutes into the home's `screenshots\`, written whole, a few kept, never on a test thread | Medium | Whether to build it or let TODO 130's heartbeat run an outside tool; the interval, how many to keep, PNG or JPEG, one image or one a monitor, a shot at the first error |
+| 8 | A per-user key so only the owner sees their serials in shared data (igor_kavinski) | Serials, the UUID and both fingerprints are left out by default (742a707); `--sanitize` removes what a file still has | HMAC-SHA256 pseudonyms under a per-install key in `tmr-cfg.json`, so the owner can match their own DIMMs across shared files | Medium | Whether at all, given the default; stable pseudonyms (match across files, but a forum reader can link one person's posts) or one per file |
+| 9 | Read temperatures and timings natively rather than through HWiNFO, ZenTimings or CPU-Z (Veii) | Nothing yet; TODO 122 plans ZenTimings and LibreHardwareMonitor | Feeds TODO 122's decision: temperatures look doable natively; timings need a driver for the memory controller's registers, which ZenTimings has | (TODO 122) | TODO 122's approach |
+| 10 | A misleading compare line (found while checking, not raised on the forum) | `--compare-results` says "(virtualized) · instance retype is the likely cause" on Hyper-V/VBS desktops too, where it isn't | Say it only on a cloud VM (the hypervisor's vendor), not under Hyper-V on a desktop | Small | None: a fix |
+
+## The owner's calls on the table (2026-11-23)
+
+1. Not taken: "overkill, given the work just done" (the crash-safety batch).
+2. Not taken: TM5 doesn't default to a stop on errors, nor should TMR: a run goes to its end or a crash.
+3, 4, 5. With the Reactor/WinUI 3 update TMR is waiting on (TODO 111), bundled with the monospaced font and the rest. (Neither the
+   slider, which Reactor 0.100.0 has, nor the window size strictly needs the update, nor a "Copy the log" menu item; the owner keeps
+   the window's work together.)
+6. Open: explained to the owner (below); the call is whether to build either part.
+7. Kept for a future version, low priority: TODO 136.
+8. Not taken: "a file either includes the serials or doesn't, the user's choice"; a key to decode them is complication, dangerous if
+   the scheme is weak, and most would lose the key.
+9. TODO 122 already covers it.
+10. No fix: the note shows only when a run is compared with a results file from before TODO 115 (2026-11-04), which recorded the
+   desktops with VBS as VMs (the 2026-11-03 baselines do); a run since records them as no VM, and new baselines retire the note.
+
+### Item 6 in plain terms
+
+TM5 shares free memory among its testers (its worker threads) in one of two ways:
+- **As administrator (its normal way, AWE), and how TMR imports every config:** one tester a CPU thread, each with an equal share of
+  all the free memory (16 testers of about 3.6 GB on 58 GB free), walking it one Testing Window (880 MB in 1usmus_v3) at a time.
+- **Without administrator rights, or when a config sets Capable bit 0x2:** each tester gets about one window of memory (768 MB) and
+  TM5 runs as many testers as it takes to cover the free memory, several a CPU (about 75 on 16 CPUs).
+Veii asked that a config written for the second way keep it rather than be turned into the first. TMR can't run it today. Building it
+would be an opt-in mode (medium); it changes the block sizes each step uses, not how much memory is tested. The shipped community
+configs (1usmus_v3, absolut) have Capable=0x0, the first way.
+The small fidelity fixes are four places TMR reads an odd config differently from TM5: a value outside TM5's range is set to TM5's
+default (TMR clamps it to the nearest allowed); block size code 0 is floored to the Lock Granularity (TMR keeps the window, which
+differs only when the window isn't a multiple of it); a config with no Testing Window Size gets 1024 MB; and a Cores above the CPU
+count should at least warn. Small; they only matter for configs outside the common ones.
+
+## The import's TM5 values and missing keys (2026-11-23, 22d24a2, edd9936, e0d2920)
+
+Under the owner's rule ("as long as TM5 values work, increasing their range to allow what TMR supports is fine; only address
+shortcomings and defaults when not present"), checked against TM5's asm and the decompile by one agent and re-checked by another:
+- Built: `Tests=` read (default 6; only [Test0]..[Test(Tests-1)] load; entries at or above it skipped, as TM5 skips them), so TM5's own
+  `MT.cfg` loads and runs 2,5,1,4,3,0,1 as TM5 does; a missing Test Sequence runs TM5's default list, a missing Cycles is 3, a
+  missing window 1024, Config Name and Author "Default" and "serj"; TM5's number syntax (0x, an h suffix, A-F letters, a dropped
+  `.fraction`, an empty value as the default); Pattern Param0/1 read as TM5 reads them (digits decimal, `-` as 32-bit two's
+  complement, only the low 32 bits kept: 1usmus_v3's four 9-digit Param1 values warn and run as TM5 runs them); quotes and `;`
+  comments as 0.12.3 strips them; Test Sequence separators and its 32-entry limit, numbers cut to their low byte; a disabled test's
+  unknown Function no longer refused; the Lock Granularity clamp 1-1024 MiB and Channels from 1 up; Interleave Type 0's 128-byte
+  walk; Pattern Modes TMR doesn't number run by their low byte; a missing [Main Section] or [Global Memory Setup] takes TM5's
+  defaults when the file is a TM5 .cfg; a negative Test Block Size as TM5's 32-bit shift leaves it; Cores above the CPUs warned.
+- Kept as TMR does it (proposed; the owner's nod pending): an empty `Test Sequence=` runs every enabled test once (0.12.3 runs no
+  step, the older asm the default list); a sequence that runs no test is refused (TM5 runs only its fill and check); mirror steps run
+  with Test0 disabled (TM5 skips them); TMR's own Pattern Mode numbers keep their meaning (TM5 runs them as mode 0); a Test Block Size
+  of 4096 MB or more is capped at the window (TM5's shift wraps it); TM5's default list naming a slot the .cfg doesn't define is
+  skipped with a warning (the owner's 2026-11-12 decision keeps the error for a list the .cfg writes).
+- Left out, as decided or out of the rule: Test Block Size code 0 keeps the window (TODO 79); filling a missing [TestN] with the
+  slot's defaults (2026-11-12); Enable values other than 0 and 1; a window of 0; MirrorMove Parameter=3; TM5 cutting Config Name and
+  Author; TM5 writing the .cfg back (TMR never writes a config).
+
+## Built or decided (2026-11-20 to 23)
+
+- Serials left out by default, `--serials` keeps them (742a707); `tmr --sanitize` for a results file and its log, `tmr --sanitize-single`
+  for one (1b5d450, a14c600, ebe6bd9, 3789afa): igor_kavinski.
+- The reporter's uneven allocation: the import rounds down, a locked 4 KiB tail, or the run stops (TODO 131): Bam_Bam.
+- LPDDR5X named in the docs and `beat=` (TODO 132): Veii.
+- INFO in the log: by design; the duplicates are gone (5b460a5): Bam_Bam.
+- The window remembers its position (53e5b77): Bam_Bam.
+- `errors=halt:N` reaches a run from the command line and the window (f716809); it had silently become `log`: Veii's point about stopping.
+- Crash safety: `tmr-cfg.json` and `window.json` written whole in `settings\` with a `.bak` (9cd30fa, 697e4dd, dd2b0a7, 7bda8ab); a
+  results file from the end of setup (761a799); `.cfg` damage warned of, read as TM5 reads it (7896b1e, 7e0ac10): Veii.
+- The large-page check reads as success when it succeeds (644fd88, e15a303): Bam_Bam's "ASSIGNED but DISABLED".
+- DIMMs show their configured speed and a slot (5c4bdfa, 6f33633): from Bam_Bam's log.
+- Not taken (the owner): forcing the log to disk (the risk an overclocker runs); more for comparing runs with different allocations (a
+  clean boot gives the same memory; the allocation fixes are enough).
+- No action: bundling the runtimes (winget installs them); the theme (the colour system exists); a second maintainer (not code); the
+  rotation of threads over cores is TODO 133, and Veii attached TM5 0.12.3 to post #11 of the thread.

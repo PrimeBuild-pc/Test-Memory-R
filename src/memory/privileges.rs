@@ -64,7 +64,7 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
                 return Err("SeLockMemoryPrivilege not assigned to current user");
             }
             PrivilegeState::AssignedButDisabled => {
-                log::info!("SeLockMemoryPrivilege assigned but disabled, attempting to enable...");
+                log::debug!("SeLockMemoryPrivilege assigned but disabled, attempting to enable...");
 
                 // Try to enable it
                 if let Err(e) = enable_privilege_in_token(token, luid) {
@@ -75,7 +75,7 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
                 // Verify it's now enabled
                 match check_privilege_in_token(token, luid) {
                     PrivilegeState::AssignedAndEnabled => {
-                        log::info!("Successfully enabled SeLockMemoryPrivilege");
+                        log::debug!("Successfully enabled SeLockMemoryPrivilege");
                     }
                     _ => {
                         let _ = CloseHandle(token);
@@ -84,14 +84,14 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
                 }
             }
             PrivilegeState::AssignedAndEnabled => {
-                log::info!("SeLockMemoryPrivilege already enabled");
+                log::debug!("SeLockMemoryPrivilege already enabled");
             }
         }
 
         let _ = CloseHandle(token);
 
         // Test with actual allocation (2MB - one large page)
-        log::info!("Testing large page allocation with 2MB test allocation...");
+        log::debug!("Testing large page allocation with 2MB test allocation...");
         let test_size = 2 * 1024 * 1024;
         let ptr = VirtualAlloc(Some(null_mut()), test_size, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
 
@@ -110,9 +110,36 @@ pub fn check_large_page_privilege() -> Result<(), &'static str> {
         } else {
             // Clean up test allocation
             let _ = VirtualFree(ptr, 0, MEM_RELEASE);
-            log::info!("Large page test allocation successful");
+            log::debug!("Large page test allocation successful");
             Ok(())
         }
+    }
+}
+
+/// Enable "Increase a process working set" (`SeIncreaseWorkingSetPrivilege`) in this process's token, which raising the working-set
+/// minimum for a locked 4 KiB tail needs (TODO 131). Windows assigns it to every user but leaves it disabled. Not assigned (a policy that
+/// took it away) is an error; the raise is then refused, and that refusal is what stops the run.
+pub fn enable_working_set_privilege() -> Result<(), &'static str> {
+    // SAFETY: as `check_large_page_privilege`: `GetCurrentProcess` returns a pseudo-handle that needs no closing; `token` is used only
+    // where `OpenProcessToken` succeeded and is closed exactly once on every path after it; `luid` is initialised before
+    // `LookupPrivilegeValueW` writes it. The two helpers' contract is met by the `TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY` open.
+    unsafe {
+        let mut token: HANDLE = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token).is_err() {
+            return Err("Failed to open process token");
+        }
+        let mut luid = LUID::default();
+        if LookupPrivilegeValueW(None, windows::core::w!("SeIncreaseWorkingSetPrivilege"), &mut luid).is_err() {
+            let _ = CloseHandle(token);
+            return Err("Failed to look up SeIncreaseWorkingSetPrivilege");
+        }
+        let result = match check_privilege_in_token(token, luid) {
+            PrivilegeState::NotAssigned => Err("SeIncreaseWorkingSetPrivilege not assigned to current user"),
+            PrivilegeState::AssignedButDisabled => enable_privilege_in_token(token, luid),
+            PrivilegeState::AssignedAndEnabled => Ok(()),
+        };
+        let _ = CloseHandle(token);
+        result
     }
 }
 
@@ -207,7 +234,13 @@ unsafe fn enable_privilege_in_token(token: HANDLE, privilege_luid: LUID) -> Resu
     }
 }
 
-fn is_elevated() -> bool {
+/// Whether this process runs as administrator (`TokenElevation`): run elevated, or an administrator with no split token (UAC off, the
+/// built-in Administrator). A failed query is treated as elevated for diagnostics. Home selection returns the error.
+pub(crate) fn is_elevated() -> bool {
+    elevation().unwrap_or(true)
+}
+
+pub fn elevation() -> windows::core::Result<bool> {
     use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TokenElevation};
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -217,9 +250,7 @@ fn is_elevated() -> bool {
         let process = GetCurrentProcess();
         let mut token: HANDLE = HANDLE::default();
 
-        if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
-            return false;
-        }
+        OpenProcessToken(process, TOKEN_QUERY, &mut token)?;
 
         let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
         let mut return_length = 0u32;
@@ -234,7 +265,7 @@ fn is_elevated() -> bool {
 
         let _ = CloseHandle(token);
 
-        result.is_ok() && elevation.TokenIsElevated != 0
+        result.map(|()| elevation.TokenIsElevated != 0)
     }
 }
 
@@ -286,7 +317,7 @@ pub fn enable_large_page_privilege_enhanced() -> Result<(), String> {
 
         match last_error.0 {
             0 => {
-                log::info!("Successfully enabled SeLockMemoryPrivilege");
+                log::debug!("Successfully enabled SeLockMemoryPrivilege");
                 Ok(())
             }
             1300 => Err("Some privileges were not assigned (ERROR_NOT_ALL_ASSIGNED)".to_string()),
@@ -493,7 +524,7 @@ pub(crate) fn account_of(token: &Token) -> String {
 /// What a session asks about large pages before its run (`Frontend::ask_large_pages`), when this token lacks the right they need,
 /// SeLockMemoryPrivilege ('Lock pages in memory'), and the run's page range allows them (maxpage= large or huge). A right reaches a
 /// program at its account's next sign-in: no restart is needed. The owner's rule (2026-11-03): a run takes 4 KiB pages only when the
-/// user says so (`LargePageAnswer::Regular`) or gave `minpage=regular maxpage=regular` (then nothing is asked); no answer quits.
+/// user says so (`LargePageAnswer::Regular`) or gave `minpage=reg-page maxpage=reg-page` (then nothing is asked); no answer quits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LargePageQuestion {
     /// The policy gives it to `account`, the account TMR runs as, or to `via`, a group it is in, but this sign-in began before it did. A
@@ -633,14 +664,18 @@ pub fn grant_large_pages(candidate: &Candidate) -> Result<(), String> {
 }
 
 /// The large-page check's lines: the right's state in this token, enabling it there when it is disabled, and a test allocation; without
-/// it, who can grant it and how. It never grants the right (`grant_large_pages` does, asked). The allocator calls it too, before a
-/// large-page request (`WindowsBackend::allocate_with_virtualalloc2`).
+/// it, whether TMR runs as administrator, who can grant it and how. It never grants the right (`grant_large_pages` does, asked). The
+/// allocator calls it too, before a large-page request (`WindowsBackend::allocate_with_virtualalloc2`).
+///
+/// Held and off is the normal state, not a fault: Windows starts every process with the right off, and this switches it on, so that reads
+/// as one success line (forum feedback, 2026-11-23: a user took the old "⚠️ ASSIGNED but DISABLED" for one).
 pub fn enable_large_pages() -> Result<String, String> {
+    const RIGHT: &str = "Lock pages in memory (SeLockMemoryPrivilege)";
     let mut messages = Vec::new();
 
     match check_privilege_state() {
         PrivilegeState::NotAssigned => {
-            messages.push("❌ SeLockMemoryPrivilege: NOT in current session token".to_string());
+            messages.push(format!("❌ {RIGHT}: this sign-in doesn't have it"));
 
             let token = Token::read();
             match &token {
@@ -650,7 +685,7 @@ pub fn enable_large_pages() -> Result<String, String> {
                     if is_elevated() {
                         messages.push("❌ Running elevated, but not as an administrator: only an administrator can grant it".to_string());
                     } else {
-                        messages.push("❌ Not running as Administrator".to_string());
+                        messages.push("❌ Not running as Administrator: only an administrator can grant it".to_string());
                     }
                     messages.push("".to_string());
                     messages.push("🔧 SOLUTIONS (try in order):".to_string());
@@ -661,7 +696,9 @@ pub fn enable_large_pages() -> Result<String, String> {
                     );
                     if token.as_ref().is_ok_and(uac_filtered) {
                         messages.push(
-                            "   You sign in as an administrator: run TMR as administrator once to grant it; after the next sign-in it has it in every run".to_string(),
+                            "   You sign in as an administrator: run TMR as administrator once to grant it; after the next sign-in it has \
+                             it in every run"
+                                .to_string(),
                         );
                     }
                     messages.push("2. If it was just granted: sign out of Windows and back in, then run TMR again".to_string());
@@ -672,44 +709,49 @@ pub fn enable_large_pages() -> Result<String, String> {
                 }
             }
         }
-        PrivilegeState::AssignedButDisabled => {
-            messages.push("⚠️  SeLockMemoryPrivilege: ASSIGNED but DISABLED".to_string());
-
-            match enable_large_page_privilege_enhanced() {
-                Ok(()) => {
-                    messages.push("✅ Successfully enabled SeLockMemoryPrivilege".to_string());
-
-                    match test_large_page_allocation() {
-                        Ok(()) => {
-                            messages.push("✅ Large page test allocation successful".to_string());
-                            return Ok(messages.join("\n"));
-                        }
-                        Err(e) => {
-                            messages.push(format!("❌ Large page test failed: {}", e));
-                        }
-                    }
-                }
-                Err(e) => {
-                    messages.push(format!("❌ Failed to enable privilege: {}", e));
-                }
+        // "This sign-in has it": the token's, which is all this reads; the security policy may give it to a group, or no longer give it
+        // (`--remove-large-pages`, until the next sign-in)
+        PrivilegeState::AssignedButDisabled => match enable_large_page_privilege_enhanced() {
+            Ok(()) => {
+                messages.push(format!("✅ {RIGHT}: this sign-in has it, switched on for this run"));
+                test_allocation_lines(&mut messages);
             }
-        }
+            Err(e) => {
+                messages.push(format!("❌ {RIGHT}: this sign-in has it, but Windows didn't switch it on: {e}"));
+                messages.push("   Run TMR again; if this stays, sign out of Windows and back in, or restart it".to_string());
+            }
+        },
         PrivilegeState::AssignedAndEnabled => {
-            messages.push("✅ SeLockMemoryPrivilege: ASSIGNED and ENABLED".to_string());
-
-            match test_large_page_allocation() {
-                Ok(()) => {
-                    messages.push("✅ Large page test allocation successful".to_string());
-                    return Ok(messages.join("\n"));
-                }
-                Err(e) => {
-                    messages.push(format!("❌ Large page test failed: {}", e));
-                }
-            }
+            messages.push(format!("✅ {RIGHT}: this sign-in has it, already on"));
+            test_allocation_lines(&mut messages);
         }
     }
 
     Ok(messages.join("\n"))
+}
+
+/// `enable_large_pages`' test allocation line, the right on: OK, or why it failed and what to do, by its error code (`advice`)
+fn test_allocation_lines(messages: &mut Vec<String>) {
+    match test_large_page_allocation() {
+        Ok(()) => messages.push("✅ Large-page test allocation (2 MiB): OK".to_string()),
+        Err((code, e)) => {
+            messages.push(format!("❌ Large-page test allocation (2 MiB) failed: {e}"));
+            messages.push(format!("   {}", advice(code)));
+        }
+    }
+}
+
+/// What to do when the test allocation failed with Win32 error `code`, the right on: 1450 is fragmentation, 1314 the right refused, 8
+/// and 1455 (the commit limit, a paging file too small) memory short; each its own fix
+fn advice(code: u32) -> &'static str {
+    match code {
+        1450 => {
+            "The right is in place, but Windows couldn't give a 2 MiB page: restart Windows (memory fragments as it runs) and run TMR first"
+        }
+        1314 => "Windows says the right isn't held, though this sign-in has it: sign out of Windows and back in, then run TMR again",
+        8 | 1455 => "Windows is short of memory to commit (in use, or a paging file too small): close what uses it, or restart Windows",
+        _ => "The right is in place, but Windows refused the page: restart Windows and run TMR first",
+    }
 }
 
 /// Check the current state of the SeLockMemoryPrivilege
@@ -744,8 +786,8 @@ pub(crate) fn in_token() -> bool {
     check_privilege_state() != PrivilegeState::NotAssigned
 }
 
-/// Test a small large page allocation
-fn test_large_page_allocation() -> Result<(), String> {
+/// Test a small large page allocation: why not, its Win32 error code and the text Windows gives it
+fn test_large_page_allocation() -> Result<(), (u32, String)> {
     // SAFETY: a self-contained 2 MB probe. The returned pointer is never dereferenced — only null-checked and, when non-null, released with
     // the `MEM_RELEASE` form `VirtualFree` requires (size 0, base address as returned).
     unsafe {
@@ -755,7 +797,7 @@ fn test_large_page_allocation() -> Result<(), String> {
         if ptr.is_null() {
             let err = GetLastError();
             let error_msg = format_win32_error(err);
-            Err(format!("Large page allocation failed: {} ({})", error_msg, err.0))
+            Err((err.0, format!("{} ({})", error_msg, err.0)))
         } else {
             // Clean up test allocation
             let _ = VirtualFree(ptr, 0, MEM_RELEASE);
@@ -764,43 +806,22 @@ fn test_large_page_allocation() -> Result<(), String> {
     }
 }
 
-/// The large-page check's report (`Setup::LargePageDiagnostic`): elevated or not, the account, and `enable_large_pages`' lines. It never
-/// grants the right: a session asks first (`large_page_question`), and `--setup-large-pages` grants it after this.
+/// The large-page check's report (`Setup::LargePageDiagnostic`): its heading, the account, and `enable_large_pages`' lines, which say
+/// whether TMR runs as administrator only where the right is missing: granting it needs that, and nothing else here does. It never grants
+/// the right: a session asks first (`large_page_question`), and `--setup-large-pages` grants it after this.
 pub fn diagnose_large_pages() -> String {
-    let mut report = String::new();
+    let mut report = "🔍 Large page check\n".to_string();
 
-    report.push_str("🔧 TMR Large Page Auto-Setup starting\n\n");
-
-    // Show current system info
-    report.push_str("System Information:\n");
-    if is_elevated() {
-        report.push_str("✅ Running with Administrator privileges\n");
-    } else {
-        report.push_str("❌ Not running as Administrator\n");
-    }
-
-    // The account, from the token: not %USERDOMAIN%\%USERNAME%, which whoever started TMR sets
+    // The account, from the token: not %USERDOMAIN%\%USERNAME%, which whoever started TMR sets. `sanitize::USER_LINE` finds it by this
+    // line's start.
     match Token::read() {
         Ok(token) => report.push_str(&format!("👤 User: {}\n", account_of(&token))),
         Err(e) => report.push_str(&format!("👤 User: unknown ({e})\n")),
     }
 
-    report.push('\n');
-
     // Enable it in this token, and try it
-    match enable_large_pages() {
-        Ok(setup_result) => {
-            report.push_str("Auto-Setup Results:\n");
-            report.push_str(&setup_result);
-            report.push('\n');
-        }
-        Err(setup_error) => {
-            report.push_str("Auto-Setup Failed:\n");
-            report.push_str(&setup_error);
-            report.push('\n');
-        }
-    }
-
+    report.push_str(&enable_large_pages().unwrap_or_else(|e| e));
+    report.push('\n');
     report
 }
 
@@ -821,6 +842,18 @@ mod tests {
     }
 
     const ENABLED: u32 = (SE_GROUP_ENABLED | windows::Win32::System::SystemServices::SE_GROUP_MANDATORY) as u32;
+
+    /// A failed test allocation is advised by its error code (review: every code was told to restart for fragmentation): 1450
+    /// fragmentation, 1314 the right refused, 8 and 1455 memory short, and any other a restart without a cause named
+    #[test]
+    fn a_failed_test_allocation_is_advised_by_its_code() {
+        assert!(advice(1450).contains("couldn't give a 2 MiB page: restart Windows (memory fragments as it runs)"));
+        assert!(advice(1314).contains("sign out of Windows and back in"));
+        for short in [8, 1455] {
+            assert!(advice(short).starts_with("Windows is short of memory to commit"), "{short}");
+        }
+        assert!(!advice(87).contains("fragments") && advice(87).contains("restart Windows"));
+    }
 
     /// TODO 113: which of a token's groups are offered the right, and how far each reaches, by SID: the attributes leave out the logon SID,
     /// the labels and deny-only groups; the types what isn't a group; Users, Domain Users and the automatic groups are broad, service
@@ -926,7 +959,7 @@ mod tests {
         assert_eq!(held(&["S-1-1-0", "S-1-5-32-544"]), Some(Holder::Group(r"BUILTIN\Administrators".to_string())), "the first offered");
     }
 
-    /// TODO 113: the question, from stand-ins (decision 5a): none with the right in the token, or with maxpage=regular (4 KiB pages the
+    /// TODO 113: the question, from stand-ins (decision 5a): none with the right in the token, or with maxpage=reg-page (4 KiB pages the
     /// most the run takes), nothing read; the sign-in when the account or a group holds it, run as administrator or not (2026-11-04: an
     /// administrator keeps the right unelevated); else, run as administrator, the grant, the account first, also when the policy can't
     /// be read, and not, 4 KiB pages or quit whatever minpage is; `uac` and `domain` carried. No test reads or changes the policy.
@@ -972,8 +1005,8 @@ mod tests {
         let needs = Some(LargePageQuestion::NeedsAdministrator { account: r"PC\owner".to_string(), uac: true });
         assert_eq!(ask(true, true, true, Ok(vec![])), (None, false, false), "the right in the token");
         assert_eq!(ask(true, true, false, Ok(vec![])), (None, false, false), "the right in the token, not elevated");
-        assert_eq!(ask(false, false, false, Ok(vec![])), (None, false, false), "maxpage=regular, not an administrator: no question");
-        assert_eq!(ask(false, false, true, Ok(vec![])), (None, false, false), "maxpage=regular, an administrator: no question");
+        assert_eq!(ask(false, false, false, Ok(vec![])), (None, false, false), "maxpage=reg-page, not an administrator: no question");
+        assert_eq!(ask(false, false, true, Ok(vec![])), (None, false, false), "maxpage=reg-page, an administrator: no question");
         assert_eq!(ask(false, true, false, Ok(vec![])), (needs.clone(), true, true), "not an administrator, held by nobody: 4 KiB or quit");
         let unreadable = || Err("LsaOpenPolicy: Access is denied.".to_string());
         assert_eq!(ask(false, true, false, unreadable()), (needs, true, true), "not an administrator, the policy unreadable");

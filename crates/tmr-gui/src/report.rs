@@ -104,7 +104,12 @@ impl Report {
         let cycles = report.cycles_completed;
         let verdict = format!(
             "{} · {cycles} cycle{} in {} · {errors}{whea}",
-            if failed { "❌ Failed" } else { "✅ Passed" },
+            match (failed, report.tested()) {
+                (true, _) => "❌ Failed",
+                (false, true) => "✅ Passed",
+                // No cycle: nothing tested, so no pass
+                (false, false) => "No test ran",
+            },
             if cycles == 1 { "" } else { "s" },
             report.total_runtime
         );

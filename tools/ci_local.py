@@ -50,7 +50,7 @@ def steps(path):
             name = m.group(1)
         elif name is not None and (m := re.match(r"^\s+run:\s*(.+?)\s*$", line)):
             command = m.group(1)
-            supported = command.startswith(("cargo ", "python tools/build_release.py", "python -B -m unittest "))
+            supported = command.startswith(("cargo ", "python tools/build_release.py", "python tools/demo_configs.py", "python -B -m unittest "))
             out.append((name, command if supported else None))
             name = None
         elif re.match(r"^  [A-Za-z_-]+:\s*$", line) and out:

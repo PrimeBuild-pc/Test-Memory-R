@@ -236,7 +236,7 @@ mod tests {
     /// A PATH's first folder that has the file, a link not followed
     #[test]
     fn a_program_is_found_on_the_path() {
-        let root = std::env::temp_dir().join(format!("tmr-shell-test-{}", std::process::id()));
+        let root = tmr::test_support::test_home().join("shell");
         let (a, b) = (root.join("a"), root.join("b"));
         std::fs::create_dir_all(&a).expect("a test folder");
         std::fs::create_dir_all(b.join("pwsh.exe")).expect("a folder named as the program");

@@ -32,15 +32,15 @@ impl EnhancedMemoryLayout {
         crate::reporting::converters::create_consolidated_memory_report(&self.system_memory_info, &self.allocation_result)
     }
 
-    /// The thread layout, to the log, after the plan is shown
+    /// The thread layout, at debug level, after the plan is shown: the plan has the same figures
     pub fn log_thread_layout(&self) {
-        log::info!("🧵 Thread Memory Layout:");
-        log::info!("  Total threads: {}", self.blocks.len());
+        log::debug!("🧵 Thread Memory Layout:");
+        log::debug!("  Total threads: {}", self.blocks.len());
 
         if !self.blocks.is_empty() {
             let size_gib = bytes_to_gib_f64(self.blocks[0].size_bytes as u64);
-            log::info!("  Allocation per thread: {:.2} GiB", size_gib);
-            log::info!("  Total planned allocation: {:.2} GiB", size_gib * self.blocks.len() as f64);
+            log::debug!("  Allocation per thread: {:.2} GiB", size_gib);
+            log::debug!("  Total planned allocation: {:.2} GiB", size_gib * self.blocks.len() as f64);
         }
     }
 }

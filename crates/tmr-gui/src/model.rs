@@ -635,6 +635,23 @@ impl Model {
         self.args = args_text(&args);
     }
 
+    /// An elevated window may reopen in a different working folder. Replay the same config file it selected this time.
+    pub fn saved_parameters(&self) -> String {
+        let mut args = args_of(&self.args);
+        tmr::session::take_admin_flag(&mut args);
+        if tmr::home::elevated() {
+            for arg in &mut args {
+                if let Some(name) = arg.strip_prefix("config=") {
+                    let path = tmr::home::config_path(name).unwrap_or_else(|_| std::path::PathBuf::from(name));
+                    if let Ok(path) = std::path::absolute(path) {
+                        *arg = format!("config={}", path.display());
+                    }
+                }
+            }
+        }
+        args_text(&args)
+    }
+
     /// A config chosen in the Open dialog (TODO 109): `config=<path>` in the parameters box, in place of the one there
     pub fn set_config(&mut self, path: &Path) {
         let mut args: Vec<String> = args_of(&self.args).into_iter().filter(|arg| !arg.starts_with("config=")).collect();
@@ -765,6 +782,7 @@ impl Model {
             | Setup::CpuType { .. }
             | Setup::CpuCount { .. }
             | Setup::LargePageDiagnostic { .. }
+            | Setup::ConfigRestored(_)
             | Setup::SealCalibration(_)
             | Setup::CpuTopology { .. } => {}
             Setup::Selection(selection) => {
@@ -1048,7 +1066,7 @@ impl Model {
             (LargePageAnswer::Grant(_), _) => "Granting the large-page right".to_string(),
             (LargePageAnswer::Quit, _) => "Stopping before allocating: nothing granted, nothing run".to_string(),
             (LargePageAnswer::Regular, _) => {
-                self.errors.push(format!("{regular}: this run takes 4 KiB pages (minpage=regular maxpage=regular)"));
+                self.errors.push(format!("{regular}: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)"));
                 "Setting up, on 4 KiB pages".to_string()
             }
         };
@@ -1416,7 +1434,7 @@ fn stopped(why: &Stopped) -> String {
         Stopped::Invalid(e) => e.trim_start_matches("❌ ").lines().next().unwrap_or_default().to_string(),
         Stopped::CpuSelection(e) => format!("CPU selection error: {e}"),
         Stopped::NeedsLargePages => "This sign-in lacks the right large pages need, and TMR runs nothing on 4 KiB pages unasked \
-                                     (minpage=regular maxpage=regular runs on them without asking)"
+                                     (minpage=reg-page maxpage=reg-page runs on them without asking)"
             .to_string(),
     }
 }
@@ -1983,6 +2001,7 @@ mod tests {
             nodes: Vec::new(),
             commit_groups: Vec::new(),
             fairness: Vec::new(),
+            regular: None,
         };
         let plan = TestConfigurationReport {
             suite_timing: String::new(),
@@ -2097,9 +2116,15 @@ mod tests {
         let mut m = model();
         m.start();
         assert_eq!(m.position, "Setting up");
-        let module = MemoryModule { locator: "DIMM_A2".to_string(), capacity_bytes: 32 << 30, memory_type: 0x22, ..Default::default() };
-        let second = MemoryModule { locator: "DIMM_B2".to_string(), capacity_bytes: 16 << 30, ..module.clone() };
-        m.choose_dimm("DIMM_B2 · 16 GiB");
+        let module = MemoryModule {
+            slot: "A-2".to_string(),
+            locator: "DIMM_A2".to_string(),
+            capacity_bytes: 32 << 30,
+            memory_type: 0x22,
+            ..Default::default()
+        };
+        let second = MemoryModule { slot: "B-2".to_string(), locator: "DIMM_B2".to_string(), capacity_bytes: 16 << 30, ..module.clone() };
+        m.choose_dimm("B-2 · 16 GiB");
         assert!(m.system.is_none(), "no DIMM to choose before setup has detected them");
         let status = MemoryStatus { total_phys: 62 << 30, avail_phys: 50 << 30, total_page_file: 70 << 30, avail_page_file: 60 << 30 };
         for setup in [Setup::Selection(Box::new(selection())), Setup::LargePageCheck] {
@@ -2111,7 +2136,7 @@ mod tests {
         m.answer_large_pages(DialogButton::Secondary);
         assert_eq!(answer.try_recv(), Ok(LargePageAnswer::Regular));
         for setup in [
-            Setup::LargePageStatus { usable: false, min_page: "regular".to_string(), min_needs_large: false },
+            Setup::LargePageStatus { usable: false, min_page: "reg-page".to_string(), min_needs_large: false, right_held: false },
             Setup::MemoryStatus(Some(status)),
             Setup::MemoryStatus(None),
             Setup::SystemInfo {
@@ -2139,11 +2164,11 @@ mod tests {
         assert_eq!((memory.total.as_deref(), memory.dimms.as_str()), (Some("48 GiB DDR5"), "2 DIMMs"));
         assert!(memory.about.contains("Windows reports 62 GiB"), "{}", memory.about);
         let chosen = |m: &Model| m.system.as_ref().and_then(SystemPanel::chosen).map(Dimm::choice);
-        assert_eq!(chosen(&m).as_deref(), Some("DIMM_A2 · 32 GiB"), "the first, before any choice");
-        m.choose_dimm("DIMM_B2 · 16 GiB");
-        assert_eq!(chosen(&m).as_deref(), Some("DIMM_B2 · 16 GiB"), "the one chosen");
+        assert_eq!(chosen(&m).as_deref(), Some("A-2 · 32 GiB"), "the first, before any choice");
+        m.choose_dimm("B-2 · 16 GiB");
+        assert_eq!(chosen(&m).as_deref(), Some("B-2 · 16 GiB"), "the one chosen");
         assert_eq!(m.errors, [
-            "Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=regular maxpage=regular)",
+            "Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)",
             "priority=realtime with a worker on every logical CPU: the window can freeze until the run ends"
         ]);
 
@@ -2192,8 +2217,8 @@ mod tests {
             end(Ok(SessionEnd::Stopped(Stopped::NeedsLargePages))),
             (
                 "Stopped before testing".to_string(),
-                "This sign-in lacks the right large pages need, and TMR runs nothing on 4 KiB pages unasked (minpage=regular \
-                 maxpage=regular runs on them without asking)"
+                "This sign-in lacks the right large pages need, and TMR runs nothing on 4 KiB pages unasked (minpage=reg-page \
+                 maxpage=reg-page runs on them without asking)"
                     .to_string()
             )
         );
@@ -2298,7 +2323,9 @@ mod tests {
         }
         m.answer_large_pages(DialogButton::Secondary);
         assert_eq!(m.position, "Setting up, on 4 KiB pages");
-        assert_eq!(m.errors, ["Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=regular maxpage=regular)"]);
+        assert_eq!(m.errors, [
+            "Large pages take effect at the next sign-in: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)"
+        ]);
     }
 
     /// TODO 113: the grant's dialog lists the candidates, the account first and chosen, the broad ones warned of; the choice mirrors the
@@ -2420,7 +2447,7 @@ mod tests {
         m.answer_large_pages(DialogButton::Secondary);
         assert_eq!(answer.try_recv(), Ok(LargePageAnswer::Regular));
         assert_eq!(m.errors, [
-            "Large pages need the 'Lock pages in memory' right, not granted: this run takes 4 KiB pages (minpage=regular maxpage=regular)"
+            "Large pages need the 'Lock pages in memory' right, not granted: this run takes 4 KiB pages (minpage=reg-page maxpage=reg-page)"
         ]);
         let mut m = model();
         let (reply, _answer) = std::sync::mpsc::sync_channel(1);
@@ -2541,7 +2568,7 @@ mod tests {
         assert_eq!(tab.set_both(Vec::new()), Ok(()), "the dialog cancelled");
         let three = tab.set_both(vec![PathBuf::from("a.json"); 3]).expect_err("three files");
         assert!(three.starts_with("Compare takes two results files, not 3"), "{three}");
-        let dir = std::env::temp_dir().join(format!("tmr-gui-compare-{}", std::process::id()));
+        let dir = tmr::test_support::test_home().join("gui-compare");
         std::fs::create_dir_all(&dir).expect("a temp folder");
         let (older, newer) = (dir.join("older.json"), dir.join("newer.json"));
         std::fs::write(&older, "not a results file").expect("a file");
@@ -2724,6 +2751,53 @@ mod tests {
         assert_eq!(m.opened_report().map(|report| report.title.as_str()), Some("Final summary"));
     }
 
+    /// A tmr-cfg.json that isn't a config, with no last good copy: the System tab says so where it would say none is stored, with what
+    /// became of the file, and the window shows the run calibrating
+    #[test]
+    fn an_unreadable_config_is_said_where_none_stored_would_be() {
+        use tmr::frontend::CacheCalibrationState::Measuring;
+        use tmr::frontend::{LastGoodCopy, MeasureWhy, UnreadableConfig};
+        let mut m = model();
+        m.start();
+        let unreadable = UnreadableConfig::NotAConfig {
+            path: r"C:\Program Files\TMR\settings\tmr-cfg.json".into(),
+            why: "expected value at line 1 column 1".to_string(),
+            kept: Ok(r"C:\Program Files\TMR\settings\tmr-cfg.json.unreadable".into()),
+            last_good: LastGoodCopy::Absent,
+        };
+        m.apply(Setup::CacheCalibration(Measuring(MeasureWhy::Unreadable(unreadable))).into());
+        assert_eq!(outline(&m.sections.system), [
+            "Cache calibration: tmr-cfg.json was unreadable (expected value at line 1 column 1), so its calibrations are lost; it is \
+             kept as tmr-cfg.json.unreadable, measured before the tests"
+        ]);
+        assert!(m.calibrating());
+    }
+
+    /// A tmr-cfg.json that isn't a config, its last good copy taken: the System tab says so before the calibrations, the copy's, which
+    /// the run takes as any stored one, measuring none
+    #[test]
+    fn a_config_restored_from_its_last_good_copy_is_said_before_the_calibrations() {
+        use tmr::frontend::CacheCalibrationState::Loaded;
+        use tmr::frontend::{LastGoodCopy, UnreadableConfig};
+        let mut m = model();
+        m.start();
+        let restored = UnreadableConfig::NotAConfig {
+            path: r"C:\Program Files\TMR\settings\tmr-cfg.json".into(),
+            why: "expected value at line 1 column 1".to_string(),
+            kept: Ok(r"C:\Program Files\TMR\settings\tmr-cfg.json.unreadable".into()),
+            last_good: LastGoodCopy::Taken,
+        };
+        m.apply(Setup::ConfigRestored(restored).into());
+        let at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 20, 9, 5, 0).unwrap();
+        m.apply(Setup::CacheCalibration(Loaded { at }).into());
+        assert_eq!(outline(&m.sections.system), [
+            "tmr-cfg.json was unreadable (expected value at line 1 column 1), so its calibrations are taken from its last good copy, \
+             tmr-cfg.json.bak; it is kept as tmr-cfg.json.unreadable",
+            "Cache calibration: loaded (2026-11-20 09:05)"
+        ]);
+        assert!(!m.calibrating());
+    }
+
     /// A section's outline: each table's title, each line or heading as it is
     fn outline(blocks: &[crate::report::Block]) -> Vec<String> {
         use crate::report::Block;
@@ -2743,10 +2817,11 @@ mod tests {
     fn the_tabs_take_the_consoles_startup_sections() {
         let mut m = model();
         let module = MemoryModule {
+            slot: "A-2".to_string(),
             locator: "DIMM_A2".to_string(),
             capacity_bytes: 32 << 30,
             memory_type: 0x22,
-            speed_mts: 6000,
+            configured_mts: 6000,
             manufacturer: "G.Skill ".to_string(),
             part_number: "F5-6000J3040G32G ".to_string(),
             serial_number: "0x1234".to_string(),
@@ -2757,7 +2832,7 @@ mod tests {
             Setup::CpuType { cputype: "cores".to_string(), avoid_smt: false },
             Setup::Selection(Box::new(selection())),
             Setup::CacheCalibration(tmr::frontend::CacheCalibrationState::Measuring(tmr::frontend::MeasureWhy::NoneStored)),
-            Setup::LargePageStatus { usable: true, min_page: "large".to_string(), min_needs_large: true },
+            Setup::LargePageStatus { usable: true, min_page: "large".to_string(), min_needs_large: true, right_held: true },
             Setup::MemoryStatus(Some(status)),
             Setup::SystemInfo {
                 report: Box::new(system_info()),
@@ -2793,7 +2868,7 @@ mod tests {
             "table Memory modules (SMBIOS)"
         ]);
         let Some(crate::report::Block::Table(modules)) = s.system.last() else { panic!("the modules' table") };
-        assert_eq!(modules.rows, [["DIMM_A2", "32 GiB", "DDR5", "6000 MT/s", "G.Skill", "F5-6000J3040G32G"]], "no serial number");
+        assert_eq!(modules.rows, [["A-2", "32 GiB", "DDR5", "6000 MT/s", "G.Skill", "F5-6000J3040G32G"]], "no serial number");
         let memory = outline(&s.memory);
         assert_eq!(memory[..3], ["Large pages: on, tested", "table Windows' memory", "table Memory Status & Allocation Plan"]);
         assert!(

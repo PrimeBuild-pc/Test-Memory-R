@@ -496,6 +496,7 @@ pub fn create_allocation_report(
         nodes: nodes.into_values().collect(),
         commit_groups,
         threads,
+        regular: None,
     }
 }
 
@@ -721,7 +722,10 @@ pub fn create_overall_stats_summary_report(result: &crate::results::TestRunResul
     }
 
     let sealed: Vec<&crate::results::CycleSeal> = result.cycles.iter().filter_map(|c| c.seal.as_ref()).collect();
-    let seal = (!sealed.is_empty()).then(|| SealStagesSummary { final_check_errors: sealed.iter().map(|s| s.final_check_errors).sum() });
+    // A sealed run's cycles each carry the seal's stages; one with no cycle (a file from the end of setup, TODO 72, or a run stopped
+    // before its first step) is sealed as its config records (`execution.seal`, TODO 99), with nothing checked yet
+    let sealed_run = !sealed.is_empty() || result.run_config.execution.seal.is_some();
+    let seal = sealed_run.then(|| SealStagesSummary { final_check_errors: sealed.iter().map(|s| s.final_check_errors).sum() });
     // Every operation, the ones the run did none of too (TODO 90)
     let intermediate = crate::ops::Op::ALL
         .iter()
@@ -766,7 +770,7 @@ pub fn create_overall_stats_summary_report(result: &crate::results::TestRunResul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::allocator::PageSizeLevel::{Huge, Large};
+    use crate::memory::allocator::PageSizeLevel::{Huge, Large, Regular};
     use crate::reporting::formatters::{DefaultFormatter, ReportFormatter};
     use crate::test_support::{allocation_report, allocation_report_one_node, allocation_report_two_nodes, repeat, span};
 
@@ -948,6 +952,26 @@ mod tests {
         assert_eq!(huge[4], "2-3 (-5.00 GiB)");
         let large = summary.rows.iter().find(|r| r[0] == "2 MiB").unwrap();
         assert_eq!((large[4].as_str(), large[5].as_str()), ("0-3 (±5.00 GiB)", "✅"));
+    }
+
+    /// TODO 131: the 4 KiB column's header says how the run's 4 KiB pages are held, in the threads and the nodes tables
+    #[test]
+    fn the_4k_column_says_how_its_pages_are_held() {
+        use crate::memory::allocator::RegularPages;
+        let mut tail = repeat(3, GIB, Huge, 0);
+        tail.push((64 * MIB, Regular, 0, false));
+        let spans = vec![span(0, 0, 4 * GIB, &repeat(4, GIB, Huge, 0)), span(1, 0, 3 * GIB + 64 * MIB, &tail)];
+        let mut report = allocation_report(spans, 1);
+        let f = DefaultFormatter::new();
+        let header = |table: &TableData| table.headers.iter().map(|h| h.text.clone()).find(|h| h.starts_with("4 KiB")).unwrap();
+        assert_eq!(header(&f.prepare_allocation_threads_table(&report)), "4 KiB");
+        report.regular = Some(RegularPages::Locked);
+        assert_eq!(header(&f.prepare_allocation_threads_table(&report)), "4 KiB locked");
+        assert_eq!(header(&f.prepare_allocation_nodes_table(&report)), "4 KiB locked");
+        assert_eq!(cell(&f.prepare_allocation_threads_table(&report), 1, "4 KiB locked"), "64.00 MiB");
+        report.regular = Some(RegularPages::Pageable);
+        assert_eq!(header(&f.prepare_allocation_threads_table(&report)), "4 KiB pageable");
+        assert_eq!(f.prepare_allocation_threads_table(&report).footer, None);
     }
 
     /// A thread short of its target is ⚠️, and one fed in small pieces is 🟡 on Requests.

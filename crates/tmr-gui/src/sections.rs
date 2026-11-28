@@ -52,9 +52,11 @@ impl Sections {
                     self.system.push(text(format!("OS: {}", os.label())));
                 }
             }
+            // tmr-cfg.json damaged, its last good copy taken: before the calibrations, which are the copy's
+            Setup::ConfigRestored(restored) => self.system.push(text(restored.text())),
             Setup::CacheCalibration(state) => self.system.push(text(match state {
                 CacheCalibrationState::Loaded { at } => format!("Cache calibration: loaded ({})", at.format("%Y-%m-%d %H:%M")),
-                CacheCalibrationState::Measuring(why) => format!("Cache calibration: {}", measuring(*why)),
+                CacheCalibrationState::Measuring(why) => format!("Cache calibration: {}", measuring(why)),
                 CacheCalibrationState::Rechecking { at } => {
                     format!("Cache calibration: loaded ({}), rechecked before the tests (calibrate=recheck)", at.format("%Y-%m-%d %H:%M"))
                 }
@@ -75,12 +77,18 @@ impl Sections {
                 )),
                 Err(e) => Block::Warning(format!("Large pages: 'Lock pages in memory' couldn't be granted to {account}: {e}")),
             }),
-            Setup::LargePageStatus { usable, min_page, min_needs_large } => self.memory.push(if *usable {
+            Setup::LargePageStatus { usable, min_page, min_needs_large, right_held } => self.memory.push(if *usable {
                 text("Large pages: on, tested".to_string())
             } else if *min_needs_large {
+                // With the right held its check failed, which a restart mends, not --setup-large-pages: it would find nothing to grant
+                let fix = if *right_held {
+                    "the right is in place, but its check failed: restart Windows and run TMR first"
+                } else {
+                    "tmr.exe --setup-large-pages (elevated)"
+                };
                 Block::Warning(format!(
-                    "Large pages: not available, and minpage={min_page} needs them, so the run stops before allocating: \
-                     tmr.exe --setup-large-pages (elevated), or minpage=regular for 4 KiB pages"
+                    "Large pages: not available, and minpage={min_page} needs them, so the run stops before allocating: {fix}, or \
+                     minpage=reg-page for 4 KiB pages"
                 ))
             } else {
                 Block::Warning("Large pages: not available, so the run takes 4 KiB pages: less stress, about 5-10% slower".to_string())
@@ -141,13 +149,14 @@ impl Sections {
 
 /// The CPUs chosen, and the run's error mode, limits and SIMD: the console's selection lines
 /// Why the run measures the cache calibration before its tests (TODO 22), as the console says it
-fn measuring(why: tmr::frontend::MeasureWhy) -> &'static str {
+fn measuring(why: &tmr::frontend::MeasureWhy) -> String {
     use tmr::frontend::MeasureWhy;
     match why {
-        MeasureWhy::NoneStored => "none stored, measured before the tests",
-        MeasureWhy::OtherHardware => "the one stored is another machine's, measured before the tests",
-        MeasureWhy::OneThreadOnly => "the one stored measured one thread only, measured again before the tests",
-        MeasureWhy::Always => "measured before the tests (calibrate=always)",
+        MeasureWhy::Unreadable(unreadable) => format!("{}, measured before the tests", unreadable.text()),
+        MeasureWhy::NoneStored => "none stored, measured before the tests".to_string(),
+        MeasureWhy::OtherHardware => "the one stored is another machine's, measured before the tests".to_string(),
+        MeasureWhy::OneThreadOnly => "the one stored measured one thread only, measured again before the tests".to_string(),
+        MeasureWhy::Always => "measured before the tests (calibrate=always)".to_string(),
     }
 }
 
@@ -207,11 +216,12 @@ fn memory_status_table(status: &MemoryStatus) -> TableData {
         .add_row(row("Page file", status.total_page_file, status.avail_page_file))
 }
 
-/// The memory modules SMBIOS lists, one a row. Not their serial numbers: a window is shared as a screenshot, and the results file has them.
+/// The memory modules SMBIOS lists, one a row. Never their serial numbers: a window is shared as a screenshot (a run with --serials keeps
+/// them in its console text, log and results file).
 fn modules_table(modules: &[MemoryModule]) -> TableData {
     let table = TableData::new()
         .with_title("Memory modules (SMBIOS)")
-        .add_header("Locator", ColumnAlignment::Left)
+        .add_header("Slot", ColumnAlignment::Left)
         .add_header("Size", ColumnAlignment::Right)
         .add_header("Type", ColumnAlignment::Left)
         .add_header("Speed", ColumnAlignment::Right)
@@ -219,10 +229,10 @@ fn modules_table(modules: &[MemoryModule]) -> TableData {
         .add_header("Part", ColumnAlignment::Left);
     modules.iter().fold(table, |table, m| {
         table.add_row(vec![
-            m.locator.clone(),
+            m.slot.clone(),
             if m.capacity_bytes > 0 { crate::sysinfo::size(m.capacity_bytes as usize) } else { String::new() },
             tmr::frontend::memory_type_name(m.memory_type).unwrap_or_default().to_string(),
-            if m.speed_mts > 0 { format!("{} MT/s", m.speed_mts) } else { String::new() },
+            m.speed_label(),
             m.manufacturer.trim().to_string(),
             m.part_number.trim().to_string(),
         ])

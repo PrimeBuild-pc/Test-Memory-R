@@ -47,13 +47,20 @@ impl Frontend for CliFrontend {
     /// Asks on the console, what was typed ahead dropped before each read (`console::flush_input`). A console that can't be written to is
     /// no answer, as the input's end is: TMR quits, granting nothing and running nothing on 4 KiB pages unasked (TODO 113).
     fn ask_large_pages(&self, question: &LargePageQuestion) -> LargePageAnswer {
-        let asked = crate::prompts::large_pages(
-            question,
-            &mut std::io::stdin().lock(),
-            &mut crate::console::stdout(),
-            &crate::console::flush_input,
-        );
+        let Some(mut out) = crate::console::prompt_writer() else {
+            crate::console::eprint(
+                "Large-page setup needs an interactive console. Run --setup-large-pages and sign in again, or select minpage=reg-page maxpage=reg-page.\n",
+            );
+            return LargePageAnswer::Quit;
+        };
+        let asked = crate::prompts::large_pages(question, &mut std::io::stdin().lock(), &mut out, &crate::console::flush_input);
         asked.unwrap_or(LargePageAnswer::Quit)
+    }
+
+    fn confirm_admin_run(&self) -> bool {
+        crate::console::prompt_writer().is_some_and(|mut out| {
+            crate::prompts::admin_run(&mut std::io::stdin().lock(), &mut out, tmr::home::dir(), &crate::console::flush_input)
+        })
     }
 
     /// The ticker, redrawn every 2 seconds. Anything WHEA reported since the last draw is printed above it. On a stdout that isn't a

@@ -118,12 +118,13 @@ pub fn is_open() -> bool {
 
 /// Whether a command line (the exe's name first) keeps a log file: a session does, and so do the one-shot commands that change the system
 /// (`--setup-large-pages` and `--remove-large-pages`, the calibrations, which save to tmr-cfg.json). `--help`, `--version`, the topology
-/// commands, `--compare-results`, `--show-results`, `--show-calibration` and `--create-demo-configs` don't: a log of every `tmr --version`
-/// was a folder of files, and winget's checks run it and fail a package that leaves files behind.
+/// commands, `--compare-results`, `--show-results`, `--sanitize` and `--sanitize-single`, `--show-calibration` and `--create-demo-configs`
+/// don't: a log of every `tmr --version` was a folder of files, and winget's checks run it and fail a package that leaves files behind.
 pub fn wanted(args: &[String]) -> bool {
     use crate::commands::Command;
     // Without the mode flags, as the session parses it (`session::MODE_FLAGS`): `tmr --quick-test --help` is `--help`
-    let args: Vec<String> = args.iter().filter(|a| !crate::session::MODE_FLAGS.contains(&a.as_str())).cloned().collect();
+    let args: Vec<String> =
+        args.iter().filter(|a| a.as_str() != "--allow-admin" && !crate::session::MODE_FLAGS.contains(&a.as_str())).cloned().collect();
     matches!(Command::parse(&args), None | Some(Command::SetupLargePages(_) | Command::RemoveLargePages(_) | Command::Calibrate(_)))
         // record=off on the command line (TODO 105): no log file at all; a config's is the session's (`discard`)
         && !args.iter().any(|a| a.trim().eq_ignore_ascii_case("record=off"))
@@ -174,17 +175,22 @@ const RUN_ID_LINE: &str = "# run id: ";
 /// (`metadata.run_id`) once their names pair them (`run_context::run_file_stem`). None for a log without one, as written before it.
 pub fn run_id_in(path: &std::path::Path) -> std::io::Result<Option<String>> {
     use std::io::BufRead;
+    let mut header = String::new();
     for line in std::io::BufReader::new(std::fs::File::open(path)?).lines() {
         let line = line?;
         // The header is the lines that start with `#`, the records after it
         if !line.starts_with('#') {
             break;
         }
-        if let Some(id) = line.strip_prefix(RUN_ID_LINE) {
-            return Ok(Some(id.to_string()));
-        }
+        header.push_str(&line);
+        header.push('\n');
     }
-    Ok(None)
+    Ok(run_id_of(&header).map(str::to_string))
+}
+
+/// The run ID in the header of a log file's text `log`, as `run_id_in` reads it from the file
+pub(crate) fn run_id_of(log: &str) -> Option<&str> {
+    log.lines().take_while(|line| line.starts_with('#')).find_map(|line| line.strip_prefix(RUN_ID_LINE))
 }
 
 /// Adds `text`, what a frontend showed between the records (TODO 29's transcript, TODO 109), to the log file as it is, without its colours,

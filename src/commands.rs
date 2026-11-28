@@ -1,8 +1,8 @@
-//! The one-shot commands (TODO 29): `--help`, `--version`, `--create-demo-configs`, `--compare-results`, `--show-results`,
-//! `--debug-topology`, `--show-topology`, `--setup-large-pages`, `--remove-large-pages`, the calibrations and `--show-calibration`, what
-//! they stored. A session that is handed one returns it (`session::SessionEnd::Command`), past the parameters every session reads first
-//! (`core-priority=` types the topology the topology commands show); its caller runs it here, writing to a writer of its own. The CLI does,
-//! on the console; the window doesn't offer them.
+//! The one-shot commands (TODO 29): `--help`, `--version`, `--create-demo-configs`, `--compare-results`, `--show-results`, `--sanitize`,
+//! `--sanitize-single`, `--debug-topology`, `--show-topology`, `--setup-large-pages`, `--remove-large-pages`, the calibrations and
+//! `--show-calibration`, what they stored. A session that is handed one returns it (`session::SessionEnd::Command`), past the parameters
+//! every session reads first (`core-priority=` types the topology the topology commands show); its caller runs it here, writing to a
+//! writer of its own. The CLI does, on the console; the window doesn't offer them.
 //!
 //! A calibration asks whether to save what it measured over what tmr-cfg.json holds. That question is the caller's to put: it passes
 //! `confirm`, which gets the question and says yes or no, unless the command line has answered it already (`--yes`, `--no-save`:
@@ -25,6 +25,12 @@ pub enum Command {
     Compare(Vec<String>),
     /// `--show-results <results.json>`: the command line, the exe's name first
     ShowResults(Vec<String>),
+    /// `--sanitize <results.json | log>`: copies of a run's results file and its log without its serials, accounts and names
+    /// (`sanitize::sanitize`): the command line, the exe's name first
+    Sanitize(Vec<String>),
+    /// `--sanitize-single <results.json | log>`: a copy of that one file without them, its pair not looked for
+    /// (`sanitize::sanitize_single`): the command line, the exe's name first
+    SanitizeSingle(Vec<String>),
     /// `--debug-topology`: every topology detector, alone and as Auto's cascade
     DebugTopology,
     /// `--show-topology`: each core's type, scheduling class, NUMA node and CPUs
@@ -58,6 +64,8 @@ impl Command {
                 "--create-demo-configs" => return Some(Command::DemoConfigs),
                 "--compare-results" => return Some(Command::Compare(args.to_vec())),
                 "--show-results" => return Some(Command::ShowResults(args.to_vec())),
+                "--sanitize" => return Some(Command::Sanitize(args.to_vec())),
+                "--sanitize-single" => return Some(Command::SanitizeSingle(args.to_vec())),
                 "--debug-topology" => return Some(Command::DebugTopology),
                 "--show-topology" => return Some(Command::ShowTopology),
                 // --cache-latency and --ram-latency are no commands: they pick tests for the run
@@ -95,6 +103,8 @@ pub fn run(
         Command::DemoConfigs => return demo_configs(out),
         Command::Compare(args) => return compare(args, out),
         Command::ShowResults(args) => return show_results(args, out, text),
+        Command::Sanitize(args) => return sanitize(args, false, out),
+        Command::SanitizeSingle(args) => return sanitize(args, true, out),
         Command::DebugTopology => {
             writeln!(out, "🔍 Debugging CPU Topology Detection")?;
             crate::cpu_topology::debug_topology_detection(out)?;
@@ -145,6 +155,10 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     writeln!(out, "  {} --compare-results baseline.json current.json [output.json]", program_name)?;
     more(out, "Compare two test results (here, or in the results folder)")?;
     cmd(out, "--show-results results.json", "How a run ended, then its final summary (here, or in the results folder)")?;
+    cmd(out, "--sanitize results.json", "Copies of a run's results file and its log, to post: no serials, UUID,")?;
+    more(out, "  fingerprints, SIDs, or user, account and PC names; either file names the pair")?;
+    cmd(out, "--sanitize-single x.log", "  ...or one file alone, a results file or a log, its pair not looked for: the")?;
+    more(out, "  same, as far as that file shows them; it says what only the other file has")?;
     cmd(out, "--setup-large-pages", "Grant 'Lock pages in memory' to you (as administrator), then sign out and in")?;
     writeln!(out, "  {} --setup-large-pages Group:Administrators", program_name)?;
     more(out, "  ...or to a group or another user: Group:<name>, User:<name>")?;
@@ -209,10 +223,14 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     entry(out, "largefloor=16MiB", "Smallest 2MB-page request (16MiB-1GiB)")?;
     entry(out, "blkroundtarget=1GiB", "Round each thread's share to a multiple of this (of largefloor)")?;
     entry(out, "blkround=up", "...up (default; a smaller step rather than pass available), down, or nearest")?;
-    entry(out, "minpage=regular", "Smallest page the run takes: regular (4KB), large (2MB, the default)")?;
-    more(out, "  or huge (1GB); 2MB and 1GB pages need the large-page privilege")?;
-    entry(out, "maxpage=large", "Largest page it asks for: regular, large or huge (the default)")?;
-    more(out, "  (minpage=regular maxpage=regular: 4KB pages, without asking)")?;
+    let cap = crate::memory::stitched::TAIL_PERCENT;
+    entry(out, "minpage=large", "Smallest page the run takes: huge (1GB), large (2MB; a thread short")?;
+    more(out, "  of them stops the run), reg-lock (the default: 4KB pages where the larger run short,")?;
+    more(out, &format!("  locked in RAM, up to {cap}% of a thread; short by more, the run stops) or reg-page"))?;
+    more(out, "  (4KB pages, pageable, for whatever the larger leave); 2MB and 1GB pages need the")?;
+    more(out, "  large-page privilege")?;
+    entry(out, "maxpage=large", "Largest page it asks for: reg-page, large or huge (the default)")?;
+    more(out, "  (minpage=reg-page maxpage=reg-page: 4KB pages, without asking)")?;
     entry(out, "channels=2", "Memory channels, for TM5 SimpleTest's stride (channels x Parameter - 1")?;
     more(out, "  lines); default: the config's, else 2")?;
     entry(out, "record=compact", "What the run keeps: full (every thread's rows, indented; the default), compact (the erring")?;
@@ -256,7 +274,7 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     entry(out, "seed=0x1234", "The native patterns' run seed (default: from the clock, logged and")?;
     more(out, "  saved in the results), to replay a run's bytes")?;
     entry(out, "beat=32", "Transfer width the switch pattern flips at: auto (SMBIOS, the")?;
-    more(out, "  default), 16 (LPDDR4/5), 32 (DDR5), 64 (DDR4), or a memory")?;
+    more(out, "  default), 16 (LPDDR4/5/5X), 32 (DDR5), 64 (DDR4), or a memory")?;
     more(out, "  type (ddr4, ddr5, lpddr5, ...); 12 (lpddr6) and 24 (ddr6) are")?;
     more(out, "  models: TMR hasn't verified their packet maps")?;
     entry(out, "rescan=off", "A failed check isn't rescanned to name each bad word (default on;")?;
@@ -274,7 +292,9 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     entry(out, "calibrate=recheck", "  ...and a stored one probed first, about 15 s, measured again if it has drifted")?;
     entry(out, "calibrate=always", "  ...measured before every run's tests")?;
     entry(out, "calibrate=off", "  ...none: sizes from CPUID, and the seal's width from its rule")?;
-    entry(out, "--no-serials", "Leave the DIMMs' serials and the system's UUID out of the output, log and results")?;
+    entry(out, "--allow-admin", "Start an elevated test without the confirmation prompt (required for unattended runs)")?;
+    entry(out, "--serials", "Keep the DIMMs' serials, the system's UUID and the machine's fingerprints in the")?;
+    more(out, "  output, log and results (left out by default)")?;
     writeln!(out)?;
     writeln!(out, "CONFIG FILE OVERRIDES:")?;
     writeln!(out, "  All parameters can override config file values:")?;
@@ -287,7 +307,11 @@ pub fn help(out: &mut dyn Write, program_name: &str) -> io::Result<()> {
     more(out, "Use debug for detailed per-thread logs")?;
     writeln!(out, "  Logs saved to: logs\\TMR_YYYY-MM-DD_HH-MM-SS.log      (local time)")?;
     writeln!(out, "  Results saved to: results\\TMR_YYYY-MM-DD_HH-MM-SS.json (same name as the log)")?;
-    writeln!(out, "  Both beside tmr.exe, as are configs\\ and tmr-cfg.json; TMR_HOME=<folder> puts them there instead")?;
+    writeln!(
+        out,
+        "  Ordinary runs: both beside tmr.exe, as are configs\\ and settings\\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there"
+    )?;
+    writeln!(out, "  Administrator runs: Program Files\\TMR Admin by default, or a protected absolute TMR_HOME.")?;
     writeln!(out)?;
     writeln!(out, "RESULT COMPARISON:")?;
     writeln!(out, "  Each run's results are saved as a JSON file in the results folder, as it goes")?;
@@ -556,17 +580,42 @@ fn show_results(args: &[String], out: &mut dyn Write, text: &dyn Fn(&Event) -> S
     }
 }
 
+/// `--sanitize <results.json | log>`, `args` the command line: sanitized copies of the run's results file and its log, beside them
+/// (`sanitize::sanitize`), and what was replaced; or why not, with nothing written. With `single`, `--sanitize-single`'s: a copy of
+/// that one file alone (`sanitize::sanitize_single`).
+fn sanitize(args: &[String], single: bool, out: &mut dyn Write) -> io::Result<RunStatus> {
+    let [_, _, file] = args else {
+        let flag = if single { "--sanitize-single" } else { "--sanitize" };
+        writeln!(out, "❌ Usage: {} {flag} <results.json | log>", args[0])?;
+        return Ok(RunStatus::NotRun);
+    };
+    let sanitized = if single { crate::sanitize::sanitize_single(file) } else { crate::sanitize::sanitize(file) };
+    match sanitized {
+        Ok(done) => {
+            out.write_all(done.text().as_bytes())?;
+            Ok(RunStatus::Passed)
+        }
+        Err(e) => {
+            writeln!(out, "❌ Not sanitized, nothing written: {e}")?;
+            Ok(RunStatus::NotRun)
+        }
+    }
+}
+
 /// How the run ended, `--show-results`' first line (TODO 72): from its final save, the outcome and the verdict, with `errors` when it
 /// failed or was interrupted, and its cycles, the last one cut short when it stopped partway (`CycleResult::partial`); or, the file still
-/// marked in progress, that it never finished, its figures those of its last saved cycle. A file from before the outcome was saved says
-/// only that it ended, and one whose keys this build doesn't know quotes them.
+/// marked in progress, that it never finished, its figures those of its last saved cycle, or none when it has no cycle: saved at the end
+/// of setup and not after, or (Ctrl+C twice) by a first cycle stopped before its first step. A file from before the outcome was saved
+/// says only that it ended, and one whose keys this build doesn't know quotes them.
 fn ending(result: &TestRunResult, errors: ErrorCounts) -> String {
     let stats = &result.overall_stats;
     let cut_short = result.cycles.last().is_some_and(|cycle| cycle.partial);
     let n = stats.cycles_completed;
     if stats.in_progress {
         let saved = match n {
-            0 => "no cycle saved".to_string(),
+            0 => "its file has no cycle, so no figures (it is from the end of setup, or from a first cycle stopped before its first \
+                  step)"
+                .to_string(),
             n if cut_short => format!("its figures are up to its last saved cycle, {n}, which was cut short"),
             n => format!("its figures are up to its last saved cycle, {n}"),
         };
@@ -692,8 +741,8 @@ fn checks_the_save(command: &str, choice: SaveChoice) -> bool {
 /// it found and saves it to tmr-cfg.json if `confirm` (or `--yes` / `--no-save`) says to; a failure stops it before any more runs.
 /// `maxpage=` sets the page size both ask for.
 fn calibrate(args: &[String], out: &mut dyn Write, confirm: &mut dyn FnMut(&str) -> bool) -> io::Result<RunStatus> {
-    // Serials out of what it shows and logs (`--no-serials`), before SMBIOS is first read and logged, as a session has it (TODO 105)
-    crate::smbios::hide_serials(args.iter().any(|a| a == "--no-serials"));
+    // Serials out of what it shows and logs unless `--serials`, before SMBIOS is first read and logged, as a session has it (TODO 105)
+    crate::smbios::hide_serials_unless_kept(args);
     let mut save = match SaveChoice::of(args) {
         Ok(choice) => Save { choice, confirm },
         Err(e) => {
@@ -704,7 +753,10 @@ fn calibrate(args: &[String], out: &mut dyn Write, confirm: &mut dyn FnMut(&str)
     let command = args[1].as_str();
     // Where it saves (tmr-cfg.json, in TMR's home), checked before it measures, unless it won't save (TODO 104): not found out after
     if checks_the_save(command, save.choice)
-        && let Err(e) = crate::home::can_save(&crate::app_config::AppConfig::default_path())
+        && let Err(e) = {
+            let path = crate::app_config::AppConfig::default_path();
+            crate::settings_file::lock(&path).and_then(|_held| crate::home::can_save(&path))
+        }
     {
         writeln!(out, "❌ {e}")?;
         return Ok(RunStatus::NotRun);
@@ -774,6 +826,13 @@ fn calibrate(args: &[String], out: &mut dyn Write, confirm: &mut dyn FnMut(&str)
     Ok(RunStatus::Passed)
 }
 
+/// tmr-cfg.json at `path`, which a calibration is compared with and may be saved into (`AppConfig::load_to_save`): one that can't be read
+/// is the error, before the question, so the save never starts from defaults standing in for it; with `--no-save`, which saves nothing,
+/// it is the defaults (`AppConfig::load`)
+fn stored_config(path: &std::path::Path, save: &Save) -> Result<crate::app_config::AppConfig, String> {
+    if save.first() { crate::app_config::AppConfig::load_to_save(path) } else { Ok(crate::app_config::AppConfig::load(path)) }
+}
+
 /// `--calibrate-cache`: the cache tiers, shown, saved if `save` says to and written to `--output`'s
 /// file when given.
 fn calibrate_cache(
@@ -791,14 +850,20 @@ fn calibrate_cache(
 
             // Save to tmr-cfg.json — compare with existing if present
             let cfg_path = crate::app_config::AppConfig::default_path();
-            let mut app_config = crate::app_config::AppConfig::load(&cfg_path);
+            let app_config = match stored_config(&cfg_path, save) {
+                Ok(config) => config,
+                Err(e) => {
+                    writeln!(out, "❌ Failed to save calibration: {}", e)?;
+                    return Ok(RunStatus::NotRun);
+                }
+            };
             let stored = app_config.calibration.is_some();
             let should_save = prompt_calibration_save(&app_config.calibration, &results, "cache", out, save)?;
             if should_save {
-                app_config.update_machine_id(system_info, smbios);
-                app_config.calibration = Some(results.clone());
-                // A save that was asked for and failed is the command's failure (exit 2), as a script would want to know
-                if let Err(e) = app_config.save(&cfg_path) {
+                if let Err(e) = crate::app_config::AppConfig::update(&cfg_path, |stored| {
+                    stored.update_machine_id(system_info, smbios);
+                    stored.calibration = Some(results.clone());
+                }) {
                     writeln!(out, "❌ Failed to save calibration: {}", e)?;
                     return Ok(RunStatus::NotRun);
                 }
@@ -842,11 +907,18 @@ fn calibrate_seal(
         Ok(seal) => {
             crate::calibration::display_seal_calibration(&seal, cache_info, out)?;
             let cfg_path = crate::app_config::AppConfig::default_path();
-            let mut app_config = crate::app_config::AppConfig::load(&cfg_path);
+            let app_config = match stored_config(&cfg_path, save) {
+                Ok(config) => config,
+                Err(e) => {
+                    writeln!(out, "❌ Failed to save seal calibration: {}", e)?;
+                    return Ok(RunStatus::NotRun);
+                }
+            };
             let stored = app_config.seal_calibration.is_some();
             if prompt_seal_calibration_save(&app_config.seal_calibration, &seal, out, save)? {
-                app_config.set_seal_calibration(seal, system_info, smbios);
-                if let Err(e) = app_config.save(&cfg_path) {
+                if let Err(e) =
+                    crate::app_config::AppConfig::update(&cfg_path, |stored| stored.set_seal_calibration(seal, system_info, smbios))
+                {
                     writeln!(out, "❌ Failed to save seal calibration: {}", e)?;
                     return Ok(RunStatus::NotRun);
                 }
@@ -869,10 +941,10 @@ fn calibrate_seal(
 /// machine as a run checks it (`AppConfig::is_calibration_valid`, `valid_seal_calibration`). It reads CPUID, the TSC's rate and SMBIOS,
 /// which the check compares, and measures nothing.
 fn show_calibration(args: &[String], out: &mut dyn Write) -> io::Result<()> {
-    // Serials out of what it logs (`--no-serials`), before SMBIOS is first read and logged, as a session has it (TODO 105)
-    crate::smbios::hide_serials(args.iter().any(|a| a == "--no-serials"));
-    let path = crate::app_config::AppConfig::default_path();
-    let config = crate::app_config::AppConfig::load(&path);
+    // Serials out of what it logs unless `--serials`, before SMBIOS is first read and logged, as a session has it (TODO 105)
+    crate::smbios::hide_serials_unless_kept(args);
+    // From its last good copy when the file is damaged, which the header names
+    let (config, path) = crate::app_config::AppConfig::load_with_source(&crate::app_config::AppConfig::default_path());
     let (system_info, smbios) = (crate::tests::get_system_info(), crate::smbios::get_smbios());
     // Each checked only when there is one: the check logs what differs
     let ours = Ours {
@@ -1155,9 +1227,15 @@ mod tests {
         // And every flag a session takes, and the frontends' (`--gui` and `--cli`, tmr-app's launch.rs; `--start`, the window's), each named
         // on a line, but --help itself and the short forms of it and of --version
         let words: Vec<&str> = text.split(|c: char| c.is_whitespace() || ",;:()".contains(c)).collect();
-        let flags = crate::session::KNOWN_FLAGS.into_iter().chain(["--gui", "--cli", "--start"]);
-        for flag in flags.filter(|flag| !["--help", "-h", "-?", "-v"].contains(flag)) {
-            assert!(words.contains(&flag), "--help names no {flag}");
+        let flags: Vec<&str> = crate::session::KNOWN_FLAGS.into_iter().chain(["--gui", "--cli", "--start"]).collect();
+        for flag in flags.iter().filter(|flag| !["--help", "-h", "-?", "-v"].contains(flag)) {
+            assert!(words.contains(flag), "--help names no {flag}");
+        }
+        // And the other way round: a flag it names is one a session or a frontend takes (it named --sanitize, which the session refused)
+        for word in words.iter().filter(|word| word.starts_with("--")) {
+            // The flag, without what follows it in a sentence (`--calibrate-seal's`)
+            let flag = word.split(|c: char| !(c.is_ascii_lowercase() || c == '-')).next().unwrap_or_default();
+            assert!(flags.contains(&flag), "--help names {flag}, which no session takes");
         }
     }
 
@@ -1185,8 +1263,9 @@ mod tests {
     /// The commands that read and change nothing on this machine, as they write, each after a `## case` line with how it ended (TODO 29):
     /// `--version`, `--help`, `--compare-results` without its files, of one that isn't there, and of a results file with itself (its time
     /// masked, and TMR's home, which is the test binary's folder), `--show-results` without its file, with two, and of one that isn't
-    /// there (TODO 72; the CLI's golden has one shown), and the large-page commands' refusals of their target (TODO 113), which come before
-    /// anything is read. None asks a question, nor has an event rendered.
+    /// there (TODO 72; the CLI's golden has one shown), `--sanitize`'s and `--sanitize-single`'s refusals before they read anything, and
+    /// the large-page commands' refusals of their target (TODO 113), which come before anything is read. None asks a question, nor has an
+    /// event rendered.
     #[test]
     fn commands_write_as_their_golden() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata").join("result_files").join("before_todo_72.json");
@@ -1203,6 +1282,16 @@ mod tests {
             ("--show-results without its file", Command::ShowResults(args(&["tmr.exe", "--show-results"]))),
             ("--show-results of two files", Command::ShowResults(args(&["tmr.exe", "--show-results", fixture, fixture]))),
             ("--show-results of a file that isn't there", Command::ShowResults(args(&["tmr.exe", "--show-results", "nowhere.json"]))),
+            // The owner, 2026-11-23: refused before anything is read (its pairs are `sanitize::tests`')
+            ("--sanitize without its file", Command::Sanitize(args(&["tmr.exe", "--sanitize"]))),
+            ("--sanitize of a file that isn't there", Command::Sanitize(args(&["tmr.exe", "--sanitize", "nowhere.json"]))),
+            ("--sanitize of a file neither kind", Command::Sanitize(args(&["tmr.exe", "--sanitize", "notes.txt"]))),
+            ("--sanitize-single without its file", Command::SanitizeSingle(args(&["tmr.exe", "--sanitize-single"]))),
+            (
+                "--sanitize-single of a file that isn't there",
+                Command::SanitizeSingle(args(&["tmr.exe", "--sanitize-single", "nowhere.log"])),
+            ),
+            ("--sanitize-single of a file neither kind", Command::SanitizeSingle(args(&["tmr.exe", "--sanitize-single", "notes.txt"]))),
             // TODO 113: each refusal before anything is looked up, the target's type missing, unknown or with no name, or two targets
             ("--setup-large-pages without a type", Command::SetupLargePages(args(&["tmr.exe", "--setup-large-pages", "witches"]))),
             ("--setup-large-pages with an unknown type", Command::SetupLargePages(args(&["tmr.exe", "--setup-large-pages", "Team:x"]))),
@@ -1263,7 +1352,7 @@ mod tests {
         let mut text = String::new();
         for (case, config, ours) in cases {
             let mut out = Vec::new();
-            write_calibrations(&config, r"<home>\tmr-cfg.json", &here, ours, &mut out).unwrap();
+            write_calibrations(&config, r"<home>\settings\tmr-cfg.json", &here, ours, &mut out).unwrap();
             text += &format!("## {case}\n{}", String::from_utf8(out).unwrap());
         }
         crate::test_support::check("show_calibration", &text);
@@ -1351,12 +1440,12 @@ mod tests {
         let line = ["tmr.exe", "--remove-large-pages", r"User:.\alex"];
         assert!(matches!(parse(&line), Some(Command::RemoveLargePages(given)) if given == args(&line)));
         assert!(crate::logfile::wanted(&args(&line)), "--remove-large-pages keeps a log file");
-        let line = ["tmr.exe", "--calibrate-all", "maxpage=regular"];
+        let line = ["tmr.exe", "--calibrate-all", "maxpage=reg-page"];
         assert!(matches!(parse(&line), Some(Command::Calibrate(given)) if given == args(&line)));
         let line = ["tmr.exe", "--get-readings", "--launch"];
         assert!(matches!(parse(&line), Some(Command::GetReadings(given)) if given == args(&line)));
         assert!(!crate::logfile::wanted(&args(&line)), "--get-readings keeps no log file: it is not a run");
-        let line = ["tmr.exe", "--show-calibration", "--no-serials"];
+        let line = ["tmr.exe", "--show-calibration", "--serials"];
         assert!(matches!(parse(&line), Some(Command::ShowCalibration(given)) if given == args(&line)));
         assert!(!crate::logfile::wanted(&args(&line)), "--show-calibration keeps no log file: it changes nothing");
         let line = ["tmr.exe", "--compare-results", "a.json", "b.json"];
@@ -1364,6 +1453,14 @@ mod tests {
         let line = ["tmr.exe", "--show-results", "a.json"];
         assert!(matches!(parse(&line), Some(Command::ShowResults(given)) if given == args(&line)));
         assert!(!crate::logfile::wanted(&args(&line)), "--show-results keeps no log file, as --compare-results");
+        let line = ["tmr.exe", "--sanitize", r"logs.log"];
+        assert!(matches!(parse(&line), Some(Command::Sanitize(given)) if given == args(&line)));
+        assert!(!crate::logfile::wanted(&args(&line)), "--sanitize keeps no log file: it would have the paths it leaves out");
+        // The owner, 2026-11-23: a flag the session takes, or the console refuses it as unknown before it is parsed
+        let line = ["tmr.exe", "--sanitize-single", r"results.json"];
+        assert!(matches!(parse(&line), Some(Command::SanitizeSingle(given)) if given == args(&line)));
+        assert!(crate::session::KNOWN_FLAGS.contains(&"--sanitize-single"));
+        assert!(!crate::logfile::wanted(&args(&line)), "--sanitize-single keeps no log file, as --sanitize");
         for none in [&["tmr.exe"][..], &["tmr.exe", "memory=50%", "--help"], &["tmr.exe", "--startup-debug"]] {
             assert!(parse(none).is_none(), "{none:?}");
         }
@@ -1382,7 +1479,7 @@ mod tests {
         let choice = |line: &[&str]| SaveChoice::of(&args(line));
         assert_eq!(choice(&["tmr.exe", "--calibrate-seal"]), Ok(SaveChoice::Ask));
         assert_eq!(choice(&["tmr.exe", "--calibrate-seal", "--yes"]), Ok(SaveChoice::Save));
-        assert_eq!(choice(&["tmr.exe", "--calibrate-all", "maxpage=regular", "--no-save"]), Ok(SaveChoice::Keep));
+        assert_eq!(choice(&["tmr.exe", "--calibrate-all", "maxpage=reg-page", "--no-save"]), Ok(SaveChoice::Keep));
         assert!(choice(&["tmr.exe", "--calibrate-cache", "--yes", "--no-save"]).is_err());
         // Whether it checks tmr-cfg.json can be written before measuring: not for --no-save, nor for the curve check, which saves nothing
         assert!(!checks_the_save("--calibrate-curve", SaveChoice::Ask));

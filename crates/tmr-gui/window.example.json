@@ -1,21 +1,24 @@
 {
   "_about": [
-    "Copy this file into TMR's folder (beside tmr.exe, or TMR_HOME) as window.json and edit it.",
+    "Copy this file into the settings folder in TMR's home (beside tmr.exe, or TMR_HOME) as window.json and edit it.",
     "It is read when the window opens. Keys starting with _ are notes.",
     "chart: the throughput chart shows. theme: system, light or dark.",
     "start_on_open: the run starts as the window opens, as --start does.",
-    "serials: the DIMMs' serials and the system's UUID in the run's output, log and results; false runs with --no-serials.",
+    "keep_serials: the DIMMs' serials, the system's UUID and fingerprints in the run's output, log and results, as --serials keeps them; false, the default, leaves them out.",
     "notify: a sound at the first error, and when the run ends. Off by default.",
     "parameters: the parameters box's text when tmr.exe is given none; the window keeps the last run's.",
     "size: [width, height], as it last closed.",
+    "position: [x, y], its top-left in screen pixels, as it last closed; off the screens now, Windows places it.",
+    "maximized: it closed maximized, and opens so; size and position are what it restores to.",
     "colours: #RRGGBB or #AARRGGBB (alpha first). Leave a key out to keep its default."
   ],
   "chart": true,
   "theme": "system",
   "start_on_open": false,
-  "serials": true,
+  "keep_serials": false,
   "notify": false,
   "parameters": null,
+  "maximized": false,
   "colours": {
     "_note": "egui's grey text instead of WinUI's white: dark.text_primary #8C8C8C, light.text_primary #505050.",
     "_keys": {

@@ -26,8 +26,9 @@ cargo +nightly install test-memory-r --locked
 
 That needs nightly Rust and Microsoft's C++ build tools. Running TMR needs the Visual C++
 Redistributable (2015 or later, x64), and for the window, Windows 11 or Server 2025 and the Windows
-App Runtime 2.4 or later. TMR keeps its configs, results and logs beside `tmr.exe`, which for `cargo
-install` is `.cargo\bin`; set `TMR_HOME` to keep them elsewhere.
+App Runtime 2.4 or later. An ordinary run keeps its files beside `tmr.exe` (`.cargo\bin` for
+`cargo install`), or in `TMR_HOME`. An administrator run defaults to `%ProgramFiles%\TMR Admin`.
+It accepts an absolute `TMR_HOME` under administrator control.
 
 Licensed under either of [MIT](https://github.com/jlpetz/Test-Memory-R/blob/main/LICENSE-MIT) or
 [Apache-2.0](https://github.com/jlpetz/Test-Memory-R/blob/main/LICENSE-APACHE), at your option.

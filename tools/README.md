@@ -301,6 +301,16 @@ Not a check: the two scripts that draw TMR's icon and its artwork, a DDR5 DIMM i
 pack the icon that is copied to `crates/tmr-app/tmr.ico`. How to run them and what they assert:
 `tools/icon/README.md`.
 
+## `demo_configs.py`: the installer's demo configs
+
+`python tools/demo_configs.py <tmr.exe> <folder>` has that exe make the two demo configs
+(`--create-demo-configs`) in a throwaway home, copies them into the folder and removes the home.
+`release.yml` stages the installer's with it, and every push runs it on the release build
+(`target/demo-configs`), so a tag finds that step working; `ci_local.py` runs it too, without
+`--quick`. Run as administrator, as GitHub's runners are, TMR takes only a home only
+administrators can change, so the throwaway one is in Program Files (TODO 137); otherwise in the
+temp folder.
+
 ## `winget_manifest.py`: Petz.TMR's first winget manifest
 
 Not a check: the manifest for the version Petz.TMR enters winget-pkgs with, submitted by hand (TODO

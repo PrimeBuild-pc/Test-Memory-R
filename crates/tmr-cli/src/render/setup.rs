@@ -130,17 +130,31 @@ pub(super) fn text(setup: &Setup) -> String {
         Setup::LargePageDiagnostic { report } => {
             let _ = writeln!(text, "{}", report);
         }
-        Setup::LargePageStatus { usable, min_page, min_needs_large } => {
+        Setup::LargePageStatus { usable, min_page, min_needs_large, right_held } => {
             if *usable {
                 let _ = writeln!(text, "🎉 Large Pages: ✅ ENABLED and tested successfully!");
-                let _ = writeln!(text, "   TMR will use 2MB large pages for optimal performance");
+                // What allocation takes with the default minpage= and maxpage= (`memory::fill`'s passes); `Run::AllocationStarting` then
+                // says this run's range
+                let _ = writeln!(
+                    text,
+                    "   By default: 1 GiB pages where TMR gets them, then 2 MiB, then locked 4 KiB pages where those run \
+                     short (see minpage=)"
+                );
             } else if *min_needs_large {
-                // Without the privilege, a large minpage (the default) refuses the run at allocation
+                // Without large pages, a large minpage (the default) refuses the run at allocation. With the right held its check failed,
+                // which a restart mends (fragmentation, most often), not --setup-large-pages: it would find nothing to grant
                 let _ = writeln!(text, "⚠️  Large Pages: Not available, and minpage={} needs them, so the run will stop", min_page);
-                let _ = writeln!(text, "   before allocating. Set them up (tmr.exe --setup-large-pages, elevated), or rerun");
-                let _ = writeln!(text, "   with minpage=regular to test on standard 4KB pages: every test still runs, but");
-                let _ = writeln!(text, "   slower memory traffic is less stress, so marginal errors that only appear at");
-                let _ = writeln!(text, "   full bandwidth may go undetected");
+                if *right_held {
+                    let _ = writeln!(text, "   before allocating. The right is in place, but its check above failed: restart");
+                    let _ = writeln!(text, "   Windows and run TMR first, or rerun with minpage=reg-page to test on standard");
+                    let _ = writeln!(text, "   4KB pages: every test still runs, but slower memory traffic is less stress, so");
+                    let _ = writeln!(text, "   marginal errors that only appear at full bandwidth may go undetected");
+                } else {
+                    let _ = writeln!(text, "   before allocating. Set them up (tmr.exe --setup-large-pages, elevated), or rerun");
+                    let _ = writeln!(text, "   with minpage=reg-page to test on standard 4KB pages: every test still runs, but");
+                    let _ = writeln!(text, "   slower memory traffic is less stress, so marginal errors that only appear at");
+                    let _ = writeln!(text, "   full bandwidth may go undetected");
+                }
             } else {
                 let _ = writeln!(text, "⚠️  Large Pages: Not available - TMR will use standard 4KB pages");
                 let _ = writeln!(text, "   Performance impact: ~5-10% slower memory allocation");
@@ -151,10 +165,14 @@ pub(super) fn text(setup: &Setup) -> String {
 
             let _ = writeln!(text);
         }
+        // tmr-cfg.json damaged, its last good copy taken: before the calibrations, which are the copy's
+        Setup::ConfigRestored(restored) => {
+            let _ = writeln!(text, "  {}", restored.text());
+        }
         Setup::CacheCalibration(state) => {
             let _ = match state {
                 CacheCalibrationState::Loaded { at } => writeln!(text, "  Calibration: Loaded ({})", at.format("%Y-%m-%d %H:%M")),
-                CacheCalibrationState::Measuring(why) => writeln!(text, "  Calibration: {}", measuring(*why)),
+                CacheCalibrationState::Measuring(why) => writeln!(text, "  Calibration: {}", measuring(why)),
                 CacheCalibrationState::Rechecking { at } => writeln!(
                     text,
                     "  Calibration: Loaded ({}), rechecked before the tests, about 15 s (calibrate=recheck)",
@@ -220,7 +238,7 @@ pub(super) fn text(setup: &Setup) -> String {
 
 /// The machine as SMBIOS and CPUID give it (TODO 105, the owner 2026-11-04): a line for the system, its BIOS, its UUID and its memory; one,
 /// indented, for each DIMM, its serial too; one for Windows' version and build (TODO 123); and one for a hypervisor, a VM's or the one VBS
-/// runs on (TODO 115). Under `--no-serials` the serials and the UUID aren't there, and the system's line says so.
+/// runs on (TODO 115). Without `--serials` the serials and the UUID aren't there, and the system's line says so.
 fn machine_text(
     text: &mut String, system: &tmr::frontend::SystemIdentity, bios: &tmr::frontend::BiosInfo, modules: &[tmr::frontend::MemoryModule],
     hypervisor: Option<&tmr::frontend::Hypervisor>, os: Option<&tmr::frontend::WindowsVersion>,
@@ -248,18 +266,18 @@ fn machine_text(
         n => format!("{n} modules, {}", gib(total)),
     });
     if tmr::frontend::serials_hidden() {
-        parts.push("serials left out (--no-serials)".to_string());
+        parts.push("serials left out (--serials keeps them)".to_string());
     }
     let _ = writeln!(text, "🖥️  System: {}", parts.join(" · "));
     for module in modules {
         let size = joined(&[&gib(module.capacity_bytes), tmr::frontend::memory_type_name(module.memory_type).unwrap_or("")]);
-        let speed = if module.speed_mts > 0 { format!("{} MT/s", module.speed_mts) } else { String::new() };
+        let speed = module.speed_label();
         let maker = joined(&[&module.manufacturer, &module.part_number]);
         let serial = if module.serial_number.trim().is_empty() { String::new() } else { format!("serial {}", module.serial_number.trim()) };
         let fields = [joined(&[&size, &speed]), maker, serial];
         let details: Vec<&str> = fields.iter().filter(|field| !field.is_empty()).map(String::as_str).collect();
-        let locator = if module.locator.trim().is_empty() { "a module" } else { module.locator.trim() };
-        let _ = writeln!(text, "    {locator}: {}", details.join(" · "));
+        let slot = if module.slot.trim().is_empty() { "a module" } else { module.slot.trim() };
+        let _ = writeln!(text, "    {slot}: {}", details.join(" · "));
     }
     if let Some(os) = os {
         let _ = writeln!(text, "🪟 OS: {}", os.label());
@@ -277,13 +295,18 @@ fn machine_text(
 }
 
 /// Why the run measures the cache calibration before its tests, and when (TODO 22)
-pub(crate) fn measuring(why: tmr::frontend::MeasureWhy) -> &'static str {
+pub(crate) fn measuring(why: &tmr::frontend::MeasureWhy) -> String {
     use tmr::frontend::MeasureWhy;
     match why {
-        MeasureWhy::NoneStored => "none stored: measured on this run's memory before its tests, about 2 minutes",
-        MeasureWhy::OtherHardware => "the one stored is another machine's: measured before the tests, about 2 minutes",
-        MeasureWhy::OneThreadOnly => "the one stored measured one thread only: measured again with the others running, before the tests",
-        MeasureWhy::Always => "measured before the tests, about 2 minutes (calibrate=always)",
+        MeasureWhy::Unreadable(unreadable) => {
+            format!("{}: measured on this run's memory before its tests, about 2 minutes", unreadable.text())
+        }
+        MeasureWhy::NoneStored => "none stored: measured on this run's memory before its tests, about 2 minutes".to_string(),
+        MeasureWhy::OtherHardware => "the one stored is another machine's: measured before the tests, about 2 minutes".to_string(),
+        MeasureWhy::OneThreadOnly => {
+            "the one stored measured one thread only: measured again with the others running, before the tests".to_string()
+        }
+        MeasureWhy::Always => "measured before the tests, about 2 minutes (calibrate=always)".to_string(),
     }
 }
 
@@ -439,7 +462,7 @@ fn end_text(end: &SessionEnd, program: &str) -> String {
             let _ = writeln!(text);
             let _ = writeln!(text, "================================================================================");
             let _ = writeln!(text, "❌ Stopped before allocating: this sign-in lacks the right large pages need, and TMR runs nothing");
-            let _ = writeln!(text, "   on 4KB pages unasked (minpage=regular maxpage=regular runs on them without asking)");
+            let _ = writeln!(text, "   on 4KB pages unasked (minpage=reg-page maxpage=reg-page runs on them without asking)");
         }
         // Said already: the sign-out by the prompt
         SessionEnd::SignOutChosen | SessionEnd::Command(_) => {}

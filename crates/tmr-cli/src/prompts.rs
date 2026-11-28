@@ -34,7 +34,7 @@ const FOUR_KIB_PAGES: [&str; 4] = [
 /// B: this run on 4 KiB pages, what that means, and `tip`; `nothing` says nothing was granted when a grant was offered
 fn continuing(out: &mut dyn Write, nothing: &str, tip: &str) -> io::Result<LargePageAnswer> {
     writeln!(out)?;
-    writeln!(out, "⚠️  Continuing with standard 4KB pages (minpage=regular maxpage=regular for this run){nothing}.")?;
+    writeln!(out, "⚠️  Continuing with standard 4KB pages (minpage=reg-page maxpage=reg-page for this run){nothing}.")?;
     for line in FOUR_KIB_PAGES {
         writeln!(out, "{line}")?;
     }
@@ -49,7 +49,7 @@ fn invalid(out: &mut dyn Write, granting: bool) -> io::Result<LargePageAnswer> {
     writeln!(out)?;
     let nothing = if granting { ", granting nothing," } else { "" };
     writeln!(out, "❌ Invalid choice. TMR will exit{nothing} rather than run slower unasked.")?;
-    writeln!(out, "   minpage=regular maxpage=regular runs on standard 4KB pages without asking.")?;
+    writeln!(out, "   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.")?;
     writeln!(out)?;
     Ok(LargePageAnswer::Quit)
 }
@@ -236,6 +236,14 @@ fn needs_administrator(
     }
 }
 
+/// Consent to test under the administrator token. Only an explicit affirmative answer counts.
+pub fn admin_run(input: &mut dyn BufRead, out: &mut dyn Write, home: &std::path::Path, flush: &dyn Fn()) -> bool {
+    if write!(out, "Run memory tests as Administrator using {}? [y/N] ", home.display()).and_then(|()| out.flush()).is_err() {
+        return false;
+    }
+    matches!(answer(input, flush).as_str(), "Y" | "YES")
+}
+
 /// Asks `question` [Y/n]: yes for Enter, y or yes; no for anything else. When no answer can come (the input ended, or can't be read: a run
 /// with no console to answer from, over WinRM), the default, yes, as the [Y/n] says: the one question is a calibration's save, whose
 /// command was the request to calibrate. `--no-save` is how such a run keeps what is stored.
@@ -255,6 +263,15 @@ pub fn confirm(input: &mut dyn BufRead, out: &mut dyn Write, question: &str) -> 
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+
+    #[test]
+    fn elevated_prompt_requires_an_explicit_yes() {
+        for (answer, allowed) in [("", false), ("\n", false), ("no\n", false), ("yesterday\n", false), ("Y\n", true), (" Yes \r\n", true)] {
+            let mut out = Vec::new();
+            assert_eq!(super::admin_run(&mut answer.as_bytes(), &mut out, std::path::Path::new("protected"), &|| {}), allowed);
+            assert!(String::from_utf8(out).unwrap().ends_with("using protected? [y/N] "));
+        }
+    }
 
     use tmr::frontend::{Reach, Sid};
 

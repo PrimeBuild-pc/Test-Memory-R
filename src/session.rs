@@ -31,11 +31,11 @@ pub(crate) const CACHE_LATENCY_FILTER: &str =
 /// The flags that pick a mode's defaults, which `run` takes out before it looks for a one-shot command (`logfile::wanted` too)
 pub(crate) const MODE_FLAGS: [&str; 3] = ["--ram-latency", "--cache-latency", "--quick-test"];
 /// Every flag a session takes, exactly: any other is refused before anything runs (`Stopped::UnknownFlags`); `--help` names each
-pub(crate) const KNOWN_FLAGS: [&str; 28] = [
+pub(crate) const KNOWN_FLAGS: [&str; 31] = [
     "--ram-latency", "--cache-latency", "--quick-test", "--calibrate-cache", "--calibrate-curve", "--calibrate-seal", "--calibrate-all",
     "--show-calibration", "--get-readings", "--launch", "--output", "--yes", "--no-save", "--create-demo-configs", "--compare-results",
-    "--show-results", "--debug-topology", "--show-topology", "--setup-large-pages", "--remove-large-pages", "--startup-debug",
-    "--disable-pinning", "--no-serials", "--help", "-h", "-?", "--version", "-v",
+    "--show-results", "--sanitize", "--sanitize-single", "--debug-topology", "--show-topology", "--setup-large-pages",
+    "--remove-large-pages", "--startup-debug", "--allow-admin", "--disable-pinning", "--serials", "--help", "-h", "-?", "--version", "-v",
 ];
 
 /// How a session ended. An error that stops it is `run`'s `Err`.
@@ -97,6 +97,22 @@ pub fn stored_calibration() -> Option<StoredCalibration> {
     config.calibration.map(|cal| StoredCalibration { at: cal.timestamp, cpu, shared: cal.shared.is_some() })
 }
 
+/// Consume the process flag before positional commands and config processing.
+pub fn take_admin_flag(args: &mut Vec<String>) -> bool {
+    let len = args.len();
+    args.retain(|arg| arg != "--allow-admin");
+    args.len() != len
+}
+
+/// The final consent check, shared by sessions and the window's standalone calibration.
+pub fn authorize_run(allow_admin: bool, fe: &dyn Frontend) -> crate::Result<()> {
+    crate::home::initialize()?;
+    if crate::home::elevated() && !allow_admin && !fe.confirm_admin_run() {
+        return Err("Administrator run declined. For an unattended elevated run, pass --allow-admin.".into());
+    }
+    Ok(())
+}
+
 /// A session: `command_line` (the exe's name first) set up, then run, its events to `fe`. Returns how it ended.
 pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<SessionEnd> {
     // A frontend checks first (tmr.exe does), and this is for one that didn't: the kernels would fault on a CPU without them
@@ -105,6 +121,7 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     }
     // The command line as typed, for the results file (`RunConfigSnapshot::command_line`): `args` gains the defaults the modes below add
     let mut args = command_line.clone();
+    let allow_admin = take_admin_flag(&mut args);
 
     // core-priority= first: it decides how the topology is typed, which `--show-topology` and
     // `--debug-topology` print before any other parameter is read (TODO 96)
@@ -252,6 +269,9 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
 
     // Check for special commands
     if let Some(command) = Command::parse(&args) {
+        if matches!(command, Command::Calibrate(_)) {
+            authorize_run(allow_admin, &*fe)?;
+        }
         return Ok(SessionEnd::Command(command));
     }
     // One named later, where parse doesn't look, is refused, not dropped for a run of the tests (tmr memory=50% --help ran them)
@@ -330,9 +350,7 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
             // Apply the override based on parameter type
             match key.as_str() {
                 "errors" => {
-                    // The registry already accepted this (`ErrorMode::parse`), including `halt:N`. A second match that only knows
-                    // `halt`/`stop`/`panic`/`debug` turned `halt:25` into `Log`, and a CLI override of a config that had `halt:N` did too.
-                    error_mode = error_mode_of(&params::get_string(&validated_params, "errors", "log"));
+                    error_mode = error_mode_of(&validated_params);
                     log::debug!("CLI override: error_mode = {:?}", error_mode);
                 }
                 "cycles" => {
@@ -545,28 +563,42 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     fe.event(Setup::LargePageCheck.into());
 
     // Without the privilege, a run whose maxpage= allows large pages (the default) is asked first (TODO 113, the owner's rule): it takes
-    // 4 KiB pages only when told to, or with minpage=regular maxpage=regular, which asks nothing
+    // 4 KiB pages only when told to, or with minpage=reg-page maxpage=reg-page, which asks nothing
     use crate::memory::allocator::PageSizeLevel;
     let wants_large = PageSizeLevel::from_config_str(&alloc_config.max_page_size) > PageSizeLevel::Regular;
     match settle_large_pages(&*fe, crate::memory::large_page_question(wants_large), crate::memory::grant_large_pages) {
+        // A run of 4 KiB pages (maxpage=reg-page) needs no right, so its check isn't shown, as after the question's "4 KiB pages this
+        // time": without the right its lines read as faults when nothing is wrong (review)
+        LargePages::Unasked if !wants_large => {}
         LargePages::Unasked => fe.event(Setup::LargePageDiagnostic { report: crate::memory::diagnose_large_pages() }.into()),
         LargePages::SignOut => return Ok(SessionEnd::SignOutChosen),
-        // 4 KiB pages this time, both ends of the range (decision 5a): the default minpage needs large pages (TODO 88)
+        // 4 KiB pages this time, both ends of the range (decision 5a), pageable: the default minpage needs large pages (TODO 88; its
+        // locked 4 KiB pages are only a tail where they run short, TODO 131)
         LargePages::Regular => {
-            alloc_config.min_page_size = "regular".to_string();
-            alloc_config.max_page_size = "regular".to_string();
+            let pageable = crate::memory::allocator::RegularPages::Pageable.label();
+            alloc_config.min_page_size = pageable.to_string();
+            alloc_config.max_page_size = pageable.to_string();
         }
         // Before anything is allocated: the question's answer, or the grant's failure, said why
         LargePages::Quit => return Ok(SessionEnd::Stopped(Stopped::NeedsLargePages)),
     }
 
     let usable = crate::check_large_page_privilege().is_ok();
-    // Without the privilege, a large minpage refuses the run at allocation
-    let min_needs_large = PageSizeLevel::from_config_str(&alloc_config.min_page_size) > PageSizeLevel::Regular;
-    fe.event(Setup::LargePageStatus { usable, min_page: alloc_config.min_page_size.clone(), min_needs_large }.into());
+    // Without the privilege, a large minpage refuses the run at allocation, and so does reg-lock, the default: its 4 KiB pages are only
+    // a tail where the large pages run short (TODO 131)
+    let min_needs_large = PageSizeLevel::from_config_str(&alloc_config.min_page_size) > PageSizeLevel::Regular
+        || crate::memory::allocator::RegularPages::from_config_str(&alloc_config.min_page_size)
+            == crate::memory::allocator::RegularPages::Locked;
+    let right_held = crate::memory::privileges::in_token();
+    fe.event(Setup::LargePageStatus { usable, min_page: alloc_config.min_page_size.clone(), min_needs_large, right_held }.into());
 
-    // Serials out of what the run shows and keeps (`--no-serials`), before SMBIOS is first read and logged (TODO 105)
-    crate::smbios::hide_serials(args.iter().any(|a| a == "--no-serials"));
+    let plan_only = args.iter().any(|a| a == "--startup-debug");
+    if !plan_only {
+        authorize_run(allow_admin, &*fe)?;
+    }
+
+    // Serials out of what the run shows and keeps unless `--serials`, before SMBIOS is first read and logged (TODO 105)
+    crate::smbios::hide_serials_unless_kept(&args);
 
     // Get system info for later use (formatted output comes via reporter below)
     let system_info = crate::tests::get_system_info();
@@ -588,28 +620,22 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     let mut calibrate_first = None;
     if calibrate != "off" {
         let cfg_path = crate::app_config::AppConfig::default_path();
-        let app_config = crate::app_config::AppConfig::load(&cfg_path);
+        // A file there but unread is said, one that isn't a config kept aside first, before the calibration measured is saved over it;
+        // when its last good copy was taken, on a line of its own, and the run goes by the copy's calibrations
+        let (app_config, unreadable) = crate::app_config::AppConfig::load_for_setup(&cfg_path);
+        let unreadable = match unreadable {
+            Some(restored) if *restored.last_good() == crate::frontend::LastGoodCopy::Taken => {
+                fe.event(Setup::ConfigRestored(restored).into());
+                None
+            }
+            unreadable => unreadable,
+        };
         let valid = app_config.is_calibration_valid(system_info, smbios);
         let stored = app_config.calibration.as_ref().filter(|_| valid);
         // The one stored, until a new one is in
         crate::set_calibration_data(stored.cloned());
-        use crate::runner::CalibrateFirst;
-        let first = match stored {
-            _ if calibrate == "always" => Some(CalibrateFirst::Measure(MeasureWhy::Always)),
-            Some(cal) if cal.shared.is_some() && calibrate == "recheck" => Some(CalibrateFirst::Recheck),
-            Some(cal) if cal.shared.is_some() => None,
-            Some(_) => Some(CalibrateFirst::Measure(MeasureWhy::OneThreadOnly)),
-            None if app_config.machine_id.is_some() && app_config.calibration.is_some() => {
-                Some(CalibrateFirst::Measure(MeasureWhy::OtherHardware))
-            }
-            None => Some(CalibrateFirst::Measure(MeasureWhy::NoneStored)),
-        };
-        let state = match (first, stored) {
-            (Some(CalibrateFirst::Measure(why)), _) => CacheCalibrationState::Measuring(why),
-            (Some(CalibrateFirst::Recheck), Some(cal)) => CacheCalibrationState::Rechecking { at: cal.timestamp },
-            (None, Some(cal)) => CacheCalibrationState::Loaded { at: cal.timestamp },
-            (_, None) => unreachable!("no stored calibration is a reason to measure"),
-        };
+        let others = app_config.machine_id.is_some() && app_config.calibration.is_some();
+        let (first, state) = cache_calibration_first(&calibrate, stored, others, unreadable);
         fe.event(Setup::CacheCalibration(state).into());
         calibrate_first = first;
         let seal = load_seal_calibration(&app_config, system_info, smbios, crate::seal::set_calibrated_width);
@@ -711,9 +737,6 @@ pub fn run(command_line: Vec<String>, fe: Arc<dyn Frontend>) -> crate::Result<Se
     } else {
         None
     };
-
-    // --startup-debug: run the startup sequence and print the test plan, but allocate no test memory and run no test
-    let plan_only = args.iter().any(|a| a == "--startup-debug");
 
     let start_time = std::time::Instant::now();
 
@@ -847,6 +870,28 @@ fn load_seal_calibration(
     }
 }
 
+/// What a run does with the cache calibration before its tests under `calibrate` (not off), and what the setup says of it: `stored`,
+/// tmr-cfg.json's when it is this machine's; `others`, whether it holds one that isn't; `unreadable`, what was wrong with a file there but
+/// unread whose last good copy wasn't taken (`AppConfig::load_for_setup`), which holds none the run can take, whatever `calibrate` says
+fn cache_calibration_first(
+    calibrate: &str, stored: Option<&crate::calibration::CalibrationResults>, others: bool,
+    unreadable: Option<crate::frontend::UnreadableConfig>,
+) -> (Option<crate::runner::CalibrateFirst>, CacheCalibrationState) {
+    use crate::runner::CalibrateFirst;
+    let measure = |why| (Some(CalibrateFirst::Measure), CacheCalibrationState::Measuring(why));
+    match (stored, unreadable) {
+        (_, Some(unreadable)) => measure(MeasureWhy::Unreadable(unreadable)),
+        _ if calibrate == "always" => measure(MeasureWhy::Always),
+        (Some(cal), None) if cal.shared.is_some() && calibrate == "recheck" => {
+            (Some(CalibrateFirst::Recheck), CacheCalibrationState::Rechecking { at: cal.timestamp })
+        }
+        (Some(cal), None) if cal.shared.is_some() => (None, CacheCalibrationState::Loaded { at: cal.timestamp }),
+        (Some(_), None) => measure(MeasureWhy::OneThreadOnly),
+        (None, None) if others => measure(MeasureWhy::OtherHardware),
+        (None, None) => measure(MeasureWhy::NoneStored),
+    }
+}
+
 /// The cache calibration the setup's cache table shows beside CPUID's sizes: the stored one the run takes, `calibrate=auto`'s or
 /// recheck's (which keeps it unless its probes find it has drifted); none when the run measures one before its tests (calibrate=always,
 /// or one thread alone measured the one stored), whose own table shows it after allocation
@@ -856,7 +901,7 @@ fn calibration_shown(
     use crate::runner::CalibrateFirst;
     match first {
         None | Some(CalibrateFirst::Recheck) => stored,
-        Some(CalibrateFirst::Measure(_)) => None,
+        Some(CalibrateFirst::Measure) => None,
     }
 }
 
@@ -870,24 +915,24 @@ fn show_the_machine(fe: &dyn Frontend, system: Setup, topology: Setup) {
 
 /// `errors=` as the run will use it. The parameter registry already rejected a value `ErrorMode::parse` does not accept, so a failure
 /// here is a default of `log`, the same as a missing `errors=`.
-fn error_mode_of(value: &str) -> ErrorMode {
-    ErrorMode::parse(value).unwrap_or(ErrorMode::Log)
-}
-
 /// Parsed configuration bundle produced from validated CLI parameters:
 /// `(memory_strategy, error_mode, suite_timing, cputype, cpus, pinning, alloc)`.
 type ParsedRunConfig = (EnhancedMemoryStrategy, ErrorMode, TestSuiteTiming, String, String, CpuPinningConfig, MemoryAllocationConfig);
 
 /// Build configuration from validated parameters (using centralized registry). What the allocation and pinning parameters set goes to `fe`,
 /// once they are read.
+/// `errors=` as the run takes it, `log` without one: by `ErrorMode::parse`, which its parameter was validated with, so `halt:N` is
+/// `HaltAfter(N)` (it used to fall to `Log` here: only a JSON config's `error_mode` reached halt:N)
+fn error_mode_of(validated: &HashMap<String, params::ParamValue>) -> ErrorMode {
+    ErrorMode::parse(&params::get_string(validated, "errors", "log")).unwrap_or(ErrorMode::Log)
+}
+
 fn build_config_from_validated_params(validated: &HashMap<String, params::ParamValue>, fe: &dyn Frontend) -> ParsedRunConfig {
     // Extract basic string parameters with defaults
     let cputype = params::get_string(validated, "cputype", "threads");
     let cpus = params::get_string(validated, "cpus", "100%");
 
-    // The registry already accepted this (`ErrorMode::parse`), including `halt:N`. Re-parsing here with a shorter match turned
-    // `errors=halt:25` into `Log`, so the monitor never saw a count to stop at.
-    let error_mode = error_mode_of(&params::get_string(validated, "errors", "log"));
+    let error_mode = error_mode_of(validated);
 
     // The suite's limits: cycles=, duration= or both, whichever is reached first (the runner checks each between cycles), else 3 cycles
     let (cycles, duration) = (params::has_param(validated, "cycles"), params::has_param(validated, "duration"));
@@ -1044,6 +1089,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unattended_elevated_calibration_needs_the_process_flag_but_setup_does_not() {
+        let session = |tail: &[&str]| run(std::iter::once("tmr").chain(tail.iter().copied()).map(str::to_owned).collect(), Arc::new(Quiet));
+        // Session setup dispatches these commands; the test never executes them or changes an account right.
+        for command in ["--setup-large-pages", "--remove-large-pages"] {
+            assert!(matches!(session(&[command]), Ok(SessionEnd::Command(_))));
+        }
+        if crate::home::elevated() {
+            assert!(session(&["--calibrate-seal", "--yes"]).is_err_and(|e| e.to_string().contains("--allow-admin")));
+        }
+        assert!(matches!(session(&["--calibrate-seal", "--allow-admin"]), Ok(SessionEnd::Command(Command::Calibrate(_)))));
+    }
+
+    /// errors= on the command line (and so the window's) takes every form `ErrorMode::parse` does: halt:N stops after N errors, as a JSON
+    /// config's error_mode always did
+    #[test]
+    fn errors_from_the_command_line_take_halt_after_n() {
+        let mode = |line: &[&str]| {
+            let args: Vec<String> = line.iter().map(|s| s.to_string()).collect();
+            let validated = params::parse_and_validate_args(&args).unwrap();
+            let (_, from_params, ..) = build_config_from_validated_params(&validated, &Quiet);
+            assert_eq!(from_params, error_mode_of(&validated), "both paths agree");
+            from_params
+        };
+        assert_eq!(mode(&["errors=halt:8"]), ErrorMode::HaltAfter(8));
+        assert_eq!(mode(&["errors=HALT:100"]), ErrorMode::HaltAfter(100));
+        assert_eq!(mode(&["errors=halt"]), ErrorMode::Halt);
+        assert_eq!(mode(&["errors=stop"]), ErrorMode::Halt);
+        assert_eq!(mode(&["errors=panic"]), ErrorMode::Panic);
+        assert_eq!(mode(&["errors=log"]), ErrorMode::Log);
+        assert_eq!(mode(&[]), ErrorMode::Log, "the default");
+    }
+
     /// cycles= and duration= together limit a run to whichever is reached first, as a config's timing does (`cycles=5 duration=600` ran
     /// 5 cycles, the clock dropped); duration= alone runs unlimited cycles, and neither 3. A mode's or a plan's cycle count (test=,
     /// plan=quick, --quick-test, --ram-latency, --cache-latency) is added only when neither is given: `test=Mem-* duration=3600` ran one
@@ -1116,12 +1194,18 @@ mod tests {
                 "{first} {command}"
             );
         }
-        for flag in ["--helpme", "--versions", "--quick-tests"] {
+        // --no-serials is gone: leaving them out is the default, and --serials keeps them (the owner, 2026-11-23)
+        for flag in ["--helpme", "--versions", "--quick-tests", "--no-serials"] {
             assert!(matches!(session(&["tmr", flag]), SessionEnd::Stopped(Stopped::UnknownFlags(f)) if f == [flag]), "{flag}");
         }
         let line = ["tmr", "--calibrate-cache", "--calibration-file", "my.json"];
         assert!(matches!(session(&line), SessionEnd::Stopped(Stopped::UnknownFlags(f)) if f == ["--calibration-file"]));
-        assert!(matches!(session(&["tmr", "--calibrate-cache", "--output", "x.json"]), SessionEnd::Command(Command::Calibrate(_))));
+        assert!(matches!(
+            session(&["tmr", "--allow-admin", "--calibrate-cache", "--output", "x.json"]),
+            SessionEnd::Command(Command::Calibrate(_))
+        ));
+        // A command is a flag the session takes: --sanitize wasn't one, and the console refused it as unknown before it was parsed
+        assert!(matches!(session(&["tmr", "--sanitize", "x.json"]), SessionEnd::Command(Command::Sanitize(_))));
     }
 
     /// The workers' priority is `priority=`'s, else the config's, else High, and the window's is `window-priority=`'s, else the workers'
@@ -1298,9 +1382,42 @@ mod tests {
         let shown = |first| calibration_shown(first, Some(&stored)).is_some();
         assert!(shown(None), "calibrate=auto takes the one stored");
         assert!(shown(Some(CalibrateFirst::Recheck)), "calibrate=recheck");
-        assert!(!shown(Some(CalibrateFirst::Measure(MeasureWhy::Always))), "calibrate=always");
-        assert!(!shown(Some(CalibrateFirst::Measure(MeasureWhy::OneThreadOnly))), "one thread alone");
+        assert!(!shown(Some(CalibrateFirst::Measure)), "calibrate=always, or one thread alone");
         assert!(calibration_shown(None, None).is_none(), "none stored, or calibrate=off");
+    }
+
+    /// What the run does with the cache calibration, by `calibrate=` and what tmr-cfg.json holds, and why it measures one: a file there
+    /// but unread is said whatever `calibrate=` (not off) says, as it holds none the run can take
+    #[test]
+    fn the_cache_calibration_is_taken_rechecked_or_measured_and_why() {
+        use crate::frontend::UnreadableConfig;
+        use crate::runner::CalibrateFirst::{Measure, Recheck};
+        let shared = crate::test_support::cache_calibration();
+        let one_thread = crate::calibration::CalibrationResults { shared: None, ..shared.clone() };
+        let unreadable = UnreadableConfig::NotAConfig {
+            path: "tmr-cfg.json".into(),
+            why: "EOF while parsing an object at line 9 column 0".to_string(),
+            kept: Ok("tmr-cfg.json.unreadable".into()),
+            last_good: crate::frontend::LastGoodCopy::Absent,
+        };
+        let first = |calibrate, stored, others, unreadable| match cache_calibration_first(calibrate, stored, others, unreadable) {
+            (Some(Measure), CacheCalibrationState::Measuring(why)) => format!("measure: {why:?}"),
+            (Some(Recheck), CacheCalibrationState::Rechecking { at }) if at == shared.timestamp => "recheck".to_string(),
+            (None, CacheCalibrationState::Loaded { at }) if at == shared.timestamp => "take".to_string(),
+            _ => "a state that doesn't go with what it does".to_string(),
+        };
+        assert_eq!(first("auto", Some(&shared), true, None), "take");
+        assert_eq!(first("recheck", Some(&shared), true, None), "recheck");
+        assert_eq!(first("always", Some(&shared), true, None), "measure: Always");
+        assert_eq!(first("auto", Some(&one_thread), true, None), "measure: OneThreadOnly");
+        assert_eq!(first("recheck", None, true, None), "measure: OtherHardware");
+        assert_eq!(first("auto", None, false, None), "measure: NoneStored");
+        for calibrate in ["auto", "recheck", "always"] {
+            assert_eq!(
+                first(calibrate, None, false, Some(unreadable.clone())),
+                format!("measure: {:?}", MeasureWhy::Unreadable(unreadable.clone()))
+            );
+        }
     }
 
     /// The machine's sections in the owner's order (0.1.1): System Information, then Windows' memory, then the CPUs the threads take

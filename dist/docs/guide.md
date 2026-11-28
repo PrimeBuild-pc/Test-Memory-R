@@ -21,7 +21,7 @@ change between versions. The project's page has the details:
   first (the two commands below), then `winget install Petz.TMR --scope machine`: with `--scope`,
   winget asks the same scope of each package TMR depends on, and neither runtime offers both.
 - **The bare `tmr.exe`**, from the same releases: put it in a folder of its own that you can write
-  to. TMR keeps its files beside it.
+  to. TMR keeps its files beside it ([run as administrator, elsewhere](#where-tmr-keeps-its-files)).
 
 TMR needs:
 
@@ -81,10 +81,31 @@ privilege replaces one granted on the PC.
 
 Without it TMR warns and asks first, whenever `maxpage=` allows large pages (as it does unless you
 change it): it runs on regular 4 KB pages, which are slower, only when you say so this time, or
-when you give `minpage=regular maxpage=regular`, which asks nothing. Not run as administrator, it
+when you give `minpage=reg-page maxpage=reg-page`, which asks nothing. Not run as administrator, it
 asks whether to run on them this time or quit, to be started as administrator. No answer (an
 empty line, or the window's question closed) quits, running nothing. `tmr --remove-large-pages`
 takes the privilege away again (from you, or from the `Group:` or `User:` named).
+
+### Running as Administrator
+
+Once the privilege is granted and you have signed in again, run TMR normally: it needs
+administrator rights only to grant or remove the privilege. Started as administrator anyway (Run
+as administrator, an elevated console, or an account that is always elevated, such as the
+built-in Administrator), TMR still runs, with two differences:
+
+- **It keeps its files in a home of its own**, `%ProgramFiles%\TMR Admin` unless `TMR_HOME` names
+  another, not beside `tmr.exe`: its own configs, results, logs, calibrations and window settings
+  (see [Where TMR keeps its files](#where-tmr-keeps-its-files)).
+- **It asks before it tests**, after the large-page check: "Run memory tests as Administrator
+  using <folder>?" Only yes runs the tests; anything else exits, having run nothing. In the
+  window, **Settings → Allow administrator runs without asking** stops the question for your
+  account, in that home, from when you switch it on. On the console, `--allow-admin` does the
+  same for one run, for example `tmr --allow-admin plan=quick`, and a run with no console to
+  answer from (a script, a scheduled task, a remote session) needs it: without it, the run exits
+  with status 2. A config can't set it.
+
+`--setup-large-pages` and `--remove-large-pages` never ask, and granting the privilege ends the run
+so you can sign in again.
 
 ## Running a test
 
@@ -100,18 +121,35 @@ The built-in plans leave 10% of available memory free by default and test the re
 changes that; a config can supply its own allocation settings. The first run on a machine also
 measures the cache calibration, which takes about two minutes before testing starts.
 
+A run tests every thread's whole share or none. When Windows can't find enough 1 GB and 2 MB pages
+(they fragment as Windows runs), TMR finishes each thread on 4 KB pages, up to 5% of its share,
+locked in RAM as the large pages are. A thread short by more stops the run before testing, saying
+by how much and what to change: a bigger reserve (`memory=`), fewer threads (`cpus=`), a restart,
+or another `minpage=`:
+
+| `minpage=` | 4 KB pages |
+|---|---|
+| `reg-lock` (the default) | where the large pages run short, locked in RAM, up to 5% of a thread's share |
+| `reg-page` | whatever the large pages leave, pageable: Windows may page them out under pressure |
+| `large` | none: a thread the large pages leave short stops the run |
+
+The Memory report's 4 KB column says which kind a run took.
+
 - **Double-click TMR** (or its Start menu entry) for its window. Type any settings in its box, or
   pick a config with Load config, and press Start; once the run is over, Run again starts another.
   A finished step's row opens its report, and the final summary opens itself as the run ends. The
   Log tab has what the console would show; Plan, System, Threads and Memory what it prints as it
   starts; Compare compares two runs' results files. The window keeps its settings in
-  `window.json` beside tmr.exe: the chart shown or hidden, the theme, whether a run starts as it
-  opens (`tmr --gui --start` does that once), whether serial numbers are kept, the last run's
-  parameters, its size and colours. Settings, in its `•••` menu, sets the theme, starting on open
-  and the serial numbers. The line above the box, the header's last, says before a run what
-  cache calibration it finds; the first run on a machine measures one before its tests (about 2
-  minutes), or Calibrate the caches and the seal, in the same menu, measures it now, with the
-  seal's fastest width.
+  `settings\window.json` in TMR's home (beside tmr.exe, or as [below](#where-tmr-keeps-its-files);
+  run as administrator, one for each Windows account): the chart shown or hidden, the theme,
+  whether a run starts as it opens (`tmr --gui --start` does that once), whether serial numbers are kept, the last run's
+  parameters, its colours, and its size and place on the screen as it closed, maximized or not
+  (it opens there again only if that is still on a screen). Settings, in its `•••` menu, sets the
+  theme, starting on open and the serial numbers, and, run as administrator, whether it asks
+  before testing. The line above the box, the header's last, says
+  before a run what cache calibration it finds; the first run on a machine measures one before its
+  tests (about 2 minutes), or Calibrate the caches and the seal, in the same menu, measures it
+  now, with the seal's fastest width.
 - **From a console**, type `tmr plan=stability` for the stability plan, 3 cycles of it: any
   setting starts a run, and `tmr` alone lists every setting and starts nothing. Press Ctrl+C to
   stop a run sooner, and it stops at its next checkpoint and writes its report. In the classic
@@ -130,7 +168,7 @@ measures the cache calibration, which takes about two minutes before testing sta
   | `errors=halt` | stop at the first error |
   | `errors=halt:100` | go on past errors, and stop once the run has found 100 (about: it is counted twice a second) |
   | `calibrate=recheck` | probe the stored cache calibration before the tests (about 15 s) and measure it again if the cache has changed; `calibrate=always` measures every run, `calibrate=off` takes none (by default the first run on a machine measures one) |
-  | `--no-serials` | leave the memory modules' serial numbers and the system's UUID out of the output, the log and the results file |
+  | `--serials` | keep the memory modules' serial numbers, the system's UUID and the machine's fingerprints in the output, the log and the results file (left out by default) |
 
   `tmr --help` explains every setting.
 
@@ -229,6 +267,12 @@ settings. There are deliberate differences:
 
 - **Memory coverage.** Every imported test covers the full allocation. TM5's Testing Window
   sizes chunks; it does not limit the amount of memory the test covers in TMR.
+- **Rounding.** Each thread's share rounds down to the config's Lock Memory Granularity (at
+  least 16 MB, in steps of 16 MB), as TM5 does, so the config's Reserved Memory for Windows is
+  kept. TMR's own plans round up to whole GB, which can take part of the reserve. `blkround=` and
+  `blkroundtarget=` override either.
+- **2 MB pages** are asked for 64 MB at a time (TMR's own plans: 128 MB), so when they run short
+  the threads end closer together. TM5 has no such setting; `largechunk=` overrides it.
 - **Test 0.** An enabled RefreshStable test 0 becomes the seal around the tests, even when 0 is
   absent from Test Sequence. A 0 in the sequence also adds an explicit Seal-Check step.
 - **Patterns.** SimpleTest modes 0, 1 and 2 become native pattern programs:
@@ -247,12 +291,55 @@ The startup report shows the pattern substitutions; the log has the original fie
 effective settings. `patterns=legacy` selects TMR's older numbered adaptations for comparison,
 not exact TM5 reproduction.
 
+Otherwise TMR reads a `.cfg` as TM5 does:
+
+- **Tests and Test Sequence.** Only `[Test0]` to `[Test(Tests-1)]` are read (Tests is 6 when
+  missing), and a Test Sequence entry at or above Tests is skipped. Without a Test Sequence, TM5's
+  default one runs: `6,12,14,2,15,10,5,1,4,3,0,13,9,7,8,1,11`. Anything but a digit separates the
+  numbers (a letter is refused as a typo); the first 127 characters and the first 32 numbers count,
+  and a number keeps its lowest byte, as TM5 stores it, so 258 is test 2.
+- **Missing values.** A missing key, an empty number and a missing section take TM5's default:
+  Cycles 3, Tests 6, Channels 2, Testing Window Size 1024 MB, Lock Memory Granularity 16 MB. An
+  empty text value stays empty, as TM5 0.12.3 reads it: an empty `Function=` on an enabled test is
+  refused, as any function TMR doesn't know is, and an empty `Test Sequence=` runs every enabled
+  test once.
+- **Numbers.** Hex is written with `0x`, an `h` after it, or a letter A-F in it; anything else is
+  decimal, and a fraction is dropped. Pattern Param0 and Param1 written as digits only are decimal.
+  The import report keeps the original Pattern Param0/1 spelling. Native programs supply their own
+  data. With `patterns=legacy`, the generator uses the low 32 bits and warns about wider values.
+  For example, 1usmus_v3's 9-digit hex values use their last 8 digits. Quotes around a value and a
+  `;` comment after it are dropped.
+- **Odd values.** A SimpleTest Pattern Mode TMR doesn't have runs as TM5 runs it, by its lowest
+  byte (1 or 2, else 0); TMR's own mode numbers (10, 11, 13, 15-17, 20, 21, 30-33) keep their
+  meaning. A negative Parameter runs as 0, and a negative Test Block Size as TM5's shift to bytes
+  in 32 bits leaves it: -1 to -2048 the window, -3584 512 MB, -4096 1 MB. Interleave Type 0 on two
+  or more channels walks each strided SimpleTest in 128-byte visits, as TM5's 128-bit mode does;
+  `channels=` and `pattern-mode=` on the command line pick that walk again (one channel is type
+  1's walk, and a numbered mode visits one line). A disabled test's Function isn't checked,
+  Test0's included.
+- **Wider ranges.** TMR takes any Channels from 1, a Lock Memory Granularity of 1-1024 MB and a
+  Tests of 1-16, where TM5 takes 1-3, 1-512 MB and 2-16.
+
+A crash can damage a `.cfg` with no visible sign, so TMR warns, naming the file and the line,
+about NUL bytes (what a crash leaves), a line that is neither a `[section]` nor a `key=value`, a
+key or section TM5 doesn't read, a key before the first section, a header without its `]`, a
+repeated section or key, text that isn't UTF-8, a missing section, a `[TestN]` at or above Tests,
+a number truncated to 32 bits, a negative Parameter or Test Block Size, an unusual Test Sequence
+separator or a number of 256 or more in it, and a Tests, Channels or Lock Memory Granularity
+outside what TMR takes. These are warnings, not errors: the file loads, read as TM5 reads it. The
+first of a repeated key or section counts, a header without its `]` still starts its section, and
+NULs and spaces around a name or a value are ignored. A value that isn't a number in TM5's form
+stops the run, and so does a negative Cores, Cycles or the like: TM5 checks such a number without
+its `-` and then stores it negated, so `Cycles=-3` would run 253 cycles.
+
 ### TMR JSON configs
 
-The installer includes `demo_comprehensive_test.json` and `demo_tm5_compatible.json` in
-`configs\`. They show TMR's system settings and per-test settings, and make starting points for
-your own plans. `tmr --create-demo-configs` writes the examples there too. Run one with
-`tmr config=demo_tm5_compatible.json`, and use `--startup-debug` to inspect an edited config
+The installer puts `demo_comprehensive_test.json` and `demo_tm5_compatible.json` in `examples\`,
+beside `tmr.exe`. They show TMR's system and per-test settings, and make starting points for your
+own plans. Run one with `tmr config=demo_tm5_compatible.json`: a run started normally looks for a
+name in the current folder, then in its home's `configs\`, then in `examples\`. Run as
+administrator it doesn't look in `examples\`, so give it the path. `tmr --create-demo-configs`
+writes copies to edit into the home's `configs\`. Use `--startup-debug` to inspect an edited config
 before running it.
 
 For access-order comparisons, the installer also includes
@@ -263,14 +350,53 @@ and how to add these per-test settings to your own config.
 
 ## Where TMR keeps its files
 
-Beside `tmr.exe`, in its folder:
+TMR keeps its files in one folder, its home. Which folder that is depends on how TMR was started:
+
+| Started | Its home |
+|---|---|
+| normally | the folder `tmr.exe` is in; or `TMR_HOME`, when it names a folder |
+| as administrator | `%ProgramFiles%\TMR Admin`; or `TMR_HOME`, when it names a folder only administrators can change |
+
+`TMR_HOME` is an environment variable (`setx TMR_HOME D:\tmr`, then open a new console). Run as
+administrator, TMR takes it only when it is a full path (`C:\...`, not a relative one or a share)
+on a local drive, only administrators can change that folder, and nobody else can move or replace
+a folder above it. A folder in your user profile (Documents, Downloads, a git checkout there)
+doesn't qualify: your own account can change it. A folder in `C:\Program Files`, such as
+`C:\Program Files\TMR Dev`, does. TMR makes the home's four folders, and `TMR Admin` itself, with
+permissions only administrators and Windows itself can change, and checks them at every start. If
+they are no longer as TMR made them, it stops and says so: close TMR and rename the folder to keep
+what is in it (or point `TMR_HOME` at a new one), and the next start makes a new home.
+`--setup-large-pages` and `--remove-large-pages` still run meanwhile, with no log file.
+
+Run as administrator, TMR starts with none of the files of its normal runs: its own calibrations,
+results and logs, and window settings for each Windows account. A config from elsewhere still
+runs, given its path. A damaged settings file there is reported and left as it is, not set aside
+as `<name>.unreadable` and replaced.
+
+In its home:
 
 | | What it holds |
 |---|---|
-| `configs\` | your configs, and the examples |
-| `results\` | one `TMR_<date>_<time>.json` a run, saved as the run goes, so a crash keeps the cycles saved so far |
+| `configs\` | your configs and any editable demos you generate |
+| `results\` | one `TMR_<date>_<time>.json` a run, saved at the end of setup and as the run goes, so a crash keeps the cycles saved so far |
 | `logs\` | one `TMR_<date>_<time>.log` a run, the same name as its results file |
-| `tmr-cfg.json` | what TMR's calibrations (`tmr --calibrate-all`) measured, and of which system; `tmr --show-calibration` shows it, and whether it is this machine's |
+| `settings\` | `tmr-cfg.json`, what TMR's calibrations (`tmr --calibrate-all`) measured, and of which system (`tmr --show-calibration` shows it, and whether it is this machine's); `window.json`, the window's settings |
+
+TMR writes each file in `settings\` whole: a crash or a power cut while it saves leaves the last
+save as it was. After each save it writes a copy of that save beside it, `tmr-cfg.json.bak` and
+`window.json.bak`. If a file is damaged all the same (edited by hand and broken, say), TMR uses its
+`.bak` copy instead, and keeps the damaged file as `<name>.unreadable` for you to look at or delete.
+For `tmr-cfg.json` it says so as a run starts, among the console's setup lines and on the window's
+System tab (`tmr --show-calibration` names the copy too); for `window.json`, in the window's Errors
+list as the window opens. On a share or a drive where TMR can't make a new file in `settings\`, it
+writes each save in place, so a crash while it saves can still damage the file, and it can make no
+`.bak` there, only rewrite one already there: with none, a damaged file's settings are lost, and
+TMR starts from its defaults.
+
+A file you delete is not brought back from its copy: TMR starts again from its defaults. The 0.1.2
+release and earlier kept `tmr-cfg.json` and `window.json` beside `tmr.exe`. The next run started
+normally copies each into `settings\`, when that has neither the file nor its `.bak`, and leaves
+the old one in place. A run as administrator copies none: it has settings of its own.
 
 The run's last lines say where its results file went. `tmr --compare-results <one> <other>`
 compares two results files, by their names in `results\` or by their paths. It matches the two
@@ -280,23 +406,44 @@ and those that ran with other settings, then how each test both ran changed.
 `tmr --show-results <file>` shows a run's end again, from its results file (found the same way):
 a line saying how the run ended (it finished, was stopped, reached its time limit or halted on
 errors, with its verdict; or it never finished, killed or crashed, and its figures go up to its
-last saved cycle), which run it was, then the final summary as the console showed it. A file from
-another version of TMR is shown in this version's layout, and TMR says so above it.
+last saved cycle), which run it was, then the final summary as the console showed it. A run that
+crashed in its first cycle leaves the file saved at the end of setup: it has no cycle, so no
+figures, and its result is "no test ran". A file from another version of TMR is shown in this
+version's layout, and TMR says so above it.
 
-A results file describes the system it came from, so runs can be told apart: the CPU, the BIOS,
-the memory modules (their part numbers and serial numbers) and the motherboard's system UUID.
-Use `--no-serials` when starting a run whose results you intend to share, for example
-`tmr plan=stability --no-serials`. It leaves DIMM serial numbers and the system UUID out of the
-output, log and results. In the window, turn off serial numbers in Settings before starting.
-This does not remove identifiers from older files.
+A results file describes the system it came from, so runs can be told apart: the CPU, the BIOS
+and the memory modules' part numbers and speeds. A run leaves out the DIMMs' serial numbers, the
+motherboard's system UUID and the two fingerprints TMR makes of the machine and its memory, unless
+it is given `--serials` (`tmr plan=stability --serials`), which keeps them in the output, log and
+results; in the window, Settings has the same switch, off by default. Files from the 0.1.2 release
+or earlier have them: it kept them by default. A file that left them out has
+`(left out: --serials keeps it)` for its `machine_id` and `memory_id`.
 
-To keep the files somewhere else, set the `TMR_HOME` environment variable to that folder
-(`setx TMR_HOME D:\tmr`, then open a new console).
+To share a run's files, `tmr --sanitize <results file or log>` (in the window, Sanitize a results
+file and its log, in the `•••` menu) writes copies of both beside them, `<name>.sanitized.json` and
+`<name>.sanitized.log`, without the serials, the UUID and the fingerprints, nor your user folder and
+OneDrive organisation in paths, the PC in a share's path (`\\PC\share`), the Windows account and PC
+names, or SIDs: each is `<removed>`. Either file names the pair, by its path or its name in
+`results\` or `logs\`; the other must be there (or in the same folder) with the same run ID, or
+nothing is written. Read the copies before posting them: a name TMR didn't write, in a config's name
+or a folder outside `C:\Users\`, is still there.
+
+That is the one to use when you have both files. To share one file alone, or one whose partner is
+gone or from another run (a log from before TMR recorded run IDs), `tmr --sanitize-single <results
+file or log>` (Sanitize one file, in the same menu) writes a copy of that file only, without looking
+for its partner or checking a run ID. It removes the same things as far as that file shows them, and
+says what it couldn't. A results file alone can't know the PC and user names only its log gives (the
+Windows account, a hardware error event's PC), so one in the results file outside `C:\Users\` stays,
+such as a config in a folder named for you (`D:\<your name>\`). A log alone finds the serials, the
+UUID and the fingerprints by TMR's own lines for them (each DIMM's, the system's, a calibration's
+identity check) rather than from a results file, so one only a line of another kind has, as in an
+older build's log, stays.
 
 ## Uninstalling
 
 Settings > Apps > TMR (Test Memory R), or `winget uninstall Petz.TMR`. Your configs, results, logs
-and `tmr-cfg.json` stay in TMR's folder; delete it when you no longer want them.
+and settings stay in TMR's folder, and so do a `TMR_HOME` folder and `%ProgramFiles%\TMR Admin`,
+when TMR was run as administrator; delete them when you no longer want them.
 
 ## Help
 

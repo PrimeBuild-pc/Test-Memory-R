@@ -41,9 +41,9 @@ impl Machine {
     }
 }
 
-/// A memory module, as the DIMM selector shows it: its name, the locator, or `DIMM 2` where SMBIOS left that empty, numbered apart from
-/// another of the same name (`named_apart`), and the rest SMBIOS gives, `32 GiB · 6000 MT/s · G.Skill F5-6000J3040G32G`, a field it left
-/// empty (a VM's often are) left out.
+/// A memory module, as the DIMM selector shows it: its name, the slot (`A-2`, else the board's own name for it), or `DIMM 2` where
+/// SMBIOS names it nothing (a VM's), numbered apart from another of the same name (`named_apart`), and the rest SMBIOS gives,
+/// `32 GiB · 6000 MT/s · G.Skill F5-6000J3040G32G`, a field it left empty (a VM's often are) left out.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dimm {
     pub name: String,
@@ -183,19 +183,19 @@ fn dimm(index: usize, m: &MemoryModule) -> Dimm {
     // The size and the speed first: they are what a narrow window keeps when it cuts the line short
     let details: Vec<String> = [
         (m.capacity_bytes > 0).then(|| size(m.capacity_bytes as usize)),
-        (m.speed_mts > 0).then(|| format!("{} MT/s", m.speed_mts)),
+        Some(m.speed_label()).filter(|speed| !speed.is_empty()),
         Some(part.trim().to_string()).filter(|part| !part.is_empty()),
     ]
     .into_iter()
     .flatten()
     .collect();
-    let locator = m.locator.trim();
-    Dimm { name: if locator.is_empty() { format!("DIMM {}", index + 1) } else { locator.to_string() }, details: details.join(" · ") }
+    let slot = m.slot.trim();
+    Dimm { name: if slot.is_empty() { format!("DIMM {}", index + 1) } else { slot.to_string() }, details: details.join(" · ") }
 }
 
-/// Each DIMM a name of its own: a name SMBIOS gives more than one module (AMD boards can name each channel's first slot `DIMM 1`, and
-/// put the channel only in the Bank Locator) takes ` (2)`, ` (3)` from its second on, as Explorer numbers a copy. The selector's menu
-/// gives back the item chosen by its label, so two that read the same would always choose the first.
+/// Each DIMM a name of its own: a name more than one module reads (the slots differ, but a nameless module's `DIMM 1` can meet a board
+/// that names a slot `DIMM 1`) takes ` (2)`, ` (3)` from its second on, as Explorer numbers a copy. The selector's menu gives back the
+/// item chosen by its label, so two that read the same would always choose the first.
 fn named_apart(mut dimms: Vec<Dimm>) -> Vec<Dimm> {
     let mut taken = HashSet::new();
     for dimm in &mut dimms {
@@ -245,10 +245,11 @@ mod tests {
 
     fn module(locator: &str, gib: u64) -> MemoryModule {
         MemoryModule {
+            slot: locator.to_string(),
             locator: locator.to_string(),
             manufacturer: "G.Skill".to_string(),
             part_number: "F5-6000J3040G32G ".to_string(),
-            speed_mts: 6000,
+            configured_mts: 6000,
             memory_type: 0x22,
             capacity_bytes: gib << 30,
             ..Default::default()
@@ -269,7 +270,7 @@ mod tests {
         let fast = MemoryModule {
             manufacturer: "Kingston".to_string(),
             part_number: "KF564C32-32".to_string(),
-            speed_mts: 6400,
+            configured_mts: 6400,
             ..module("DIMM_B2", 32)
         };
         let mut panel = SystemPanel::of(&machine(vec![module("DIMM_A2", 32), fast]));

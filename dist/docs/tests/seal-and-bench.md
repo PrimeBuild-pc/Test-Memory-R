@@ -204,7 +204,7 @@ The numbered ones (TM5-0 to TMR-30) are what Mem-SimpleV2 writes under `pattern-
 config's `pattern_mode`, and they run Mem-SimpleV2's own code for it. The named families, Ident to
 Header, are the patterns a Mem-SimpleV2 step writes by default, each one alone. Switch, Quiet,
 Header and TMR-30 depend on the memory's transfer width. It comes from `beat=`, or else from the
-memory type: 64 bits for DDR4, 32 for DDR5.
+memory type: 64 bits for DDR4, 32 for DDR5, 16 for LPDDR4, LPDDR5 and LPDDR5X.
 
 ### Widths
 

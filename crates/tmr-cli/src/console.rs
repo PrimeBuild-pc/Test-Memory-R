@@ -74,10 +74,32 @@ pub(crate) fn set_console(console: bool) {
 }
 
 /// The CLI's two streams
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stream {
     Out,
     Err,
+}
+
+fn prompt_stream(input: bool, output: bool, error: bool) -> Option<Stream> {
+    match (input, output, error) {
+        (true, true, _) => Some(Stream::Out),
+        (true, false, true) => Some(Stream::Err),
+        _ => None,
+    }
+}
+
+/// A prompt needs a keyboard and a visible output. With stdout piped to tee or a file, ask on an attached stderr.
+pub(crate) fn prompt_writer() -> Option<Writer> {
+    use std::io::IsTerminal;
+    prompt_stream(io::stdin().is_terminal(), io::stdout().is_terminal(), io::stderr().is_terminal()).map(Writer)
+}
+
+#[test]
+fn redirecting_stdout_keeps_a_keyboard_prompt_on_stderr() {
+    assert_eq!(prompt_stream(true, true, true), Some(Stream::Out));
+    assert_eq!(prompt_stream(true, false, true), Some(Stream::Err));
+    assert_eq!(prompt_stream(false, true, true), None);
+    assert_eq!(prompt_stream(true, false, false), None);
 }
 
 /// Where the CLI writes, stdout or stderr: the one place it does. Each call takes the stream's lock for itself, as `io::Stdout`'s do: a

@@ -10,6 +10,7 @@ import unittest
 
 import build_release
 import ci_local
+import demo_configs
 
 
 class BuildToolsTests(unittest.TestCase):
@@ -96,6 +97,17 @@ class BuildToolsTests(unittest.TestCase):
             self.assertIn("python-version: '>=3.11 <4'", text)
             self.assertLess(text.index("uses: actions/setup-python@"), text.index("./tools/build_environment.ps1"))
             self.assertLess(text.index("./tools/build_environment.ps1"), text.index("run: python "))
+
+    def test_both_workflows_make_the_demo_configs_with_the_shared_tool(self):
+        # release.yml stages them with it, and every push runs it, so a tag finds that step working
+        for workflow in ci_local.WORKFLOWS.values():
+            self.assertIn("python tools/demo_configs.py ", workflow.read_text(encoding="utf-8"))
+        # Run as administrator, a home TMR takes: under Program Files, not the temp folder (on GitHub's runners neither
+        # C:\Windows\Temp nor the profile's temp is one only administrators can change)
+        admin, ordinary = demo_configs.throwaway_home(True), demo_configs.throwaway_home(False)
+        self.assertEqual(admin.parent, Path(os.environ["ProgramFiles"]))
+        self.assertEqual(ordinary.parent, Path(tempfile.gettempdir()))
+        self.assertNotEqual(admin.name, demo_configs.throwaway_home(True).name)
 
     def export_github_environment(self, selected):
         """Run the actual PowerShell exporter, with ordinary temporary files in place of GitHub's command files."""

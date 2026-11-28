@@ -6,10 +6,13 @@
 ; me only" on its first page or /CURRENTUSER, in %LOCALAPPDATA%\Programs, with no UAC. winget passes /ALLUSERS or /CURRENTUSER by the
 ; scope it picks.
 ;
-; TMR keeps its files beside tmr.exe (src/home.rs): configs\, results\, logs\, tmr-cfg.json and window.json. Users can't write in
-; Program Files, and TMR runs its tests unelevated, so for all users those are made writable by users: never the exe's folder or the
-; exe, since anyone able to replace tmr.exe could have an admin run their program. An upgrade never overwrites a config, and an uninstall leaves what TMR and
-; the user made.
+; TMR keeps its files beside tmr.exe (src/home.rs): configs\, results\, logs\ and settings\, which holds tmr-cfg.json and window.json
+; (src/settings_file.rs). Users can't write in Program Files, and TMR runs its tests unelevated, so for all users those four folders are
+; made writable by users: never the exe's folder or the exe, since anyone able to replace tmr.exe could have an admin run their program.
+; settings\ is a folder of its own so a save can write its temp beside the file, and put it in the file's place whole (src/atomic_file.rs).
+; Run as administrator, TMR never uses those four: it makes a home of its own, %ProgramFiles%\TMR Admin (src/home/admin.rs), which
+; setup neither makes nor removes. The demo configs go to examples\, which only administrators can write.
+; An upgrade never overwrites a config or a setting, and an uninstall leaves what TMR and the user made.
 
 #ifndef AppVersion
   #error Pass the version: iscc /DAppVersion=0.1.0 /DStage=<folder> dist\tmr.iss
@@ -60,19 +63,22 @@ Name: "addtopath"; Description: "Put tmr on the PATH, to run it from a console"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Dirs]
-Name: "{app}\configs"; Permissions: users-modify; Flags: uninsneveruninstall
-Name: "{app}\results"; Permissions: users-modify; Flags: uninsneveruninstall
-Name: "{app}\logs"; Permissions: users-modify; Flags: uninsneveruninstall
+Name: "{app}\configs"; Permissions: users-modify; Flags: uninsneveruninstall; Check: NewSharedDir('configs')
+Name: "{app}\configs"; Flags: uninsneveruninstall; Check: not IsAdminInstallMode
+Name: "{app}\results"; Permissions: users-modify; Flags: uninsneveruninstall; Check: NewSharedDir('results')
+Name: "{app}\results"; Flags: uninsneveruninstall; Check: not IsAdminInstallMode
+Name: "{app}\logs"; Permissions: users-modify; Flags: uninsneveruninstall; Check: NewSharedDir('logs')
+Name: "{app}\logs"; Flags: uninsneveruninstall; Check: not IsAdminInstallMode
+Name: "{app}\settings"; Permissions: users-modify; Flags: uninsneveruninstall; Check: NewSharedDir('settings')
+Name: "{app}\settings"; Flags: uninsneveruninstall; Check: not IsAdminInstallMode
 
 [Files]
 Source: "{#Stage}\tmr.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\tmr.build.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Stage}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs
-Source: "{#Stage}\configs\*"; DestDir: "{app}\configs"; Flags: onlyifdoesntexist uninsneveruninstall
-; The calibrations save into it, beside the exe: an empty one, writable by users, which TMR reads as no settings
-Source: "tmr-cfg.json"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall; Permissions: users-modify
-; The window's settings save into it as well (crates/tmr-gui/src/settings.rs): an empty one, writable by users, which is its defaults
-Source: "window.json"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall; Permissions: users-modify
+; Ship the examples separately. An elevated upgrade must not write through an ordinary user's configs directory.
+Source: "{#Stage}\configs\*"; DestDir: "{app}\examples"; Flags: ignoreversion
+; Settings are created on first use. The ordinary launch imports earlier settings with the user's permissions.
 
 [Icons]
 ; A double-click opens TMR's window (crates/tmr-app/src/launch.rs)
@@ -85,13 +91,19 @@ Name: "{autodesktop}\TMR"; Filename: "{app}\tmr.exe"; WorkingDir: "{app}"; Tasks
 Filename: "{app}\tmr.exe"; Description: "Open TMR"; Flags: nowait postinstall skipifsilent unchecked runasoriginaluser
 
 [Messages]
-FinishedLabel=TMR is installed. It keeps its configs, results and logs in its folder, beside tmr.exe.%n%nIts window needs the Windows App Runtime 2.4 or later, which TMR offers to download when it is missing; its console runs without it.
+FinishedLabel=TMR is installed. Ordinary runs keep their files beside tmr.exe. Administrator runs use a separate protected folder.%n%nIts window needs the Windows App Runtime 2.4 or later, which TMR offers to download when it is missing; its console runs without it.
 
 [Code]
 const
   SystemEnvironment = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
   UserEnvironment = 'Environment';
   VCRedistKey = 'SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64';
+
+{ Grant ordinary users access only when creating shared data folders. Preserve per-user and existing folder permissions. }
+function NewSharedDir(Name: String): Boolean;
+begin
+  Result := IsAdminInstallMode and not DirExists(ExpandConstant('{app}\') + Name);
+end;
 
 { The PATH this install changes: the machine's for all users, the user's for one }
 function EnvironmentRoot: Integer;

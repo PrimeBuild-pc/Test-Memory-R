@@ -222,3 +222,28 @@ skip-cores=0`, `TMR_HOME` a scratch folder:
 - **Run 2, killed** (`taskkill /F`) after its first save: "The run never finished: it was killed or crashed, unless it is still
   running; its figures are up to its last saved cycle, 1".
 - **`--compare-results` of the two**: "Plan Changes: none, the same 11 steps in both", the mid-run save flagged, each step matched.
+
+## 2026-11-23: a save at the end of setup too (forum feedback)
+
+A run that crashed in its first cycle (10 to 25 minutes with a TM5 config) left no results file: the first save was cycle 1's. Now
+the file is saved once more, at the end of setup, just before cycle 1 starts (`runner::SavePoint::Setup`): in progress, no cycle,
+no steps. The rest of A's schedule is as it was (`runner::SaveSchedule`): cycle 1's save is made whatever came before it, then a
+cycle's end once 60 s have passed since the last cycle's save, then the final save; the setup's save isn't counted. A's save is
+`runner::save_in_progress` now. Such a file reads in `--show-results` ("its file has no cycle, so no figures (it is from the end of
+setup, or from a first cycle stopped before its first step)"), `--compare-results` and the Compare tab ("saved mid-run with no
+cycle, so no figures") and `--sanitize` (`runner::tests::a_results_file_from_the_end_of_setup_reads_everywhere`, the CLI's
+`show_results.txt`).
+
+Its review (2026-11-23) found the readers wrong about it, now fixed: the overview said `PASS ✅` for a run that tested nothing (now
+`NO TEST RAN`, the window's verdict "No test ran": `FinalTestSummaryReport::tested`, also for a live run stopped before its first
+step) and the seal "off" for a sealed run (its config's `execution.seal` now, "on, nothing checked"); a comparison with it said
+"none invalidate the comparison" above throughput changes of -100% (its "Results file" row invalidates now) and, with it as the
+baseline, "+0.0%" (a percentage of a baseline of 0 is "from 0"); and the head said "from the end of setup" for a file a first cycle
+stopped before its first step can also leave, when a second Ctrl+C ends TMR before the final save.
+
+Astra's review of the unpublished commits (2026-11-23) found the same for a finished file with no cycle, a run stopped before its
+first step: compared with a finished run, it had no "Results file" row, as neither was saved mid-run, so "none invalidate the
+comparison" sat above "Throughput: +756.0 MiB/s (from 0)". Now a comparison with a file with no cycle, saved mid-run or finished,
+has the row ("finished with no cycle, so no figures"), which invalidates it, and no overall changes at all
+(`TestComparison::overall_comparison` is `None`; the text says "None: a run with no cycle has no figures"): a run's figures against
+none are only its own. Its steps' lines still say the run stopped before them.

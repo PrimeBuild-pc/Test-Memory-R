@@ -28,10 +28,13 @@ serde_json = "1.0"
 log = { version = "0.4", features = ["std"] }
 chrono = "0.4"
 # The Open dialog, for a config and for Compare's two results files, and the shell's open, for the
-# log, the results and their folders (TODO 109): Reactor has neither
+# log, the results and their folders (TODO 109); and the window's place on the screen, found, moved
+# and followed (`placement.rs`): Reactor has none of them
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_Com",
+    "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",

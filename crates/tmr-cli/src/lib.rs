@@ -34,8 +34,21 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// the console gets it once, the log file too. `tmr` alone is its help (`bare_is_help`).
 pub fn main(args: Vec<String>) -> i32 {
     let args = bare_is_help(args);
+    let flags: Vec<_> = args
+        .iter()
+        .filter(|a| !matches!(a.as_str(), "--allow-admin" | "--quick-test" | "--cache-latency" | "--ram-latency"))
+        .cloned()
+        .collect();
+    let command = tmr::commands::Command::parse(&flags);
+    let log_file = match startup_log(command.as_ref(), tmr::logfile::wanted(&args), tmr::home::initialize, crate::console::eprint) {
+        Ok(wanted) => wanted,
+        Err(e) => {
+            crate::console::eprint(&format!("{e}\n"));
+            return RunStatus::NotRun.exit_code();
+        }
+    };
     // Initialize enhanced logging, with the log file for a session and the commands that change the system (`tmr::logfile::wanted`)
-    setup_logging(tmr::logfile::wanted(&args));
+    setup_logging(log_file);
 
     crate::console::print(&format!(
         "🚀 Test Memory R (TMR) v{} - High-Performance Memory Testing Tool\n{}\n",
@@ -60,6 +73,24 @@ pub fn main(args: Vec<String>) -> i32 {
         warn_if_classic();
     }
     status
+}
+
+/// A privilege grant/removal can complete with console output alone if its usual log is unavailable.
+fn startup_log(
+    command: Option<&tmr::commands::Command>, wanted: bool, home: impl FnOnce() -> std::result::Result<(), String>, warn: impl FnOnce(&str),
+) -> std::result::Result<bool, String> {
+    use tmr::commands::Command;
+    match command {
+        Some(Command::Help(_) | Command::Version | Command::DebugTopology | Command::ShowTopology) => Ok(false),
+        Some(Command::SetupLargePages(_) | Command::RemoveLargePages(_)) => {
+            if wanted && let Err(e) = home() {
+                warn(&format!("Large-page setup will continue without a log file. {e}\n"));
+                return Ok(false);
+            }
+            Ok(wanted)
+        }
+        _ => home().map(|()| wanted),
+    }
 }
 
 /// `tmr` alone is `tmr --help`, which exits 0 (TODO 121): a run takes a setting (`tmr plan=stability`), so typing the name, or a check
@@ -163,22 +194,22 @@ fn setup_logging(log_file: bool) {
     crate::console::init();
 
     // Shared with the result filename so a run's log and result can be paired by name
-    let log_filename = tmr::logfile::path();
+    let log_filename = log_file.then(tmr::logfile::path);
 
     // The records the log file gets and the ones the console shows, as the window's logger has them too
     let levels = tmr::logfile::levels();
 
     // Whether the log file is open, so the line below says so only when it is
-    let log_file = log_file && {
+    let opened = log_filename.as_ref().is_some_and(|log_filename| {
         // Create logs directory if it doesn't exist
         if let Err(e) = tmr::logfile::create_dir() {
             crate::console::eprint(&format!("Warning: Failed to create logs directory: {}\n", e));
         }
         // Initialize file logger for dual logging
-        tmr::logfile::open(&log_filename)
+        tmr::logfile::open(log_filename)
             .inspect_err(|e| crate::console::eprint(&format!("Warning: no log file, {}: {e}\n", log_filename.display())))
             .is_ok()
-    };
+    });
 
     // Set up env_logger for console with original nice formatting (colors + module info)
     let (shown, most) = (levels.clone(), levels.most());
@@ -229,7 +260,7 @@ fn setup_logging(log_file: bool) {
 
     // The banner says the version on the console; where the log is, the run's own output (TODO 105)
     log::info!(target: tmr::logfile::FILE_ONLY_TARGET, "TMR v{} started", tmr::BUILD.version);
-    if log_file {
+    if let Some(log_filename) = log_filename.filter(|_| opened) {
         log::info!(target: tmr::logfile::SHOWN_TARGET, "📝 Log file: {} ({})", log_filename.display(), levels.described());
     }
 }
@@ -240,22 +271,35 @@ mod tests {
 
     use crate::golden::{capture, check, turn};
 
+    #[test]
+    fn privilege_commands_work_when_the_home_is_unavailable() {
+        for command in [Command::SetupLargePages(vec![]), Command::RemoveLargePages(vec![])] {
+            let mut text = String::new();
+            assert_eq!(super::startup_log(Some(&command), true, || Err("storage unavailable".into()), |s| text.push_str(s)), Ok(false));
+            assert!(text.contains("storage unavailable"));
+            assert_eq!(super::startup_log(Some(&command), false, || panic!("no log requested"), |_| panic!()), Ok(false));
+        }
+        assert!(super::startup_log(None, false, || Err("storage unavailable".into()), |_| panic!()).is_err());
+    }
+
     /// TODO 72: `--show-results` on the console, each case after a `## case` line with its exit status: a run that finished, by this build,
-    /// and one that never finished, by another (`tmr::test_support::results_file_*`), each its first lines and then the final summary as
-    /// the console showed it at the run's end (the Reporter's test of the summary saved and loaded shows it the same text); and a file that
-    /// doesn't load, with why. The first lines of every other ending are the engine's golden (`show_results_heads`), as are the usage and
-    /// a file that isn't there (`commands`).
+    /// one that never finished, by another, and one saved at the end of setup and not after (`tmr::test_support::results_file_*`), each its
+    /// first lines and then the final summary as the console showed it at the run's end (the Reporter's test of the summary saved and
+    /// loaded shows it the same text); and a file that doesn't load, with why. The first lines of every other ending are the engine's
+    /// golden (`show_results_heads`), as are the usage and a file that isn't there (`commands`).
     #[test]
     fn show_results_prints_as_its_golden() {
         // The results files are built with this machine's detections, which log at their first use
         let _turn = turn();
         let (finished, never_finished) = (tmr::test_support::results_file_finished(), tmr::test_support::results_file_never_finished());
-        let unreadable = std::env::temp_dir().join(format!("tmr-cli-show-results-{}.json", std::process::id()));
+        let from_setup = tmr::test_support::results_file_from_setup();
+        let unreadable = tmr::test_support::test_home().join("unreadable-result.json");
         std::fs::write(&unreadable, r#"{"metadata": {"tmr_version": "0.1.0"}}"#).expect("a temp file");
         let unreadable = unreadable.to_str().expect("a UTF-8 temp path").to_string();
         let cases = [
             ("a run that finished", &finished.path),
             ("a run that never finished", &never_finished.path),
+            ("a run saved at the end of setup", &from_setup.path),
             ("a file that doesn't load", &unreadable),
         ];
         let mut text = String::new();

@@ -76,7 +76,12 @@ plan, 3 cycles: any setting starts a run, `tmr` alone lists every setting, and `
 [user guide](dist/docs/guide.md), which the installer puts in TMR's `docs\` folder, has the rest.
 
 TMR keeps its files beside `tmr.exe`: `configs\`, `results\` (one JSON file a run, saved as it
-goes), `logs\` and `tmr-cfg.json` (its calibrations). `TMR_HOME` puts them in another folder. A
+goes), `logs\` and `settings\` (`tmr-cfg.json`, its calibrations, and `window.json`, the window's
+settings, each with a `.bak` copy of its last save). `TMR_HOME` puts them in another folder. Run as
+administrator, which only the large-page setup needs, TMR keeps a separate set in
+`%ProgramFiles%\TMR Admin` (or a `TMR_HOME` only administrators can change) and asks before it
+tests; `--allow-admin` skips the question, as a run with no console to answer from needs. The
+[user guide](dist/docs/guide.md#where-tmr-keeps-its-files) has the details. A
 results file describes the system it came from; see [Privacy](#privacy) below for what that includes
 and how to leave identifiers out before you post one.
 
@@ -106,7 +111,7 @@ and how to leave identifiers out before you post one.
 - **Patterns aimed at the memory bus**, alongside TM5's. A switching family inverts each beat of a
   burst at the bus's own width, so every data line toggles on every transfer, the most switching
   noise the data can make: 64-bit for DDR4, 32-bit for DDR5's subchannels, 16-bit for
-  LPDDR4/5, picked from the memory type SMBIOS reports, and models of LPDDR6's 12-bit and DDR6's
+  LPDDR4/5/5X, picked from the memory type SMBIOS reports, and models of LPDDR6's 12-bit and DDR6's
   24-bit, chosen with `beat=`. A random family feeds every line every short bit sequence, which DDR5's receive
   equalisers react to. Both aim to make a marginal overclock fail sooner.
 - **Built-in test plans** (`plan=`; `stability` by default), **results as JSON** saved during the
@@ -164,7 +169,7 @@ bus width (see Key changes):
 | DDR4 (and DDR3L, on some 6th and 7th gen Core boards) | 64-bit per channel; multiple DIMMs can share a channel |
 | DDR5 | 32-bit: two subchannels per DIMM |
 | LPDDR3 | 32-bit |
-| LPDDR4, LPDDR5 | 16-bit |
+| LPDDR4, LPDDR5, LPDDR5X | 16-bit (SMBIOS reports LPDDR5X as LPDDR5, so TMR names it "LPDDR5/5X") |
 | DDR6, LPDDR6 | 24-bit and 12-bit, models of the drafts: not detected, chosen with `beat=ddr6` or `beat=lpddr6` |
 
 When SMBIOS reports no type TMR knows (a VM often reports none), TMR says so and the switching
@@ -211,7 +216,10 @@ winget install --id Microsoft.WindowsAppRuntime.2 --exact --source winget
   back in (a privilege reaches your programs at your next sign-in). From then on TMR has it in every
   run, run as administrator or not. `tmr.exe --remove-large-pages` takes it away again.
   Without it TMR warns, and asks before running on regular 4 KB pages, which are slower: it runs
-  on them only when you say so, or with `minpage=regular maxpage=regular`, and no answer quits.
+  on them only when you say so, or with `minpage=reg-page maxpage=reg-page`, and no answer quits.
+  Where the large pages run short (they fragment as Windows runs), each thread finishes on 4 KB
+  pages locked in RAM, up to 5% of its share (`minpage=reg-lock`, the default); short by more, the
+  run stops before testing and says what to change.
 
 ## Building from source
 
@@ -225,27 +233,55 @@ self-update of any kind. Nothing it does ever leaves the machine it runs on.
 
 **What TMR records.** Every run's console output, log and results file include the system it ran on:
 the CPU, the BIOS, the motherboard, and each memory module's manufacturer, part number, speed and
-capacity. By default they also include each DIMM's serial number, the motherboard's system UUID, and
+capacity. They leave out, by default, each DIMM's serial number, the motherboard's system UUID, and
 two short hashes TMR computes to recognise the machine later: `machine_id` (from the CPU and BIOS) and
-`memory_id` (from the memory modules, including their serial numbers). `--no-serials` (the window's
-Settings has the same toggle) leaves all four of those, the serial numbers, the system UUID and both
-hashes, out of the console, the log and the results file, consistently. It does not touch the module
-manufacturer or part number, which TMR always records. Neither hash is a strong cryptographic hash, so
-don't treat a file that still has them, from a run without `--no-serials`, as anonymous.
+`memory_id` (from the memory modules, including their serial numbers). `--serials` (the window's
+Settings has the same toggle, off by default) keeps all four of those in the console, the log and the
+results file. The module manufacturer and part number are always recorded. Neither hash is a strong
+cryptographic hash, so don't treat a file that has them, from a run with `--serials` or from the 0.1.2
+release or earlier, which kept them by default, as anonymous; a file that left them out has
+`(left out: --serials keeps it)` for its `machine_id` and `memory_id`. Without the hashes,
+`--compare-results` tells two runs' machines apart by the CPU and its cache sizes, the BIOS, and each
+memory module's part number and speed.
 
 **No results, no log.** `record=off` keeps a run from writing a results file or a log file at all; the
 console still shows the run. It doesn't reach the local calibration cache (below); add `calibrate=off`
 too if you want a run to touch no files whatsoever.
 
-**The calibration cache.** TMR keeps a small local file, `tmr-cfg.json` (beside the exe, or under
-`TMR_HOME`), with the real system UUID and the real per-DIMM serial and part numbers, so it can tell
-when the hardware has changed and a fresh calibration is needed. `--no-serials` doesn't reach it; it
-only affects what a run displays or writes out. This file stays on your machine and is never sent
-anywhere.
+**The calibration cache.** TMR keeps a small local file, `settings\tmr-cfg.json` (beside the exe, or
+under `TMR_HOME`; run as administrator, in its own home, `%ProgramFiles%\TMR Admin` by default), with the real system UUID and the real per-DIMM serial and part numbers, so it can
+tell when the hardware has changed and a fresh calibration is needed; `tmr-cfg.json.bak` beside it is
+a copy of its last save. Leaving the serials out doesn't reach them; that only affects what a run
+displays or writes out. These files stay on your machine and are never sent anywhere.
 
-**Sharing a log or results file.** Both describe your system as above. If you're posting one publicly,
-`--no-serials` leaves the DIMM serial numbers, the system UUID and both fingerprint hashes out, so the
-file no longer carries anything that ties it back to this specific machine.
+**Sharing a log or results file.** Both describe your system as above. A run's files have no DIMM
+serial numbers, system UUID or fingerprint hashes unless it was given `--serials`, but the log names
+the Windows account TMR ran as (`PC\name`) and, when that account lacks the right large pages need,
+every account and group the security policy gives it to, with their SIDs (other people's accounts on
+the PC among them). A hardware error's Windows event, which the log records when Windows has no
+message for it (and always at `RUST_LOG=debug`), names the PC by its full name, DNS domain included.
+Paths in either file can have your user folder in them (`C:\Users\<name>\...`).
+`tmr --sanitize <results file or log>` (the window's `•••` menu has it as Sanitize a results file and
+its log) writes copies of the pair beside them, `<name>.sanitized.json` and `<name>.sanitized.log`,
+with each of those replaced by `<removed>`: the DIMM serials, the system UUID, both hashes, the user
+folders, the accounts, the PC's and the users' names, and the machine's SIDs. Either file names the
+pair; the other must be beside it (in TMR's `results\` and `logs\`, or in the same folder) and carry
+the same run ID, or nothing is written. The originals stay as they were. It can't know a name TMR
+didn't write, such as a config's name or a folder outside `C:\Users\`, so read the copies before you
+post them.
+
+Use `--sanitize` when you have both files. When you have only one, or its partner is from another run
+(a log from before TMR recorded run IDs has none), `tmr --sanitize-single <results file or log>`
+(Sanitize one file, in the same menu) copies that file alone, to `<name>.sanitized.json` or
+`<name>.sanitized.log`, without looking for its partner or checking a run ID. It removes the same
+things, as far as that one file shows them, and its last lines say what it couldn't:
+- A results file alone doesn't know the PC and user names only its log gives (the account TMR ran as,
+  a hardware error event's PC), so one of those stays where the results file has it outside a
+  `C:\Users\` path, such as a config on `\\PC\share`.
+- A log alone has no results file to name the serials, the UUID and the hashes, so it finds them by
+  TMR's own lines for them (each DIMM's line, the system's, a calibration's identity check) and then
+  wherever else the log has them. One that only a line of another kind has, as an older build's log
+  might, stays.
 
 ## License
 

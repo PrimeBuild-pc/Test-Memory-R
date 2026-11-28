@@ -20,7 +20,7 @@ use windows::Win32::System::Threading::GetNumaHighestNodeNumber;
 use crate::BlockInfo;
 use crate::constants::{BYTES_PER_MIB_USIZE, HUGE_PAGE_SIZE_USIZE, PAGE_SIZE_4KB};
 use crate::cpu_topology::get_numa_node_for_cpu;
-use crate::memory::allocator::PageSizeLevel;
+use crate::memory::allocator::{PageSizeLevel, RegularPages};
 use crate::memory::backend::describe_error;
 
 // ---------------------------------------------------------------------------------------------
@@ -59,11 +59,12 @@ pub(crate) fn numa_node_count() -> u32 {
     highest + 1
 }
 
-/// The page sizes a run may use, smallest and largest.
+/// The page sizes a run may use, smallest and largest, and how its 4 KiB pages are held when it takes them (TODO 131).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PageSizes {
     pub min: PageSizeLevel,
     pub max: PageSizeLevel,
+    pub regular: RegularPages,
 }
 
 impl PageSizes {
@@ -72,26 +73,43 @@ impl PageSizes {
     }
 }
 
-/// `minpage` ..= `maxpage`, capped at 4 KiB without SeLockMemoryPrivilege. A `minpage` above 4 KiB without the privilege, or above
-/// `maxpage`, is an error.
+/// `minpage` ..= `maxpage`, capped at 4 KiB without SeLockMemoryPrivilege, and the 4 KiB kind `minpage` names. Errors: a `minpage` above 4
+/// KiB without the privilege, or above `maxpage`; both 4 KiB but of different kinds (a run's 4 KiB pages are one kind); and every page
+/// 4 KiB and locked, which isn't built yet (TODO 131 phase 2: until then `reg-lock` is a tail where the large pages run short).
 pub(crate) fn allowed_page_sizes(runtime_config: &crate::RuntimeConfig) -> Result<PageSizes, String> {
     let alloc = &runtime_config.memory_allocation;
     let min = PageSizeLevel::from_config_str(&alloc.min_page_size);
     let mut max = PageSizeLevel::from_config_str(&alloc.max_page_size);
+    let regular = RegularPages::from_config_str(&alloc.min_page_size);
     if min > max {
         return Err(format!("minpage={} is above maxpage={}", alloc.min_page_size, alloc.max_page_size));
     }
+    if max == PageSizeLevel::Regular && RegularPages::from_config_str(&alloc.max_page_size) != regular {
+        return Err(format!(
+            "minpage={} and maxpage={}: a run's 4 KiB pages are one kind, locked or pageable",
+            alloc.min_page_size, alloc.max_page_size
+        ));
+    }
+    // Large pages unavailable: for want of the right, or with the right held, its check failed (no 2 MiB page from Windows, most often),
+    // which the setup's large-page lines say, with what to do (`--setup-large-pages` would grant nothing in the second case)
     if !runtime_config.large_pages_available {
         if min > PageSizeLevel::Regular {
             return Err(format!(
-                "minpage={} needs large pages, but SeLockMemoryPrivilege is not available \
-                 (tmr.exe --setup-large-pages, elevated)",
+                "minpage={} needs large pages, but they aren't available (the large-page check at setup says why, and what to do)",
                 alloc.min_page_size
             ));
         }
         max = PageSizeLevel::Regular;
     }
-    Ok(PageSizes { min, max })
+    if max == PageSizeLevel::Regular && regular == RegularPages::Locked {
+        let why = if runtime_config.large_pages_available { "maxpage=reg-lock" } else { "large pages aren't available" };
+        return Err(format!(
+            "every page would be 4 KiB ({why}), and minpage=reg-lock locks them only as a tail where large pages run short: locking \
+             them all isn't built yet. minpage=reg-page maxpage=reg-page runs on pageable 4 KiB pages; the large-page check at setup \
+             says how to get large pages"
+        ));
+    }
+    Ok(PageSizes { min, max, regular })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -252,6 +270,14 @@ pub(crate) fn fill_all(
         return fill_regular(fill, who, &mut progress);
     }
     Ok(None)
+}
+
+/// The 4 KiB tail (TODO 131), for a run whose smallest page size is above 4 KiB: what the large pages left each thread short, on 4 KiB
+/// pages, as `fill_regular` takes them. The caller has checked the shortfall against its cap and says what it's doing; this adds no pass
+/// line of its own. Returns the first refusal, as `fill_regular` does.
+pub(crate) fn fill_tail(fill: &mut impl Fill, who: &str, started: Instant) -> Result<Option<(usize, u32)>, String> {
+    let mut progress = Progress::new(fill, started);
+    fill_regular(fill, who, &mut progress)
 }
 
 /// Before a remote 1 GiB pass: a thread whose next address is off a 1 GiB boundary takes 2 MiB pages from that pass's node up to the
@@ -659,6 +685,42 @@ mod tests {
         assert!(fill.requests[..first_remote].iter().all(|&(i, _, _)| fill.asked[i].is_some()));
         assert!(fill.asked[..first_remote].iter().zip(&fill.requests).all(|(&node, &(i, _, _))| node == fill.nodes[i]));
         assert_eq!(remote.label(Some(1)), "NUMA 1 for NUMA 0");
+    }
+
+    /// TODO 131: `minpage=` names the 4 KiB kind; both ends at 4 KiB must agree on it; every page 4 KiB and locked waits for phase 2,
+    /// whether `maxpage=` asks for it or the missing privilege leaves nothing else; and the values themselves
+    #[test]
+    fn the_page_settings_name_one_4k_kind() {
+        use crate::memory::allocator::check_page_setting;
+        let run = |min: &str, max: &str, large: bool| {
+            let memory_allocation = crate::config::MemoryAllocationConfig {
+                min_page_size: min.to_string(),
+                max_page_size: max.to_string(),
+                ..Default::default()
+            };
+            allowed_page_sizes(&crate::RuntimeConfig {
+                memory_backend: crate::MemoryBackend::VirtualAlloc2,
+                large_pages_available: large,
+                cpu_list: None,
+                pin_threads: false,
+                thread_priority: crate::runner::ThreadPriority::High,
+                enhanced_memory_strategy: Default::default(),
+                memory_allocation,
+            })
+        };
+        let (huge, large, regular) = (PageSizeLevel::Huge, PageSizeLevel::Large, PageSizeLevel::Regular);
+        assert_eq!(run("reg-lock", "huge", true), Ok(PageSizes { min: regular, max: huge, regular: RegularPages::Locked }));
+        assert_eq!(run("reg-page", "huge", true), Ok(PageSizes { min: regular, max: huge, regular: RegularPages::Pageable }));
+        assert_eq!(run("large", "huge", true).map(|p| (p.min, p.max)), Ok((large, huge)));
+        assert_eq!(run("reg-page", "reg-page", true).map(|p| (p.max, p.regular)), Ok((regular, RegularPages::Pageable)));
+        assert!(run("reg-lock", "reg-page", true).unwrap_err().contains("one kind"));
+        assert!(run("reg-lock", "reg-lock", true).unwrap_err().contains("(maxpage=reg-lock)"));
+        assert!(run("reg-lock", "huge", false).unwrap_err().contains("(large pages aren't available)"));
+        assert!(run("large", "huge", false).unwrap_err().contains("minpage=large needs large pages, but they aren't available"));
+        assert_eq!(run("reg-page", "huge", false).map(|p| p.max), Ok(regular), "no privilege: 4 KiB, pageable");
+        assert_eq!(check_page_setting("Reg-Lock"), Ok("reg-lock".to_string()));
+        assert_eq!(check_page_setting("2MB"), Ok("2mb".to_string()));
+        assert!(check_page_setting("regular").unwrap_err().contains("reg-lock or reg-page"));
     }
 
     #[test]

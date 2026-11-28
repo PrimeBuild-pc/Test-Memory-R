@@ -1,19 +1,25 @@
 //! TMR Application Configuration
 //!
-//! Persistent configuration file (`tmr-cfg.json`) stored in TMR's home, next to the executable (`home.rs`).
-//! Holds machine identity, calibration results, UI preferences, and session state.
-//! All fields are optional — missing fields use defaults. A save keeps keys this build does not know, taken from the object it read.
-//! A file that is not JSON, or that this build cannot parse, is not overwritten.
+//! Persistent configuration file (`tmr-cfg.json`) stored in the `settings\` folder of TMR's home (`settings_file.rs`, `home.rs`).
+//! Holds machine identity and calibration results; the window's settings are window.json's (tmr-gui's `settings.rs`).
+//! All fields are optional: missing fields use defaults and unknown top-level fields are preserved.
+//!
+//! Written whole (`atomic_file`), as a crash while it was written left half of one (forum feedback, 2026-11-23), and each save then
+//! as its last good copy, `tmr-cfg.json.bak` (`settings_file::save`). One that is there but isn't a config, or can't be read, is the
+//! copy's when that reads (`AppConfig::read`); one that isn't a config is kept aside, as `tmr-cfg.json.unreadable`, before anything is
+//! saved over it, and one that can't be read isn't saved over (`AppConfig::load_for_setup`, `AppConfig::save`).
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::cache::SystemInfo;
 use crate::calibration::{CalibrationResults, SealCalibration};
+use crate::frontend::{LastGoodCopy, UnreadableConfig};
+use crate::settings_file;
 use crate::smbios::{MemoryModule, SmbiosData};
 
 /// Readable CPU + BIOS identity snapshot stored alongside the hash.
@@ -202,80 +208,180 @@ pub struct AppConfig {
     pub seal_calibration: Option<SealCalibration>,
     // What the window keeps between sessions (its last parameters, the chart shown or not, starting on open, its size) is window.json's
     // (tmr-gui's settings.rs, TODO 109), not this file's: this one is the engine's record of the machine (TODO 7, the owner, 2026-11-04)
-    /// The object `load` read, so a save puts this build's fields over it and leaves keys it does not know. Not a field of the file.
-    #[serde(skip)]
+    /// Top-level settings this version does not recognise.
+    #[serde(flatten)]
     pub(crate) retained: Map<String, Value>,
-    /// The file was there and could not be parsed. `save` refuses, so a calibration does not replace it with defaults.
-    #[serde(skip)]
-    pub(crate) unreadable: bool,
 }
 
 const CONFIG_FILENAME: &str = "tmr-cfg.json";
 
+/// A config file there but not taken (`AppConfig::parse`)
+#[derive(Debug)]
+enum ReadError {
+    /// It couldn't be read: why
+    Unread(String),
+    /// What was read isn't a config: what the parse found
+    NotAConfig(String),
+}
+
+impl ReadError {
+    /// Why, without what it is
+    fn why(&self) -> &str {
+        match self {
+            Self::Unread(why) | Self::NotAConfig(why) => why,
+        }
+    }
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unread(why) => write!(f, "couldn't be read ({why})"),
+            Self::NotAConfig(why) => write!(f, "isn't a config ({why})"),
+        }
+    }
+}
+
+/// A config file there but not taken, and what its last good copy (`settings_file::backup_of`) gave in its place: the copy's config,
+/// none when there is no copy, or why it is no good either. Boxed, as a config is large and a load's error carries it
+struct Unreadable {
+    error: ReadError,
+    copy: Result<Option<Box<AppConfig>>, ReadError>,
+}
+
+impl Unreadable {
+    /// The copy's config when it read, else the defaults
+    fn config(self) -> AppConfig {
+        self.copy.ok().flatten().map_or_else(AppConfig::default, |config| *config)
+    }
+
+    /// What became of the copy, as the setup says it
+    fn last_good(&self) -> LastGoodCopy {
+        match &self.copy {
+            Ok(Some(_)) => LastGoodCopy::Taken,
+            Ok(None) => LastGoodCopy::Absent,
+            Err(bad) => LastGoodCopy::Bad(bad.why().to_string()),
+        }
+    }
+}
+
+/// Why a config file that couldn't be read, `why`, isn't saved over (`AppConfig::save`, `load_to_save`)
+fn unread(path: &Path, why: &str) -> String {
+    format!("{} couldn't be read ({why}), so it isn't written over", path.display())
+}
+
 impl AppConfig {
-    /// Load config from a JSON file. A missing file is the defaults, and a later save may create it. A file that is not a JSON object,
-    /// or that this build cannot parse, is the defaults with `unreadable` set, so a save does not replace it.
-    pub fn load(path: &std::path::Path) -> Self {
-        let contents = match std::fs::read_to_string(path) {
-            Ok(contents) => contents,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                log::info!("No config file at {} — using defaults", path.display());
-                return Self::default();
-            }
-            Err(e) => {
-                log::warn!("Failed to read {}: {e} — using defaults, and a save will not overwrite it", path.display());
-                return Self { unreadable: true, ..Self::default() };
-            }
-        };
-        let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&contents) else {
-            log::warn!("Failed to parse {} — using defaults, and a save will not overwrite it", path.display());
-            return Self { unreadable: true, ..Self::default() };
-        };
-        match serde_json::from_value::<AppConfig>(Value::Object(map.clone())) {
-            Ok(mut config) => {
-                config.retained = map;
-                log::info!("Loaded app config from {}", path.display());
-                config
-            }
-            Err(e) => {
-                log::warn!("Failed to parse {}: {e} — using defaults, and a save will not overwrite it", path.display());
-                Self { unreadable: true, ..Self::default() }
-            }
+    /// The config at `path`, for a look at it (`session::stored_calibration`): the defaults when there is none; when the file can't be
+    /// read or isn't a config, its last good copy's, else the defaults, which the log says. A run's setup, which may save over it, has
+    /// `load_for_setup`, and a save from any other, `load_to_save`.
+    pub fn load(path: &Path) -> Self {
+        Self::read(path).unwrap_or_else(Unreadable::config)
+    }
+
+    /// `load`'s config, and the file it came from: `path`, or its last good copy when that was taken (`--show-calibration`)
+    pub fn load_with_source(path: &Path) -> (Self, PathBuf) {
+        match Self::read(path) {
+            Ok(config) => (config, path.to_path_buf()),
+            Err(unreadable) if unreadable.last_good() == LastGoodCopy::Taken => (unreadable.config(), settings_file::backup_of(path)),
+            Err(unreadable) => (unreadable.config(), path.to_path_buf()),
         }
     }
 
-    /// Save config to a JSON file (pretty-printed). Refuses when `load` could not read the file that is already there. Keys this build
-    /// does not know, kept from that read, stay in the file.
-    pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
-        if self.unreadable {
-            return Err(format!("{} could not be read; not overwriting it", path.display()));
+    /// The config at `path`, to be changed and saved back (`--calibrate-cache`, `--calibrate-seal`, the calibration a run measures):
+    /// `load`'s, but a file that can't be read is the error `save` would give, not its copy's or the defaults. A save from either would
+    /// write it over the file once it could be read again (another program let go of it, during the save's question): what the file held
+    /// and the copy didn't (a save whose copy couldn't be written, an edit by hand) lost, with no copy of the file kept (review). One that
+    /// isn't a config is its copy's or the defaults, as for `save`, which keeps it aside.
+    pub fn load_to_save(path: &Path) -> Result<Self, String> {
+        match Self::read(path) {
+            Err(Unreadable { error: ReadError::Unread(why), .. }) => Err(unread(path, &why)),
+            read => Ok(read.unwrap_or_else(Unreadable::config)),
         }
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
-        }
+    }
 
-        let known = serde_json::to_value(self).map_err(|e| format!("Failed to serialize config: {e}"))?;
-        let mut file = self.retained.clone();
-        if let Value::Object(known) = known {
-            for (key, value) in known {
-                file.insert(key, value);
+    /// Reload under an exclusive cross-process file handle and save only this calibration's changes. The lock file stays in place:
+    /// Windows releases the handle when a process exits, including after a crash. No lock is held while measuring or prompting.
+    pub(crate) fn update(path: &Path, apply: impl FnOnce(&mut Self)) -> Result<(), String> {
+        let _held = settings_file::lock(path)?;
+        let mut config = Self::load_to_save(path)?;
+        apply(&mut config);
+        config.save(path)
+    }
+
+    /// The config at `path` for a run's setup, which may save a calibration over it: `load`'s, and, when the file is there but couldn't be
+    /// read or isn't a config, what was wrong with it and what became of its last good copy, for the setup to say. One that isn't a
+    /// config is kept aside first (`settings_file::keep_aside`), so a calibration saved since loses nothing of it.
+    pub fn load_for_setup(path: &Path) -> (Self, Option<UnreadableConfig>) {
+        let unreadable = match Self::read(path) {
+            Ok(config) => return (config, None),
+            Err(unreadable) => unreadable,
+        };
+        let last_good = unreadable.last_good();
+        let said = match &unreadable.error {
+            ReadError::Unread(why) => UnreadableConfig::Unread { path: path.to_path_buf(), why: why.clone(), last_good },
+            ReadError::NotAConfig(why) => {
+                let kept = settings_file::keep_aside(path);
+                UnreadableConfig::NotAConfig { path: path.to_path_buf(), why: why.clone(), kept, last_good }
             }
-        }
-        let mut json = serde_json::to_string_pretty(&Value::Object(file)).map_err(|e| format!("Failed to serialize config: {e}"))?;
-        json.push('\n');
+        };
+        (unreadable.config(), Some(said))
+    }
 
-        std::fs::write(path, json).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    /// `parse`, logged: the config, the defaults when there is none; a file there but not taken, with what its last good copy gave
+    fn read(path: &Path) -> Result<Self, Unreadable> {
+        let error = match Self::parse(path) {
+            Ok(Some(config)) => {
+                log::info!("Loaded app config from {}", path.display());
+                return Ok(config);
+            }
+            Ok(None) => {
+                log::info!("No config file at {}: the defaults", path.display());
+                return Ok(Self::default());
+            }
+            Err(error) => error,
+        };
+        let backup = settings_file::backup_of(path);
+        let copy = Self::parse(&backup).map(|copy| copy.map(Box::new));
+        match &copy {
+            Ok(Some(_)) => log::warn!("{} {error}: its last good copy, {}, is taken", path.display(), backup.display()),
+            Ok(None) => log::warn!("{} {error}, and it has no last good copy: the defaults", path.display()),
+            Err(bad) => log::warn!("{} {error}, and its last good copy, {}, {bad}: the defaults", path.display(), backup.display()),
+        }
+        Err(Unreadable { error, copy })
+    }
+
+    /// The config at `path`; none when there is no file. Read as bytes, so a file that isn't text (what a crash can leave) isn't a
+    /// config, rather than unread.
+    fn parse(path: &Path) -> Result<Option<Self>, ReadError> {
+        match crate::home::read_settings(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| ReadError::NotAConfig(e.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(ReadError::Unread(e.to_string())),
+        }
+    }
+
+    /// Saves the config, pretty-printed, whole, then as its last good copy (`settings_file::save`, which makes `settings\` first). The
+    /// file there is checked first, as a run's setup checks it (`load_for_setup`) and `load_to_save` checks it only in part: one that
+    /// isn't a config is kept aside, and one that can't be read isn't written over. Only a calibration saves it: no cost to a test.
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        match Self::parse(path) {
+            Err(ReadError::Unread(why)) => return Err(unread(path, &why)),
+            Err(ReadError::NotAConfig(why)) if crate::home::protected_setting(path) => return Err(unread(path, &why)),
+            Err(ReadError::NotAConfig(_)) => drop(settings_file::keep_aside(path)),
+            Ok(_) => {}
+        }
+
+        let json = serde_json::to_string_pretty(self).map_err(|e| format!("Failed to serialize config: {}", e))?;
+        settings_file::save(path, json.as_bytes())?;
 
         log::info!("Saved app config to {}", path.display());
         Ok(())
     }
 
-    /// The config file's path: in TMR's home, beside the real exe or in `TMR_HOME` (`home.rs`)
+    /// The config file's path: in the `settings\` of TMR's home, beside the real exe or in `TMR_HOME`, one still in the old place, the
+    /// home itself, taken into it first (`settings_file::path`)
     pub fn default_path() -> PathBuf {
-        crate::home::dir().join(CONFIG_FILENAME)
+        settings_file::path(CONFIG_FILENAME)
     }
 
     /// Generate a machine ID from system information + BIOS info.
@@ -404,37 +510,208 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_fields_preserved() {
-        let path = std::env::temp_dir().join(format!("tmr-cfg-unknown-{}.json", std::process::id()));
-        std::fs::write(&path, r#"{"machine_id": "test", "some_future_field": 42}"#).unwrap();
-        let mut config = AppConfig::load(&path);
+    fn unknown_fields_survive_serialization() {
+        let json = r#"{"machine_id": "test", "some_future_field": 42}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.machine_id.as_deref(), Some("test"));
-        config.machine_id = Some("kept".to_string());
-        config.save(&path).unwrap();
-        let saved = std::fs::read_to_string(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert!(saved.contains("some_future_field"), "{saved}");
-        assert!(saved.contains("kept"), "{saved}");
-    }
-
-    #[test]
-    fn a_file_that_does_not_parse_is_not_overwritten() {
-        let path = std::env::temp_dir().join(format!("tmr-cfg-bad-{}.json", std::process::id()));
-        let original = "{\"calibration\": {\"not\": \"a calibration\"}}";
-        std::fs::write(&path, original).unwrap();
-        let config = AppConfig::load(&path);
-        assert!(config.calibration.is_none());
-        let err = config.save(&path).unwrap_err();
-        let kept = std::fs::read_to_string(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert!(err.contains("not overwriting"), "{err}");
-        assert_eq!(kept, original);
+        assert_eq!(serde_json::to_value(&config).unwrap()["some_future_field"], 42);
     }
 
     #[test]
     fn test_load_missing_file() {
         let config = AppConfig::load(std::path::Path::new("nonexistent_tmr_cfg.json"));
         assert!(config.machine_id.is_none());
+        let (config, unreadable) = AppConfig::load_for_setup(Path::new("nonexistent_tmr_cfg.json"));
+        assert!(config.machine_id.is_none() && unreadable.is_none(), "not there is the defaults, and nothing to say");
+    }
+
+    /// A config saved, and a temp a crashed save left: the save replaces the file whole, past the temp, and leaves none
+    #[test]
+    fn a_save_is_written_whole() {
+        let dir = crate::results::TempDir::new("app-config-save");
+        let path = PathBuf::from(dir.file("tmr-cfg.json"));
+        std::fs::write(dir.file("tmr-cfg.json.tmp"), b"{\"machine_id\": \"half of a").unwrap();
+        AppConfig { machine_id: Some("saved".to_string()), ..Default::default() }.save(&path).unwrap();
+        let (config, unreadable) = AppConfig::load_for_setup(&path);
+        assert_eq!((config.machine_id.as_deref(), unreadable), (Some("saved"), None));
+        assert!(!Path::new(&dir.file("tmr-cfg.json.tmp")).exists());
+    }
+
+    /// A tmr-cfg.json that isn't a config, as a crash while it was written in place leaves one, with no last good copy (a file from
+    /// before the copies): a run's setup says so, and keeps a copy as tmr-cfg.json.unreadable, over an older one, so the calibration it
+    /// saves loses nothing of it; a save it didn't read for (`--calibrate-cache`) keeps it aside too. One that can't be read is said as
+    /// such, not as no file, and isn't written over; a command that saves is refused at its load (`load_to_save`), so it has no defaults
+    /// to save once the file can be read again.
+    #[test]
+    fn a_config_that_isnt_one_is_kept_aside_and_one_unread_isnt_written_over() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = crate::results::TempDir::new("app-config-unreadable");
+        let path = PathBuf::from(dir.file("tmr-cfg.json"));
+        let kept = PathBuf::from(dir.file("tmr-cfg.json.unreadable"));
+        let copy = settings_file::backup_of(&path);
+        let half = b"{\n  \"machine_id\": \"0123456789abcdef\",\n  \"seal_calibration\": {\n    \"width_bits\": 2";
+        std::fs::write(&path, half).unwrap();
+        std::fs::write(&kept, b"an older one").unwrap();
+        let (config, unreadable) = AppConfig::load_for_setup(&path);
+        assert!(config.machine_id.is_none() && config.seal_calibration.is_none(), "the defaults");
+        let Some(UnreadableConfig::NotAConfig { why, kept: Ok(at), last_good: LastGoodCopy::Absent, .. }) = &unreadable else {
+            panic!("{unreadable:?}")
+        };
+        assert!(why.contains("EOF while parsing"), "{why}");
+        assert_eq!((at, std::fs::read(&kept).unwrap(), path.exists()), (&kept, half.to_vec(), true), "kept, over the older one");
+        let text = unreadable.as_ref().unwrap().text();
+        assert_eq!(
+            text,
+            format!("tmr-cfg.json was unreadable ({why}), so its calibrations are lost; it is kept as tmr-cfg.json.unreadable"),
+            "the setup's line"
+        );
+        AppConfig { machine_id: Some("measured".to_string()), ..Default::default() }.save(&path).unwrap();
+        assert_eq!((AppConfig::load(&path).machine_id.as_deref(), std::fs::read(&kept).unwrap()), (Some("measured"), half.to_vec()));
+
+        // Not text at all, as a crash can leave the file, and no copy: not a config, and a save it wasn't read for keeps it aside first
+        std::fs::write(&path, [0u8, 0, 0xFF, 0xFE]).unwrap();
+        std::fs::remove_file(&copy).unwrap();
+        assert!(AppConfig::load_to_save(&path).unwrap().machine_id.is_none(), "the defaults, for the save to keep it aside");
+        AppConfig { machine_id: Some("again".to_string()), ..Default::default() }.save(&path).unwrap();
+        assert_eq!((AppConfig::load(&path).machine_id.as_deref(), std::fs::read(&kept).unwrap()), (Some("again"), vec![0, 0, 0xFF, 0xFE]));
+
+        // Held by a program that shares it with no one: unread, said so, left as it is and not written over
+        std::fs::remove_file(&copy).unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let (_, unreadable) = AppConfig::load_for_setup(&path);
+        let Some(UnreadableConfig::Unread { why, last_good: LastGoodCopy::Absent, .. }) = &unreadable else { panic!("{unreadable:?}") };
+        assert!(unreadable.as_ref().unwrap().text().starts_with(&format!("tmr-cfg.json couldn't be read ({why})")));
+        let refused = AppConfig::default().save(&path).unwrap_err();
+        assert!(refused.contains("isn't written over"), "{refused}");
+        assert_eq!(AppConfig::load_to_save(&path).unwrap_err(), refused, "refused at the load");
+        drop(held);
+        assert_eq!(AppConfig::load(&path).machine_id.as_deref(), Some("again"), "as it was");
+        assert_eq!(AppConfig::load_to_save(&path).unwrap().machine_id.as_deref(), Some("again"));
+    }
+
+    /// Each save leaves its last good copy, the version just written. A tmr-cfg.json damaged since (a crash while it was written in
+    /// place, an edit gone wrong) takes the copy's calibrations, which the setup says, and is kept aside as before; the next save writes
+    /// over it, and the copy with it. One that isn't there is the defaults, its copy left alone: a file deleted to start again.
+    #[test]
+    fn a_damaged_config_takes_its_last_good_copy_and_an_absent_one_doesnt() {
+        let dir = crate::results::TempDir::new("app-config-last-good");
+        let path = PathBuf::from(dir.file("tmr-cfg.json"));
+        let copy = settings_file::backup_of(&path);
+        AppConfig { machine_id: Some("measured".to_string()), ..Default::default() }.save(&path).unwrap();
+        assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&path).unwrap(), "the version just written");
+
+        let half = b"{\n  \"machine_id\": \"meas";
+        std::fs::write(&path, half).unwrap();
+        assert_eq!(AppConfig::load(&path).machine_id.as_deref(), Some("measured"), "a look takes the copy");
+        let (shown, from) = AppConfig::load_with_source(&path);
+        assert_eq!((shown.machine_id.as_deref(), from), (Some("measured"), copy.clone()), "--show-calibration names the copy");
+        assert_eq!(AppConfig::load_to_save(&path).unwrap().machine_id.as_deref(), Some("measured"), "a save starts from the copy");
+        let (config, unreadable) = AppConfig::load_for_setup(&path);
+        assert_eq!(config.machine_id.as_deref(), Some("measured"));
+        let Some(UnreadableConfig::NotAConfig { why, kept: Ok(_), last_good: LastGoodCopy::Taken, .. }) = &unreadable else {
+            panic!("{unreadable:?}")
+        };
+        assert_eq!(
+            unreadable.as_ref().unwrap().text(),
+            format!(
+                "tmr-cfg.json was unreadable ({why}), so its calibrations are taken from its last good copy, tmr-cfg.json.bak; it is \
+                 kept as tmr-cfg.json.unreadable"
+            )
+        );
+        assert_eq!(std::fs::read(dir.file("tmr-cfg.json.unreadable")).unwrap(), half);
+        AppConfig { machine_id: Some("again".to_string()), ..config }.save(&path).unwrap();
+        assert_eq!((AppConfig::load(&path).machine_id, AppConfig::load(&copy).machine_id), (Some("again".into()), Some("again".into())));
+
+        std::fs::remove_file(&path).unwrap();
+        let (config, unreadable) = AppConfig::load_for_setup(&path);
+        assert_eq!((config.machine_id, unreadable), (None, None), "deleted: the defaults, and nothing to say");
+        assert_eq!(AppConfig::load(&path).machine_id, None);
+        assert!(copy.exists(), "the copy left alone");
+    }
+
+    /// A tmr-cfg.json damaged, and its last good copy too: the defaults, and the setup says both; one that can't be read takes its copy,
+    /// and still isn't saved over
+    #[test]
+    fn a_damaged_config_and_copy_are_the_defaults_and_an_unread_one_takes_its_copy() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = crate::results::TempDir::new("app-config-both-bad");
+        let path = PathBuf::from(dir.file("tmr-cfg.json"));
+        let copy = settings_file::backup_of(&path);
+        std::fs::write(&path, b"{\"machine_id\": ").unwrap();
+        std::fs::write(&copy, [0u8, 0]).unwrap();
+        let (config, unreadable) = AppConfig::load_for_setup(&path);
+        assert!(config.machine_id.is_none(), "the defaults");
+        let Some(UnreadableConfig::NotAConfig { why, last_good: LastGoodCopy::Bad(bad), .. }) = &unreadable else {
+            panic!("{unreadable:?}")
+        };
+        assert_eq!(
+            unreadable.as_ref().unwrap().text(),
+            format!(
+                "tmr-cfg.json was unreadable ({why}), and its last good copy, tmr-cfg.json.bak, is no good either ({bad}), so its \
+                 calibrations are lost; it is kept as tmr-cfg.json.unreadable"
+            )
+        );
+        let (shown, from) = AppConfig::load_with_source(&path);
+        assert_eq!((shown.machine_id, from), (None, path.clone()), "the defaults, named by the file");
+
+        AppConfig { machine_id: Some("measured".to_string()), ..Default::default() }.save(&path).unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let (config, unreadable) = AppConfig::load_for_setup(&path);
+        assert_eq!(config.machine_id.as_deref(), Some("measured"), "the copy's");
+        let Some(UnreadableConfig::Unread { why, last_good: LastGoodCopy::Taken, .. }) = &unreadable else { panic!("{unreadable:?}") };
+        assert_eq!(
+            unreadable.as_ref().unwrap().text(),
+            format!(
+                "tmr-cfg.json couldn't be read ({why}), so its calibrations are taken from its last good copy, tmr-cfg.json.bak, and \
+                 none measured is saved over it"
+            )
+        );
+        assert!(AppConfig::load_to_save(&path).is_err() && AppConfig::default().save(&path).is_err(), "not saved over");
+        drop(held);
+    }
+
+    /// A home whose `settings\` takes no new file (a share, a folder made without users' right to add one, as Program Files was to the
+    /// files beside tmr.exe in an install for all users): a save writes the file in place, and one that isn't a config can't be kept
+    /// aside, which the setup says, and is saved over. A rename in the folder would have kept it, as it needs no right to make a file
+    /// there, and left no tmr-cfg.json to save in (`settings_file::keep_aside`).
+    #[test]
+    fn where_no_file_can_be_made_beside_it_the_config_is_written_in_place() {
+        let dir = crate::results::TempDir::new("app-config-no-new-files");
+        let folder = PathBuf::from(dir.file(settings_file::FOLDER));
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("tmr-cfg.json");
+        std::fs::write(&path, b"{}").unwrap();
+        let _locked = crate::atomic_file::NoNewFiles::on(&folder);
+        AppConfig { machine_id: Some("in place".to_string()), ..Default::default() }.save(&path).unwrap();
+        assert_eq!(AppConfig::load(&path).machine_id.as_deref(), Some("in place"));
+
+        std::fs::write(&path, b"{\"machine_id\": ").unwrap();
+        let (_, unreadable) = AppConfig::load_for_setup(&path);
+        let Some(UnreadableConfig::NotAConfig { kept: Err(_), last_good: LastGoodCopy::Absent, .. }) = &unreadable else {
+            panic!("{unreadable:?}")
+        };
+        assert!(unreadable.as_ref().unwrap().text().ends_with("so the new one is saved over it"));
+        AppConfig { machine_id: Some("over it".to_string()), ..Default::default() }.save(&path).unwrap();
+        assert_eq!(AppConfig::load(&path).machine_id.as_deref(), Some("over it"));
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1, "no temp, nothing kept aside, no copy");
+    }
+
+    #[test]
+    fn concurrent_updates_keep_both_fields_and_the_backup() {
+        let dir = crate::results::TempDir::new("calibration-update");
+        let path = PathBuf::from(dir.file("tmr-cfg.json"));
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                AppConfig::update(&path, |c| c.memory_id = Some("memory".into())).unwrap();
+            });
+            barrier.wait();
+            AppConfig::update(&path, |c| c.machine_id = Some("machine".into())).unwrap();
+        });
+        let saved = AppConfig::load(&path);
+        assert_eq!((saved.memory_id.as_deref(), saved.machine_id.as_deref()), (Some("memory"), Some("machine")));
+        assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(settings_file::backup_of(&path)).unwrap());
     }
 
     #[test]
@@ -453,10 +730,11 @@ mod tests {
                     manufacturer: "UnknownMemoryMaker".to_string(),
                     serial_number: "12345678".to_string(),
                     part_number: "123456789-12345".to_string(),
-                    speed_mts: 4800,
+                    configured_mts: 4800,
                     memory_type: 0x22,
                     capacity_bytes: cap,
                     capacity_human: crate::smbios::format_capacity(cap),
+                    ..Default::default()
                 }
             }]),
             ..Default::default()
@@ -470,7 +748,7 @@ mod tests {
         assert_eq!(loaded.tsc_frequency_ghz, Some(2.496012345));
         assert_eq!(loaded.memory_modules.as_ref().unwrap().len(), 1);
         assert_eq!(loaded.memory_modules.as_ref().unwrap()[0].locator, "DIMM_A1");
-        assert_eq!(loaded.memory_modules.as_ref().unwrap()[0].speed_mts, 4800);
+        assert_eq!(loaded.memory_modules.as_ref().unwrap()[0].configured_mts, 4800);
     }
 
     use crate::calibration::test_seal_calibration;

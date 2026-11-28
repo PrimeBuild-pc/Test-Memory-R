@@ -76,7 +76,8 @@ jobs:
       run: python tools/build_release.py --locked
 
     # What the installer installs (dist/tmr.iss): tmr.exe; docs\, the guide, the licences and the third-party notices; configs\, its
-    # README and the two demo configs, which tmr.exe writes into the home TMR_HOME names (the runner's CPU passes its startup check)
+    # README and the two demo configs, which tmr.exe makes in a throwaway home (tools/demo_configs.py: in Program Files on the runner,
+    # which is elevated; Rust-nightly-build.yml runs it on every push, so this step is proven before a tag)
     - name: 📂 Stage the installer's files
       shell: pwsh
       run: |
@@ -89,10 +90,8 @@ jobs:
         cargo about generate --config dist\about.toml --manifest-path crates\tmr-app\Cargo.toml --output-file "$stage\docs\THIRD-PARTY-NOTICES.html" dist\about.hbs
         if ($LASTEXITCODE -ne 0) { throw "cargo about failed" }
         Copy-Item dist\configs\* "$stage\configs"
-        $env:TMR_HOME = (Resolve-Path $stage).Path
-        & "$stage\tmr.exe" --cli --create-demo-configs
-        if ($LASTEXITCODE -ne 0) { throw "tmr.exe --create-demo-configs failed" }
-        Remove-Item "$stage\results", "$stage\logs" -Recurse -ErrorAction SilentlyContinue
+        python tools/demo_configs.py "$stage\tmr.exe" "$stage\configs"
+        if ($LASTEXITCODE -ne 0) { throw "tools/demo_configs.py failed" }
         Get-ChildItem $stage -Recurse | Select-Object FullName, Length | Format-Table -AutoSize
 
     # Inno Setup 7.1, for its 64-bit setup (SetupArchitecture=x64). The runners and Chocolatey have only 6.7, so its own release, pinned

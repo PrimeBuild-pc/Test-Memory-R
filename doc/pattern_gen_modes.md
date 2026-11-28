@@ -123,7 +123,8 @@ inverse of the one before, so every data line toggles on every beat (under the 1
 models, between the transfers that carry payload: the last is partial). It packs the line as the
 native `switch` does (`pattern_gen::bus_flip_line`, `doc/pattern_spec.md`).
 - **The beat width** comes from `beat=`, else the DIMMs' SMBIOS memory type: 64-bit for DDR to
-  DDR4, 32-bit for DDR5 (two subchannels a DIMM), 16-bit for LPDDR4 and LPDDR5. With no type,
+  DDR4, 32-bit for DDR5 (two subchannels a DIMM), 16-bit for LPDDR4, LPDDR5 and LPDDR5X (which
+  reports LPDDR5's SMBIOS code). With no type,
   DDR5's 32 is assumed. The run logs which. LPDDR6's 12 and DDR6's 24 are models, set with
   `beat=lpddr6` or `beat=ddr6`: TMR hasn't verified their packet maps, so a burst's payload is
   taken to fill its transfers in order.

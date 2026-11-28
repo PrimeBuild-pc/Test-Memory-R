@@ -31,7 +31,7 @@ Choose your preferred action:
   B) Continue with standard 4KB pages this time (~5-10% slower, so less memory stress)
 
 Enter your choice (A/B): 
-⚠️  Continuing with standard 4KB pages (minpage=regular maxpage=regular for this run).
+⚠️  Continuing with standard 4KB pages (minpage=reg-page maxpage=reg-page for this run).
    Performance impact: ~5-10% slower than large pages
    Every test still runs and every pattern is still checked, but slower
    memory traffic is less stress, so marginal errors that only appear at
@@ -53,7 +53,7 @@ Choose your preferred action:
 
 Enter your choice (A/B): 
 ❌ Invalid choice. TMR will exit rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the sign-in, the input's end
@@ -69,7 +69,7 @@ Choose your preferred action:
 
 Enter your choice (A/B): 
 ❌ Invalid choice. TMR will exit rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the sign-in, junk
@@ -85,7 +85,7 @@ Choose your preferred action:
 
 Enter your choice (A/B): 
 ❌ Invalid choice. TMR will exit rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the sign-in, an input that isn't text
@@ -101,7 +101,7 @@ Choose your preferred action:
 
 Enter your choice (A/B): 
 ❌ Invalid choice. TMR will exit rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the sign-in through a group, under UAC on a domain PC, A
@@ -238,7 +238,7 @@ Nothing granted to Everyone: choose again.
 
 Enter your choice (A, B, Q or 1-3): 
 ❌ Invalid choice. TMR will exit, granting nothing, rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the grant, a broad pick, the input's end
@@ -265,7 +265,7 @@ Nothing granted to Everyone: choose again.
 
 Enter your choice (A, B, Q or 1-3): 
 ❌ Invalid choice. TMR will exit, granting nothing, rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the grant, B
@@ -286,7 +286,7 @@ Or grant it to a group PC\owner is in, then exit TMR and sign out and back in:
   ⚠️  BROAD, use with caution: most or all accounts are in it, and any program of any of these accounts can then lock RAM away from Windows.
 
 Enter your choice (A, B, Q or 1-3): 
-⚠️  Continuing with standard 4KB pages (minpage=regular maxpage=regular for this run), granting nothing.
+⚠️  Continuing with standard 4KB pages (minpage=reg-page maxpage=reg-page for this run), granting nothing.
    Performance impact: ~5-10% slower than large pages
    Every test still runs and every pattern is still checked, but slower
    memory traffic is less stress, so marginal errors that only appear at
@@ -335,7 +335,7 @@ Or grant it to a group PC\owner is in, then exit TMR and sign out and back in:
 
 Enter your choice (A, B, Q or 1-3): 
 ❌ Invalid choice. TMR will exit, granting nothing, rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the grant, the input's end
@@ -357,7 +357,7 @@ Or grant it to a group PC\owner is in, then exit TMR and sign out and back in:
 
 Enter your choice (A, B, Q or 1-3): 
 ❌ Invalid choice. TMR will exit, granting nothing, rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the grant, 0
@@ -379,7 +379,7 @@ Or grant it to a group PC\owner is in, then exit TMR and sign out and back in:
 
 Enter your choice (A, B, Q or 1-3): 
 ❌ Invalid choice. TMR will exit, granting nothing, rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the grant, out of range
@@ -401,7 +401,7 @@ Or grant it to a group PC\owner is in, then exit TMR and sign out and back in:
 
 Enter your choice (A, B, Q or 1-3): 
 ❌ Invalid choice. TMR will exit, granting nothing, rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the grant, under UAC on a domain PC
@@ -437,7 +437,7 @@ Choose your preferred action:
 
 Enter your choice (A, B or Q): 
 ❌ Invalid choice. TMR will exit, granting nothing, rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the administrator's, A
@@ -470,7 +470,7 @@ Choose your preferred action:
   B) Continue with standard 4KB pages this time (~5-10% slower, so less memory stress)
 
 Enter your choice (A/B): 
-⚠️  Continuing with standard 4KB pages (minpage=regular maxpage=regular for this run).
+⚠️  Continuing with standard 4KB pages (minpage=reg-page maxpage=reg-page for this run).
    Performance impact: ~5-10% slower than large pages
    Every test still runs and every pattern is still checked, but slower
    memory traffic is less stress, so marginal errors that only appear at
@@ -493,7 +493,7 @@ Choose your preferred action:
 
 Enter your choice (A/B): 
 ❌ Invalid choice. TMR will exit rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 
 ## the administrator's, the input's end
@@ -510,6 +510,6 @@ Choose your preferred action:
 
 Enter your choice (A/B): 
 ❌ Invalid choice. TMR will exit rather than run slower unasked.
-   minpage=regular maxpage=regular runs on standard 4KB pages without asking.
+   minpage=reg-page maxpage=reg-page runs on standard 4KB pages without asking.
 
 

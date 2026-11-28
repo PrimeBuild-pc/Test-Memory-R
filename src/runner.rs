@@ -452,6 +452,26 @@ fn apply_pattern_mode(defs: &mut [TestDefinition], mode: u32) {
     }
 }
 
+/// A TM5 import's Interleave Type 0 walks, picked again after the command line's `channels=` and `pattern-mode=`, which they follow
+/// (`config::interleave_0_walk`): channels=1 is type 1's walk, and a numbered mode has no grouped kernel, so visits a line, said.
+fn repick_interleave_0_walks(defs: &mut [TestDefinition], channels: u32) {
+    for def in defs.iter_mut() {
+        let native = def.config.native_program().is_some();
+        let Some(ctx) = def.config.parameter_context.as_mut().filter(|c| c.interleave_0) else { continue };
+        let before = ctx.access;
+        crate::config::interleave_0_walk(ctx, channels, native);
+        // Said once: the import already said it of a walk that hasn't changed
+        if let Some(access) = ctx.access.filter(|&access| !native && before != Some(access)) {
+            let period = access.period_lines;
+            log::warn!(
+                "{}: TM5's Interleave Type=0 visits 128 B, two lines, every {period} lines; TMR's numbered modes have no grouped walk, so \
+                 this one visits one line every {period}",
+                def.display_name
+            );
+        }
+    }
+}
+
 /// The command line's `sequence=` and `order=`, on every Mem-Sequence step: `sequence=` replaces its passes, `order=` the order its steps
 /// take when they name none. Checked as a config's are.
 fn apply_sequence(defs: &mut [TestDefinition], sequence: Option<&str>, order: Option<&str>) -> Result<(), String> {
@@ -844,11 +864,11 @@ pub struct RunSetup<'a> {
     pub cache_info: &'a CacheInfo,
 }
 
-/// What a run does with the cache calibration before its tests (`calibrate=`, TODO 22): measures one, and why; or rechecks the stored
-/// one (TODO 116), measuring again only if it has drifted
+/// What a run does with the cache calibration before its tests (`calibrate=`, TODO 22): measures one (why is the setup's to say,
+/// `CacheCalibrationState::Measuring`); or rechecks the stored one (TODO 116), measuring again only if it has drifted
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibrateFirst {
-    Measure(crate::frontend::MeasureWhy),
+    Measure,
     Recheck,
 }
 
@@ -1018,9 +1038,9 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
         log::info!("Applying CLI channels override: {} channel(s)", channels);
         for def in test_definitions.iter_mut() {
             if let Some(ref mut ctx) = def.config.parameter_context {
-                // Recompute stride if this test has stride_cachelines (SimpleTest)
-                if ctx.access.is_none() && ctx.stride_cachelines.is_some() && ctx.raw_parameter > 0 {
-                    let stride_cl = (channels as usize * ctx.raw_parameter as usize).saturating_sub(1);
+                // Recompute stride if this test has stride_cachelines (SimpleTest); an Interleave Type 0 walk is picked below
+                if !ctx.interleave_0 && ctx.access.is_none() && ctx.stride_cachelines.is_some() && ctx.raw_parameter > 0 {
+                    let stride_cl = crate::config::tm5_stride_lines(channels, ctx.raw_parameter);
                     ctx.stride_cachelines = Some(stride_cl);
                     ctx.stride_elements = Some(stride_cl * (def.config.cache_line_bytes / 8));
                     log::debug!(
@@ -1033,6 +1053,14 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
                 }
             }
         }
+    }
+
+    // After both: a numbered pattern-mode= changes the walk too
+    if channels_override.is_some() || pattern_mode_override.is_some() {
+        repick_interleave_0_walks(
+            &mut test_definitions,
+            channels_override.or(config.map(crate::config::ModernConfig::channels)).unwrap_or(2),
+        );
     }
 
     pair_native_rounds(&mut test_definitions);
@@ -1166,7 +1194,7 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
         fe.event(Run::AllocationStarting { min, max }.into());
     }
 
-    let crate::memory::stitched::StitchedAllocation { blocks: mut allocated_blocks, spans, elapsed, numa_nodes } =
+    let crate::memory::stitched::StitchedAllocation { blocks: mut allocated_blocks, spans, elapsed, numa_nodes, regular } =
         match allocate_all_blocks_new(&thread_blocks, &runtime_config) {
             Ok(allocation) => allocation,
             Err(e) => {
@@ -1191,7 +1219,8 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
     });
 
     // The allocation report (TODO 81). The request record goes with it.
-    let report = crate::reporting::converters::create_allocation_report(spans, elapsed, numa_nodes);
+    let mut report = crate::reporting::converters::create_allocation_report(spans, elapsed, numa_nodes);
+    report.regular = regular;
     fe.event(Run::Allocated(Box::new(report)).into());
 
     // The cache calibration on the run's own memory, before anything sizes from it (TODO 22): the plan's extents, the steps'
@@ -1211,7 +1240,7 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
             fe.event(Run::Rechecked(rechecked.map(Box::new)).into());
             (!held).then_some((on, drifted))
         }
-        Some((CalibrateFirst::Measure(_), _, on)) => on.map(|on| (on, false)),
+        Some((CalibrateFirst::Measure, _, on)) => on.map(|on| (on, false)),
         None => None,
     };
     if let Some((on, drifted)) = measure_on {
@@ -1364,7 +1393,8 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
 
     // The native patterns' seed and transfer width, once: with the seed (and the same layout) a run writes the same bytes again
     let (seed, beat, beat_source) = (crate::pattern::run_seed(), crate::pattern::transfer_beat(), crate::pattern::transfer_source());
-    log::info!(
+    // Debug: the 🎲 line (`Run::SuiteStarted`) says the same, and the log file has it
+    log::debug!(
         "Pattern seed {seed:#018x} ({}); transfer width {} ({beat_source}); rescan {}",
         if crate::pattern::seed_given() { "seed=" } else { "from the clock" },
         beat.map_or("unknown".to_string(), |b| format!("{} bits", b.bits())),
@@ -1382,8 +1412,8 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
     );
 
     let mut cycles_done = 0u32;
-    // When the results were last saved between cycles (TODO 72)
-    let mut last_save = suite_start;
+    // When the results are saved before the run's end (TODO 72)
+    let mut saves = SaveSchedule::new(suite_start);
     let outcome = loop {
         if cycle_limit.is_some_and(|limit| cycles_done >= limit) {
             break RunOutcome::Completed;
@@ -1396,12 +1426,17 @@ pub fn run_tests_with_layout_and_timing_filtered(setup: RunSetup, fe: &Arc<dyn F
         }
 
         let cycle = cycles_done + 1;
+        // Setup is over and the first cycle runs next: a file now, in progress with no cycle, so a run that crashes in its first cycle
+        // (10 to 25 minutes with a TM5 config) leaves one too
+        if cycle == 1 {
+            save_if_due(&test_run_result, SavePoint::Setup, &mut saves, suite_start, &progress.whea);
+        }
         progress.start_new_cycle(cycle);
         fe.event(Run::CycleStarted { cycle, limit: cycle_limit }.into());
 
         // Execute all tests in sequence for this cycle
         let end = execute_test_cycle(&cycle_ctx, cycle as u64);
-        last_save = after_cycle(&end, cycle, &test_run_result, &progress.whea, suite_start, last_save, fe.as_ref());
+        after_cycle(&end, cycle, &test_run_result, &progress.whea, suite_start, &mut saves, fe.as_ref());
         if let Some(stop) = end.stop {
             break stop;
         }
@@ -4769,7 +4804,7 @@ fn create_test_definitions_from_config(
                 id,
                 seal_use: seal_use(resolved_name),
                 seal_opt_out: test.seal_opt_out,
-                tm5_pattern: test.tm5_pattern,
+                tm5_pattern: test.tm5_pattern.clone(),
             }
         } else {
             // Convert to 'static str by leaking (safe for test names, small and finite set)
@@ -4786,7 +4821,7 @@ fn create_test_definitions_from_config(
                 id,
                 seal_use: seal_use(test_name),
                 seal_opt_out: test.seal_opt_out,
-                tm5_pattern: test.tm5_pattern,
+                tm5_pattern: test.tm5_pattern.clone(),
             }
         };
         tests.push(def);
@@ -4811,7 +4846,7 @@ pub fn detect_runtime_capabilities(alloc_config: &MemoryAllocationConfig) -> Run
 
     let large_pages_available = crate::memory::privileges::check_large_page_privilege().is_ok();
 
-    log::info!("Runtime capabilities detected: backend={:?}, large_pages_available={}", memory_backend, large_pages_available);
+    log::debug!("Runtime capabilities detected: backend={:?}, large_pages_available={}", memory_backend, large_pages_available);
 
     RuntimeConfig {
         memory_backend,
@@ -5078,10 +5113,11 @@ fn calibrate_on_allocation(
     // the pool takes it, after this; the workers, which would be pinned to the calibration's CPUs, don't exist yet
     let results = unsafe { test.run_on(base, bytes, page) }?;
     let path = crate::app_config::AppConfig::default_path();
-    let mut stored = crate::app_config::AppConfig::load(&path);
-    stored.update_machine_id(crate::tests::get_system_info(), crate::smbios::get_smbios());
-    stored.calibration = Some(results.clone());
-    let saved = stored.save(&path).map(|()| path);
+    let saved = crate::app_config::AppConfig::update(&path, |stored| {
+        stored.update_machine_id(crate::tests::get_system_info(), crate::smbios::get_smbios());
+        stored.calibration = Some(results.clone());
+    })
+    .map(|()| path);
     let mut table = Vec::new();
     let _ = crate::calibration::CalibrationTest::display_results(&results, cache_info, &mut table);
     Ok(crate::frontend::CalibratedNow { results, table: String::from_utf8_lossy(&table).into_owned(), saved })
@@ -5267,39 +5303,90 @@ fn display_and_save_results(
     }
 }
 
-/// A cycle's end, in the cycle loop. The results are saved between cycles when a save is due (TODO 72), so a run killed, lost or crashed
+/// A cycle's end, in the cycle loop. The results are saved when a save is due (`SaveSchedule`, TODO 72), so a run killed, lost or crashed
 /// from then on still leaves the cycles saved so far; then the cycle's end is shown, a partial one too, `partial` as its results record it
-/// (TODO 29). Returns when the results were last saved: now, or `last_save` when this cycle's weren't.
+/// (TODO 29).
 fn after_cycle(
     end: &CycleEnd, cycle: u32, test_run_result: &Mutex<TestRunResult>, whea: &crate::whea::WheaMonitor, suite_start: Instant,
-    last_save: Instant, fe: &dyn Frontend,
-) -> Instant {
-    let saved = if results_save_due(cycle, end.stop.is_some(), last_save.elapsed()) {
-        save_after_cycle(test_run_result, cycle, suite_start.elapsed(), whea);
-        Instant::now()
-    } else {
-        last_save
-    };
+    saves: &mut SaveSchedule, fe: &dyn Frontend,
+) {
+    save_if_due(test_run_result, SavePoint::Cycle { cycle, stopped: end.stop.is_some() }, saves, suite_start, whea);
     fe.event(Run::CycleFinished { cycle, partial: end.partial }.into());
-    saved
 }
 
-/// The least time between two saves of the results between cycles (TODO 72), but for the first cycle's and a stopped cycle's. Each save
-/// writes the whole file again, which grows with every cycle: a run of cycles of a few seconds that saved after each would spend a growing
-/// part of its time serializing, and write hundreds of GB over a night. Cycles of a minute or more are each saved.
+/// The least time between two saves of the results between cycles (TODO 72), but for the first cycle's and a stopped cycle's; the save at
+/// the end of setup is outside it. Each save writes the whole file again, which grows with every cycle: a run of cycles of a few seconds
+/// that saved after each would spend a growing part of its time serializing, and write hundreds of GB over a night. Cycles of a minute or
+/// more are each saved.
 const RESULTS_SAVE_INTERVAL: Duration = Duration::from_secs(60);
 
-/// Whether the results are saved after `cycle` (TODO 72): after the first, so a run has a file from then on, after one that `stopped`
-/// early, and after any other once `RESULTS_SAVE_INTERVAL` has passed `since_last_save`.
-fn results_save_due(cycle: u32, stopped: bool, since_last_save: Duration) -> bool {
-    cycle == 1 || stopped || since_last_save >= RESULTS_SAVE_INTERVAL
+/// Where a save of the results before the run's end falls (TODO 72)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavePoint {
+    /// Setup is over and the first cycle runs next: the file has the run's configuration and no cycle
+    Setup,
+    /// `cycle` has ended, `stopped` when it stopped early
+    Cycle { cycle: u32, stopped: bool },
 }
 
-/// Saves the results so far, after a cycle (TODO 72): marked in progress, with no outcome or status yet, for the final save
-/// (`display_and_save_results`) to replace. Silent, and never fatal: a failure is a warning, and the next save tries again.
-fn save_after_cycle(test_run_result: &Mutex<TestRunResult>, cycle: u32, elapsed: Duration, whea: &crate::whea::WheaMonitor) {
+impl std::fmt::Display for SavePoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SavePoint::Setup => write!(f, "at the end of setup"),
+            SavePoint::Cycle { cycle, .. } => write!(f, "after cycle {cycle}"),
+        }
+    }
+}
+
+/// When the results are saved before the run's end (TODO 72): once at the end of setup, so a run that crashes in its first cycle leaves a
+/// file; after the first cycle, so the file has a cycle's figures from then on; after one that stopped early; and after any other once
+/// `RESULTS_SAVE_INTERVAL` has passed since the last cycle's save. The setup's save isn't counted: the first cycle's is made whatever came
+/// before it, and the interval runs from there, as it did before setup saved.
+struct SaveSchedule {
+    /// The last cycle's save, or the suite's start before the first
+    last: Instant,
+}
+
+impl SaveSchedule {
+    fn new(suite_start: Instant) -> Self {
+        SaveSchedule { last: suite_start }
+    }
+
+    /// Whether the results are saved at `point`, `now`
+    fn due(&self, point: SavePoint, now: Instant) -> bool {
+        match point {
+            SavePoint::Setup => true,
+            SavePoint::Cycle { cycle, stopped } => {
+                cycle == 1 || stopped || now.saturating_duration_since(self.last) >= RESULTS_SAVE_INTERVAL
+            }
+        }
+    }
+
+    /// A save made at `point`, done `now`: a cycle's restarts the interval, the setup's doesn't
+    fn saved(&mut self, point: SavePoint, now: Instant) {
+        if let SavePoint::Cycle { .. } = point {
+            self.last = now;
+        }
+    }
+}
+
+/// Saves the results at `point` when `saves` has a save due there (`save_in_progress`), and counts it
+fn save_if_due(
+    test_run_result: &Mutex<TestRunResult>, point: SavePoint, saves: &mut SaveSchedule, suite_start: Instant,
+    whea: &crate::whea::WheaMonitor,
+) {
+    if saves.due(point, Instant::now()) {
+        save_in_progress(test_run_result, point, suite_start.elapsed(), whea);
+        saves.saved(point, Instant::now());
+    }
+}
+
+/// Saves the results so far, at `point` before the run's end (TODO 72): marked in progress, with no outcome or status yet, for the final
+/// save (`display_and_save_results`) to replace; at the end of setup, with no cycle. Silent, and never fatal: a failure is a warning, and
+/// the next save tries again.
+fn save_in_progress(test_run_result: &Mutex<TestRunResult>, point: SavePoint, elapsed: Duration, whea: &crate::whea::WheaMonitor) {
     let Ok(mut result) = test_run_result.lock() else {
-        log::warn!("Couldn't lock the results to save them after cycle {cycle}");
+        log::warn!("Couldn't lock the results to save them {point}");
         return;
     };
     // record=off: nothing to save
@@ -5311,7 +5398,7 @@ fn save_after_cycle(test_run_result: &Mutex<TestRunResult>, cycle: u32, elapsed:
     result.set_whea_totals(whea.counts(), whea.is_active());
     result.overall_stats.in_progress = true;
     if let Err(e) = result.save_atomic(&result.save_path()) {
-        log::warn!("Failed to save the results after cycle {cycle}: {e}");
+        log::warn!("Failed to save the results {point}: {e}");
     }
 }
 
@@ -7271,7 +7358,13 @@ mod tests {
         let cache_info = crate::tests::get_cache_info();
         let (mut defs, _) = create_test_definitions_from_config(&modern, cache_info).unwrap();
         assert_eq!(defs.iter().map(|d| d.id.as_deref().unwrap()).collect::<Vec<_>>(), ["1", "2", "3", "1"]);
-        let source = Tm5PatternSource { mode: 2, param0: 0x77777777, param1: 0x33333333 };
+        let source = Tm5PatternSource {
+            mode: 2,
+            param0: 0x77777777,
+            param1: 0x33333333,
+            written: Some(["0x77777777".into(), "0x33333333".into()]),
+            legacy_inputs: false,
+        };
         assert_eq!(defs[0].tm5_pattern, Some(source));
         assert_eq!((defs[0].config.pattern_param0, defs[0].config.pattern_param1), (None, None));
         assert!(defs[2].tm5_pattern.is_none(), "a mirror's fields are not a SimpleTest conversion");
@@ -7305,6 +7398,13 @@ mod tests {
         defs[0].config.pattern_param0 = Some(1);
         defs[0].config.pattern_param1 = Some(2);
         assert_eq!(Conversion::capture(&defs[0]).unwrap().disposition, Disposition::RetainedForNumberedMode);
+        let source = defs[0].tm5_pattern.as_mut().unwrap();
+        source.param1 = u64::MAX;
+        source.legacy_inputs = true;
+        defs[0].config.pattern_param1 = Some(u64::from(u32::MAX));
+        assert_eq!(Conversion::capture(&defs[0]).unwrap().disposition, Disposition::RetainedForNumberedMode, "legacy -1");
+        defs[0].config.pattern_param1 = Some(2);
+        assert_eq!(Conversion::capture(&defs[0]).unwrap().disposition, Disposition::OverriddenForNumberedMode);
 
         // Older exported imports have no provenance: load them without inventing source values or a conversion note.
         for entry in exported["test_sequence"].as_array_mut().unwrap() {
@@ -7313,6 +7413,39 @@ mod tests {
         let older: ModernConfig = serde_json::from_value(exported).unwrap();
         let (defs, _) = create_test_definitions_from_config(&older, cache_info).unwrap();
         assert!(notes(&defs).is_empty());
+    }
+
+    /// TODO 135: a TM5 import's Interleave Type 0 walk is picked again after the command line's channels= and pattern-mode=: a numbered
+    /// mode visits a line every 2 x Parameter, as it has no grouped kernel (the run was refused), channels=1 is type 1's walk, and
+    /// channels=2 gives a Channels=1 .cfg TM5's 128-bit one. It survives an export to JSON.
+    #[test]
+    fn interleave_0_walks_follow_the_command_line() {
+        let imported = |channels: u32| {
+            let cfg = format!(
+                "[Main Section]\nTest Sequence=1\n[Global Memory Setup]\nChannels={channels}\nInterleave Type=0\n\
+                 [Test1]\nFunction=SimpleTest\nParameter=8\n"
+            );
+            let modern = crate::config::LegacyConfig::parse_legacy_format(&cfg).unwrap().to_modern_config().unwrap();
+            let exported: crate::config::ModernConfig = serde_json::from_value(serde_json::to_value(modern).unwrap()).unwrap();
+            create_test_definitions_from_config(&exported, crate::tests::get_cache_info()).unwrap().0
+        };
+        let walk = |defs: &[TestDefinition]| {
+            let ctx = defs[0].config.parameter_context.as_ref().unwrap();
+            (ctx.access.map(|a| (a.period_lines, a.group_lines)), ctx.stride_cachelines)
+        };
+        let mut defs = imported(2);
+        assert_eq!(walk(&defs), (Some((16, 2)), Some(15)));
+        apply_pattern_mode(&mut defs, 0);
+        assert!(crate::config::validate_access(&defs[0].config).is_err());
+        repick_interleave_0_walks(&mut defs, 2);
+        assert_eq!(walk(&defs), (Some((16, 1)), Some(15)));
+        crate::config::validate_access(&defs[0].config).unwrap();
+        repick_interleave_0_walks(&mut defs, 1);
+        assert_eq!(walk(&defs), (None, Some(7)));
+        let mut defs = imported(1);
+        assert_eq!(walk(&defs), (None, Some(7)));
+        repick_interleave_0_walks(&mut defs, 3);
+        assert_eq!(walk(&defs), (Some((16, 2)), Some(15)));
     }
 
     /// A dependent native Bench-Verify follows its own family's Bench-Init and no other (Astra's review: the Verify's identity was its
@@ -7556,14 +7689,17 @@ mod tests {
         let test_run_result = Mutex::new(result);
         let whea = crate::whea::WheaMonitor::new();
         let start = Instant::now();
+        let mut saves = SaveSchedule::new(start);
         // The first cycle is saved; the second isn't due, so the last save stands
-        let saved = after_cycle(&end, 1, &test_run_result, &whea, start, start, &fe);
+        after_cycle(&end, 1, &test_run_result, &whea, start, &mut saves, &fe);
+        let saved = saves.last;
         std::fs::remove_file(&fe.path).unwrap();
         let whole = CycleEnd { stop: None, partial: false };
-        assert_eq!(after_cycle(&whole, 2, &test_run_result, &whea, start, saved, &fe), saved, "not due");
+        after_cycle(&whole, 2, &test_run_result, &whea, start, &mut saves, &fe);
+        assert_eq!(saves.last, saved, "not due");
         // A cycle that stopped early is saved
         let stopped = CycleEnd { stop: Some(RunOutcome::Interrupted), partial: true };
-        after_cycle(&stopped, 3, &test_run_result, &whea, start, saved, &fe);
+        after_cycle(&stopped, 3, &test_run_result, &whea, start, &mut saves, &fe);
         assert_eq!(*fe.ends.lock().unwrap(), [(1, false, true), (2, false, false), (3, true, true)]);
     }
 
@@ -7620,7 +7756,9 @@ mod tests {
         let whea = crate::whea::WheaMonitor::new();
 
         // Silent: it has no frontend to tell, and logs nothing but a failure
-        let ((), records) = records_of(|| save_after_cycle(&test_run_result, 2, Duration::from_secs(65), &whea));
+        let ((), records) = records_of(|| {
+            save_in_progress(&test_run_result, SavePoint::Cycle { cycle: 2, stopped: false }, Duration::from_secs(65), &whea)
+        });
         assert!(records.is_empty(), "a save between cycles is silent: {records:?}");
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("\"outcome\"") && !text.contains("\"status\""), "no outcome or status mid-run");
@@ -7664,14 +7802,96 @@ mod tests {
         assert!(!std::path::Path::new(&format!("{path}.tmp")).exists());
     }
 
-    /// TODO 72: the results are saved after the first cycle, after one that stopped early, and after any other once `RESULTS_SAVE_INTERVAL`
-    /// has passed since the last save.
+    /// TODO 72: the results are saved at the end of setup; after the first cycle, however soon after the setup's save, which the interval
+    /// doesn't count; after one that stopped early; and after any other once `RESULTS_SAVE_INTERVAL` has passed since the last cycle's
+    /// save.
     #[test]
-    fn the_results_are_saved_at_most_once_an_interval_between_cycles() {
-        let soon = Duration::from_secs(5);
-        assert!(results_save_due(1, false, soon), "the first cycle");
-        assert!(results_save_due(7, true, soon), "a cycle that stopped early");
-        assert!(!results_save_due(7, false, soon));
-        assert!(results_save_due(7, false, RESULTS_SAVE_INTERVAL));
+    fn the_results_are_saved_at_setups_end_then_at_most_once_an_interval_between_cycles() {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let cycle = |cycle: u32| SavePoint::Cycle { cycle, stopped: false };
+        let mut saves = SaveSchedule::new(start);
+
+        assert!(saves.due(SavePoint::Setup, at(0)), "the end of setup");
+        saves.saved(SavePoint::Setup, at(1));
+        assert_eq!(saves.last, start, "the setup's save isn't counted");
+        assert!(saves.due(cycle(1), at(2)), "the first cycle, a second after the setup's save");
+        saves.saved(cycle(1), at(2));
+
+        assert!(!saves.due(cycle(2), at(30)), "a cycle 28 s after the first cycle's save");
+        assert!(saves.due(SavePoint::Cycle { cycle: 2, stopped: true }, at(30)), "a cycle that stopped early");
+        assert!(!saves.due(cycle(3), at(61)), "59 s after the first cycle's save");
+        assert!(saves.due(cycle(3), at(62)), "60 s after it");
+        saves.saved(cycle(3), at(62));
+        assert!(!saves.due(cycle(4), at(121)), "the interval runs from the last cycle's save");
+        assert!(saves.due(cycle(4), at(122)));
+        assert!(saves.due(SavePoint::Setup, at(122)), "setup's is never held back");
+
+        // A first cycle that ran over the interval is saved as the first, and the interval runs from its save
+        let mut saves = SaveSchedule::new(start);
+        saves.saved(SavePoint::Setup, at(0));
+        assert!(saves.due(cycle(1), at(900)));
+        saves.saved(cycle(1), at(900));
+        assert!(!saves.due(cycle(2), at(910)));
+    }
+
+    /// TODO 72: the save at the end of setup is in progress with no cycle, no steps, no outcome or status, silent; it reads everywhere TMR
+    /// reads a results file (`--show-results`, which says where it is from, with no pass and the seal on, `--compare-results`, the
+    /// window's Compare tab, where it invalidates the comparison and has no overall changes, `--sanitize`); and record=off writes
+    /// nothing.
+    #[test]
+    fn a_results_file_from_the_end_of_setup_reads_everywhere() {
+        let dir = crate::results::TempDir::new("setup-save");
+        let path = dir.file("TMR_2026-11-02_14-03-07.json");
+        let whea = crate::whea::WheaMonitor::new();
+        let unsaved = |record: crate::results::Record| {
+            let mut result = TestRunResult::new(Default::default());
+            (result.metadata.filename, result.metadata.record) = (path.clone(), record);
+            result.run_config.execution.seal = Some("tmr-256".to_string());
+            Mutex::new(result)
+        };
+
+        save_in_progress(&unsaved(crate::results::Record::Off), SavePoint::Setup, Duration::ZERO, &whea);
+        assert!(!std::path::Path::new(&path).exists(), "record=off: no file");
+
+        let ((), records) =
+            records_of(|| save_in_progress(&unsaved(crate::results::Record::Full), SavePoint::Setup, Duration::ZERO, &whea));
+        assert!(records.is_empty(), "silent: {records:?}");
+        let saved = TestRunResult::load_from_file(&path).unwrap();
+        let stats = &saved.overall_stats;
+        assert_eq!((stats.in_progress, stats.cycles_completed, stats.total_runtime_secs), (true, 0, 0));
+        assert!(saved.cycles.is_empty() && stats.per_step_averages.is_empty());
+        assert_eq!((stats.outcome.as_deref(), stats.status.as_deref()), (None, None));
+
+        let shown = crate::commands::saved_run(&path).unwrap_or_else(|e| panic!("--show-results: {e}"));
+        assert!(
+            shown.head.starts_with("⚠️  The run never finished") && shown.head.contains("from the end of setup"),
+            "--show-results: {}",
+            shown.head
+        );
+        assert!(shown.work.is_none(), "no thread ran");
+        assert!(!shown.summary.tested() && shown.summary.seal.is_some(), "no test ran, sealed");
+
+        let finished = crate::test_support::results_file_finished();
+        let console = crate::results::compare_test_results(&finished.path, &path).unwrap_or_else(|e| panic!("--compare-results: {e}"));
+        let text = console.to_text_report();
+        assert!(text.contains("⛔ NOT A LIKE-FOR-LIKE") && text.contains("saved mid-run with no cycle"), "{text}");
+        let window = crate::commands::compare_results(&path, &finished.path).unwrap_or_else(|e| panic!("the Compare tab: {e}"));
+        let no_changes = "  None: a run with no cycle has no figures";
+        assert!(window.text.contains("saved mid-run with no cycle") && window.text.contains(no_changes), "{}", window.text);
+        assert!(!window.text.contains("MiB/s"), "{}", window.text);
+
+        let id = saved.metadata.run_id.expect("a run ID");
+        std::fs::write(dir.file("TMR_2026-11-02_14-03-07.log"), format!("# TMR\n# run id: {id}\n")).unwrap();
+        crate::sanitize::sanitize(&path).unwrap_or_else(|e| panic!("--sanitize: {e}"));
+        let original = std::path::Path::new(&path);
+        let copies: Vec<std::path::PathBuf> = std::fs::read_dir(original.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|file| file.extension().is_some_and(|extension| extension == "json") && file != original)
+            .collect();
+        let [copy] = &copies[..] else { panic!("--sanitize: one copy of the results file, not {copies:?}") };
+        let copy = TestRunResult::load_from_file(copy.to_str().unwrap()).unwrap();
+        assert_eq!((copy.overall_stats.in_progress, copy.cycles.len()), (true, 0), "the sanitized copy");
     }
 }

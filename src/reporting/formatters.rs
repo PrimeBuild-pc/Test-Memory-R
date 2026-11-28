@@ -224,6 +224,16 @@ impl DefaultFormatter {
     }
 }
 
+/// The 4 KiB column's header: how the run's 4 KiB pages are held, when it has any (TODO 131; one kind a run, `minpage=`)
+fn regular_header(report: &AllocationReport) -> &'static str {
+    use crate::memory::allocator::RegularPages;
+    match report.regular {
+        Some(RegularPages::Locked) => "4 KiB locked",
+        Some(RegularPages::Pageable) => "4 KiB pageable",
+        None => "4 KiB",
+    }
+}
+
 fn count_or_dash(count: usize) -> String {
     if count == 0 { "-".to_string() } else { count.to_string() }
 }
@@ -1192,15 +1202,20 @@ impl ReportFormatter for DefaultFormatter {
 
     fn prepare_final_summary_overview_table(&self, report: &FinalTestSummaryReport) -> TableData {
         // Every error fails the run, WHEA's among them: a WHEA event means the hardware reported a fault whether or not a verify read could
-        // see it. First row, because it is the answer the whole table exists to give — everything below it is the supporting detail.
+        // see it. First row, because it is the answer the whole table exists to give — everything below it is the supporting detail. A
+        // run with no cycle tested nothing, so it didn't pass (`tested`).
         let errors = report.errors();
-        let passed = errors.total() == 0;
+        let result = match (errors.total(), report.tested()) {
+            (0, true) => "PASS ✅",
+            (0, false) => "NO TEST RAN",
+            _ => "FAIL ❌",
+        };
 
         TableData::new()
             .with_title("Final Test Summary - Overview")
             .add_header("Metric", ColumnAlignment::Left)
             .add_header("Value", ColumnAlignment::Right)
-            .add_row(vec!["Result".to_string(), if passed { "PASS ✅".to_string() } else { "FAIL ❌".to_string() }])
+            .add_row(vec!["Result".to_string(), result.to_string()])
             .add_row(vec!["Runtime (HH:MM:SS)".to_string(), report.total_runtime.clone()])
             .add_row(vec!["Cycles Completed".to_string(), report.cycles_completed.to_string()])
             .add_row(vec!["Total Data Processed".to_string(), format!("{:.2} GiB", report.total_data_processed_gib)])
@@ -1216,6 +1231,7 @@ impl ReportFormatter for DefaultFormatter {
                 // Operations table's.
                 "  - Seal".to_string(),
                 match &report.seal {
+                    Some(_) if !report.tested() => "on, nothing checked".to_string(),
                     Some(seal) => format!("{} ({} in the final checks)", errors.seal, seal.final_check_errors),
                     None => "off".to_string(),
                 },
@@ -1616,7 +1632,7 @@ impl ReportFormatter for DefaultFormatter {
             .add_header("Allocated", ColumnAlignment::Right)
             .add_header("1 GiB", ColumnAlignment::Right)
             .add_header("2 MiB", ColumnAlignment::Right)
-            .add_header("4 KiB", ColumnAlignment::Right);
+            .add_header(regular_header(report), ColumnAlignment::Right);
         if multi {
             table = table.add_header("Local", ColumnAlignment::Right).add_header("Remote", ColumnAlignment::Right);
         }
@@ -1709,7 +1725,7 @@ impl ReportFormatter for DefaultFormatter {
             .add_header("Allocated", ColumnAlignment::Right)
             .add_header("1 GiB", ColumnAlignment::Right)
             .add_header("2 MiB", ColumnAlignment::Right)
-            .add_header("4 KiB", ColumnAlignment::Right);
+            .add_header(regular_header(report), ColumnAlignment::Right);
         if multi {
             table = table.add_header("Local", ColumnAlignment::Right).add_header("Remote", ColumnAlignment::Right);
         }

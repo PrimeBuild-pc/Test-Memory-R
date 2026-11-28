@@ -10,11 +10,11 @@ use std::time::{Duration, Instant};
 
 use chrono::TimeZone;
 use tmr::frontend::{
-    BiosInfo, CacheCalibrationState, CpuPerformance, CpuPerformanceSummary, ErrorCounts, ErrorMode, Frontend, Hypervisor, LiveFigures,
-    MeasureWhy, MemoryModule, MemoryStatus, NotRun, PageSizeLevel, ParamNote, PerformanceByCpuReport, PerformanceByPhysicalCoreReport,
-    PerformanceByThreadReport, PhysicalCorePerformance, ProgressSnapshot, ProgressTracker, Run, RunOutcome, RunStatus,
-    SealCalibrationState, SealOp, Selection, Setup, SkipSpec, Stage, StepConfigLine, StepReport, SystemIdentity, TestSnapshot, TestSummary,
-    ThreadPerformance, ThreadPriority, WaitLeft, WheaCounts, WorkerStart, WorkersReport,
+    BiosInfo, CacheCalibrationState, CpuPerformance, CpuPerformanceSummary, ErrorCounts, ErrorMode, Frontend, Hypervisor, LastGoodCopy,
+    LiveFigures, MeasureWhy, MemoryModule, MemoryStatus, NotRun, PageSizeLevel, ParamNote, PerformanceByCpuReport,
+    PerformanceByPhysicalCoreReport, PerformanceByThreadReport, PhysicalCorePerformance, ProgressSnapshot, ProgressTracker, Run,
+    RunOutcome, RunStatus, SealCalibrationState, SealOp, Selection, Setup, SkipSpec, Stage, StepConfigLine, StepReport, SystemIdentity,
+    TestSnapshot, TestSummary, ThreadPerformance, ThreadPriority, UnreadableConfig, WaitLeft, WheaCounts, WorkerStart, WorkersReport,
 };
 use tmr::session::{SessionEnd, Stopped};
 use tmr::test_support::failing_bits;
@@ -403,6 +403,21 @@ fn setup_events_print_as_their_golden() {
     let fe = CliFrontend::new();
     let at = |day| chrono::Utc.with_ymd_and_hms(2026, 10, day, 9, 5, 0).unwrap();
     let args = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let not_a_config = |kept: Result<&str, &str>, last_good| UnreadableConfig::NotAConfig {
+        path: r"C:\TMR\settings\tmr-cfg.json".into(),
+        why: "EOF while parsing an object at line 9 column 0".to_string(),
+        kept: kept.map(Into::into).map_err(str::to_string),
+        last_good,
+    };
+    let unreadable = |kept: Result<&str, &str>, last_good| {
+        Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::Unreadable(not_a_config(kept, last_good))))
+    };
+    let unread = |last_good| UnreadableConfig::Unread {
+        path: r"C:\TMR\settings\tmr-cfg.json".into(),
+        why: "The process cannot access the file because it is being used by another process. (os error 32)".to_string(),
+        last_good,
+    };
+    let bad_copy = || LastGoodCopy::Bad("EOF while parsing a value at line 3 column 12".to_string());
     let selection = |error_mode, pinned, skip, skipped: &[usize], avoid_smt_doubling, cycles, duration_secs| {
         Setup::Selection(Box::new(Selection {
             error_mode,
@@ -422,8 +437,12 @@ fn setup_events_print_as_their_golden() {
             window_priority: ThreadPriority::Realtime,
         }))
     };
-    let large_pages =
-        |usable, min_page: &str, min_needs_large| Setup::LargePageStatus { usable, min_page: min_page.to_string(), min_needs_large };
+    let large_pages = |usable, min_page: &str, min_needs_large, right_held| Setup::LargePageStatus {
+        usable,
+        min_page: min_page.to_string(),
+        min_needs_large,
+        right_held,
+    };
     let topology = |smt_p_cores, e_cores_skipped_first| Setup::CpuTopology {
         report: Box::new(crate::renderer::tests::cpu_topology_report()),
         smt_p_cores,
@@ -435,7 +454,7 @@ fn setup_events_print_as_their_golden() {
         (
             "every parameter note",
             Setup::ParamNotes(vec![
-                ParamNote::MinPage("regular".to_string()),
+                ParamNote::MinPage("reg-page".to_string()),
                 ParamNote::MaxPage("large".to_string()),
                 ParamNote::Block("hugechunk", "2GiB".to_string()),
                 ParamNote::Block("blkround", "down".to_string()),
@@ -477,17 +496,55 @@ fn setup_events_print_as_their_golden() {
             account: r"PC\owner".to_string(),
             outcome: Err("LsaAddAccountRights: Access is denied. (5, NTSTATUS 0xC0000022)".to_string()),
         }),
+        // As `memory::diagnose_large_pages` reads in the usual run: the right held but off, as Windows starts every process
         ("what the check did", Setup::LargePageDiagnostic {
-            report: "🔍 Large Page Diagnostic\n  Privilege: assigned and enabled\n  Test allocation: 2 MiB, succeeded".to_string(),
+            report: "🔍 Large page check\n👤 User: PC\\owner\n✅ Lock pages in memory (SeLockMemoryPrivilege): this sign-in has it, \
+                     switched on for this run\n✅ Large-page test allocation (2 MiB): OK\n"
+                .to_string(),
         }),
-        ("large pages usable", large_pages(true, "large", true)),
-        ("large pages not usable, and minpage needs them", large_pages(false, "large", true)),
-        ("large pages not usable, and minpage doesn't need them", large_pages(false, "regular", false)),
+        ("large pages usable", large_pages(true, "large", true, true)),
+        ("large pages not usable, and minpage needs them", large_pages(false, "large", true, false)),
+        // The right held, its check failed (no 2 MiB page from Windows): a restart, not --setup-large-pages, which grants nothing
+        ("large pages not usable, the right held, and minpage needs them", large_pages(false, "reg-lock", true, true)),
+        ("large pages not usable, and minpage doesn't need them", large_pages(false, "reg-page", false, false)),
         ("the cache calibration", Setup::CacheCalibration(CacheCalibrationState::Loaded { at: at(20) })),
         ("no cache calibration", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::NoneStored))),
         ("another machine's cache calibration", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::OtherHardware))),
         ("one measured one thread only", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::OneThreadOnly))),
         ("calibrate=always", Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::Always))),
+        // tmr-cfg.json there but not taken: not a config, kept aside or not (a settings\ that takes no new file from a user); unread; with
+        // no last good copy, or one no good either
+        (
+            "a tmr-cfg.json that isn't a config, kept aside",
+            unreadable(Ok(r"C:\TMR\settings\tmr-cfg.json.unreadable"), LastGoodCopy::Absent),
+        ),
+        ("a tmr-cfg.json that isn't a config, saved over", unreadable(Err("Access is denied. (os error 5)"), LastGoodCopy::Absent)),
+        (
+            "a tmr-cfg.json that can't be read",
+            Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::Unreadable(unread(LastGoodCopy::Absent)))),
+        ),
+        (
+            "a tmr-cfg.json that isn't a config, nor its last good copy",
+            unreadable(Ok(r"C:\TMR\settings\tmr-cfg.json.unreadable"), bad_copy()),
+        ),
+        (
+            "a tmr-cfg.json that isn't a config, nor its last good copy, saved over",
+            unreadable(Err("Access is denied. (os error 5)"), bad_copy()),
+        ),
+        (
+            "a tmr-cfg.json that can't be read, nor its last good copy",
+            Setup::CacheCalibration(CacheCalibrationState::Measuring(MeasureWhy::Unreadable(unread(bad_copy())))),
+        ),
+        // Its last good copy taken in its place: a line of its own, before the calibrations, which are the copy's
+        (
+            "a tmr-cfg.json that isn't a config, its last good copy taken",
+            Setup::ConfigRestored(not_a_config(Ok(r"C:\TMR\settings\tmr-cfg.json.unreadable"), LastGoodCopy::Taken)),
+        ),
+        (
+            "a tmr-cfg.json that isn't a config, its last good copy taken, not kept aside",
+            Setup::ConfigRestored(not_a_config(Err("Access is denied. (os error 5)"), LastGoodCopy::Taken)),
+        ),
+        ("a tmr-cfg.json that can't be read, its last good copy taken", Setup::ConfigRestored(unread(LastGoodCopy::Taken))),
         ("calibrate=recheck", Setup::CacheCalibration(CacheCalibrationState::Rechecking { at: at(20) })),
         ("the cache calibration off", Setup::CacheCalibration(CacheCalibrationState::Disabled)),
         ("the seal calibration", Setup::SealCalibration(SealCalibrationState::Loaded { bits: 256, at: at(21) })),
@@ -511,16 +568,23 @@ fn setup_events_print_as_their_golden() {
             report: Box::new(crate::renderer::tests::system_info_report()),
             memory_modules: vec![
                 MemoryModule {
+                    slot: "A-2".to_string(),
                     locator: "DIMM_A2".to_string(),
                     manufacturer: "G Skill".to_string(),
                     part_number: "F5-6000J3038F16G".to_string(),
                     serial_number: "00000000".to_string(),
-                    speed_mts: 6000,
+                    configured_mts: 6000,
                     memory_type: 0x22,
                     capacity_bytes: 16 << 30,
                     ..Default::default()
                 },
-                MemoryModule { locator: "DIMM_B2".to_string(), capacity_bytes: 16 << 30, memory_type: 0x22, ..Default::default() },
+                MemoryModule {
+                    slot: "B-2".to_string(),
+                    locator: "DIMM_B2".to_string(),
+                    capacity_bytes: 16 << 30,
+                    memory_type: 0x22,
+                    ..Default::default()
+                },
             ],
             system: SystemIdentity {
                 manufacturer: "ASUS".to_string(),

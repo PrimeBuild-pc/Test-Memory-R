@@ -40,16 +40,21 @@ compile_error!(
 
 // The engine. Its public items are what tmr.exe (`crates/tmr-app`), the CLI (`crates/tmr-cli`) and the window (`crates/tmr-gui`) call:
 // `session` (a command line's setup and run), `frontend` (the interface a session is shown through, with the types its events carry),
-// `commands` (the one-shot commands), `cpu_check` (whether this CPU can run TMR), `home` (the folder TMR keeps its files in), `logfile`,
-// `BUILD`, `request_stop` and `memory_status` (RAM free now, before a run). Everything else is private, so `dead_code` checks it. While `main.rs` held the CLI and every module here
-// was `pub`, all of them counted as public API, and an uncalled `pub fn` was never reported (TODO 69 E).
+// `commands` (the one-shot commands), `cpu_check` (whether this CPU can run TMR), `home` (the folder TMR keeps its files in),
+// `atomic_file` (its files written whole), `settings_file` (its settings files' folder, saves and last good copies), `logfile`, `BUILD`
+// and `request_stop`. Everything else is private, so `dead_code` checks it.
+// While `main.rs` held the CLI and every module here was `pub`, all of them counted as public API, and an uncalled `pub fn` was never
+// reported (TODO 69 E).
+pub mod atomic_file; // files written whole, a temp put in their place: the results, tmr-cfg.json and the window's window.json
 pub mod commands; // the one-shot commands, writing to their caller's writer (TODO 29)
 mod companions; // ZenTimings and LibreHardwareMonitor, downloaded on request (TODO 122)
 pub mod cpu_check; // whether this CPU has the features TMR is built for (TODO 104)
 pub mod frontend; // the engine's interface to whoever shows a session: its events (TODO 29)
 pub mod home; // the folder TMR keeps its configs, results, logs and settings in: beside the exe, or TMR_HOME (TODO 104)
 pub mod logfile; // the log file, which every frontend's logger writes (TODO 29)
+pub mod sanitize; // copies of a run's results file and log without its serials, accounts and names, to post (--sanitize)
 pub mod session; // a command line's setup, then its run, through a frontend (TODO 29)
+pub mod settings_file; // tmr-cfg.json and window.json in the home's settings\: taken from the old place, saved with a last good copy
 pub use build_info::BUILD;
 pub use companions::dir as companions_dir;
 pub use external::{ExternalReading, line as external_line, sample as external_sample};

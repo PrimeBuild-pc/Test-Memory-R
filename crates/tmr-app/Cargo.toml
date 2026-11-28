@@ -23,6 +23,9 @@ doc = false
 default = ["gui"]
 gui = ["dep:tmr-gui"]
 
+[dev-dependencies]
+tmr = { workspace = true, features = ["test-support"] }
+
 [dependencies]
 tmr.workspace = true
 tmr-cli.workspace = true

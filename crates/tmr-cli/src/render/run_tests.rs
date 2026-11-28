@@ -130,15 +130,8 @@ fn events_come_in_order_with_the_log_records() {
     let (run, fe): (_, Arc<dyn Frontend>) = (GoldenRun::new(overrides), Arc::new(Recording));
     let (status, text) = capture(|| run.run(&fe));
     assert_eq!(status, RunStatus::NotRun);
-    assert_eq!(order(&text), [
-        "<MemoryPlan>",
-        "🧵 Thread Memory Layout:",
-        "  Total threads: 4",
-        "  Allocation per thread: 0.00 GiB",
-        "  Total planned allocation: 0.02 GiB",
-        "Using the built-in suite, plan stability",
-        "<NotRun>"
-    ]);
+    // The thread layout is at debug level: the plan has its figures
+    assert_eq!(order(&text), ["<MemoryPlan>", "Using the built-in suite, plan stability", "<NotRun>"]);
 
     // How many Debug records came between two events
     let debug_between = |text: &str, first: &str, second: &str| -> usize {

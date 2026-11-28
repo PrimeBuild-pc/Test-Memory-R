@@ -16,6 +16,10 @@ USAGE:
   tmr --compare-results baseline.json current.json [output.json]
                                       # Compare two test results (here, or in the results folder)
   tmr --show-results results.json     # How a run ended, then its final summary (here, or in the results folder)
+  tmr --sanitize results.json         # Copies of a run's results file and its log, to post: no serials, UUID,
+                                      #   fingerprints, SIDs, or user, account and PC names; either file names the pair
+  tmr --sanitize-single x.log         #   ...or one file alone, a results file or a log, its pair not looked for: the
+                                      #   same, as far as that file shows them; it says what only the other file has
   tmr --setup-large-pages             # Grant 'Lock pages in memory' to you (as administrator), then sign out and in
   tmr --setup-large-pages Group:Administrators
                                       #   ...or to a group or another user: Group:<name>, User:<name>
@@ -80,10 +84,13 @@ COMMAND LINE PARAMETERS:
   largefloor=16MiB                    # Smallest 2MB-page request (16MiB-1GiB)
   blkroundtarget=1GiB                 # Round each thread's share to a multiple of this (of largefloor)
   blkround=up                         # ...up (default; a smaller step rather than pass available), down, or nearest
-  minpage=regular                     # Smallest page the run takes: regular (4KB), large (2MB, the default)
-                                      #   or huge (1GB); 2MB and 1GB pages need the large-page privilege
-  maxpage=large                       # Largest page it asks for: regular, large or huge (the default)
-                                      #   (minpage=regular maxpage=regular: 4KB pages, without asking)
+  minpage=large                       # Smallest page the run takes: huge (1GB), large (2MB; a thread short
+                                      #   of them stops the run), reg-lock (the default: 4KB pages where the larger run short,
+                                      #   locked in RAM, up to 5% of a thread; short by more, the run stops) or reg-page
+                                      #   (4KB pages, pageable, for whatever the larger leave); 2MB and 1GB pages need the
+                                      #   large-page privilege
+  maxpage=large                       # Largest page it asks for: reg-page, large or huge (the default)
+                                      #   (minpage=reg-page maxpage=reg-page: 4KB pages, without asking)
   channels=2                          # Memory channels, for TM5 SimpleTest's stride (channels x Parameter - 1
                                       #   lines); default: the config's, else 2
   record=compact                      # What the run keeps: full (every thread's rows, indented; the default), compact (the erring
@@ -127,7 +134,7 @@ COMMAND LINE PARAMETERS:
   seed=0x1234                         # The native patterns' run seed (default: from the clock, logged and
                                       #   saved in the results), to replay a run's bytes
   beat=32                             # Transfer width the switch pattern flips at: auto (SMBIOS, the
-                                      #   default), 16 (LPDDR4/5), 32 (DDR5), 64 (DDR4), or a memory
+                                      #   default), 16 (LPDDR4/5/5X), 32 (DDR5), 64 (DDR4), or a memory
                                       #   type (ddr4, ddr5, lpddr5, ...); 12 (lpddr6) and 24 (ddr6) are
                                       #   models: TMR hasn't verified their packet maps
   rescan=off                          # A failed check isn't rescanned to name each bad word (default on;
@@ -145,7 +152,9 @@ COMMAND LINE PARAMETERS:
   calibrate=recheck                   #   ...and a stored one probed first, about 15 s, measured again if it has drifted
   calibrate=always                    #   ...measured before every run's tests
   calibrate=off                       #   ...none: sizes from CPUID, and the seal's width from its rule
-  --no-serials                        # Leave the DIMMs' serials and the system's UUID out of the output, log and results
+  --allow-admin                       # Start an elevated test without the confirmation prompt (required for unattended runs)
+  --serials                           # Keep the DIMMs' serials, the system's UUID and the machine's fingerprints in the
+                                      #   output, log and results (left out by default)
 
 CONFIG FILE OVERRIDES:
   All parameters can override config file values:
@@ -158,7 +167,8 @@ LOGGING:
                                       # Use debug for detailed per-thread logs
   Logs saved to: logs\TMR_YYYY-MM-DD_HH-MM-SS.log      (local time)
   Results saved to: results\TMR_YYYY-MM-DD_HH-MM-SS.json (same name as the log)
-  Both beside tmr.exe, as are configs\ and tmr-cfg.json; TMR_HOME=<folder> puts them there instead
+  Ordinary runs: both beside tmr.exe, as are configs\ and settings\ (tmr-cfg.json, window.json); TMR_HOME=<folder> puts them there
+  Administrator runs: Program Files\TMR Admin by default, or a protected absolute TMR_HOME.
 
 RESULT COMPARISON:
   Each run's results are saved as a JSON file in the results folder, as it goes
@@ -225,6 +235,18 @@ Per-Test Performance Changes:
 ❌ Usage: tmr.exe --show-results <results.json>
 ## --show-results of a file that isn't there: NotRun
 ❌ Couldn't show the results: Test result file does not exist: nowhere.json (looked in the current folder, <home>\results and <home>)
+## --sanitize without its file: NotRun
+❌ Usage: tmr.exe --sanitize <results.json | log>
+## --sanitize of a file that isn't there: NotRun
+❌ Not sanitized, nothing written: nowhere.json isn't there (looked in the current folder, <home>\results and <home>)
+## --sanitize of a file neither kind: NotRun
+❌ Not sanitized, nothing written: notes.txt is neither a results file (.json) nor a log (.log)
+## --sanitize-single without its file: NotRun
+❌ Usage: tmr.exe --sanitize-single <results.json | log>
+## --sanitize-single of a file that isn't there: NotRun
+❌ Not sanitized, nothing written: nowhere.log isn't there (looked in the current folder, <home>\logs and <home>)
+## --sanitize-single of a file neither kind: NotRun
+❌ Not sanitized, nothing written: notes.txt is neither a results file (.json) nor a log (.log)
 ## --setup-large-pages without a type: NotRun
 🔧 TMR Large Page Setup Tool
 =============================

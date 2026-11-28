@@ -94,13 +94,50 @@ impl PageSizeLevel {
         }
     }
 
-    /// Parse page size level from string (matches config format)
+    /// The size a `minpage=` / `maxpage=` value names, checked already (`check_page_setting`): `reg-lock` and `reg-page` are both 4 KiB
     pub fn from_config_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "huge" | "1gb" => PageSizeLevel::Huge,
             "large" | "2mb" => PageSizeLevel::Large,
-            _ => PageSizeLevel::Regular, // "regular", "4kb", or default
+            _ => PageSizeLevel::Regular, // "reg-lock", "reg-page"
         }
+    }
+}
+
+/// The values `minpage=` and `maxpage=` take, as the help lists them
+pub const PAGE_SETTINGS: [&str; 4] = ["huge", "large", "reg-lock", "reg-page"];
+
+/// A `minpage=` / `maxpage=` value, lower-cased, or why it isn't one: [`PAGE_SETTINGS`], or `1gb` / `2mb` for the large two
+pub fn check_page_setting(s: &str) -> Result<String, String> {
+    let value = s.to_lowercase();
+    if PAGE_SETTINGS.contains(&value.as_str()) || value == "1gb" || value == "2mb" {
+        Ok(value)
+    } else {
+        Err(format!("Invalid page size '{s}'. Valid: huge (1gb), large (2mb), reg-lock or reg-page (4 KiB, locked or pageable)"))
+    }
+}
+
+/// How a run holds its 4 KiB pages (TODO 131), named by its `minpage=`: `reg-lock`, locked in RAM, taken only where the larger pages run
+/// short and at most `stitched::TAIL_PERCENT` of a thread's share; `reg-page`, pageable, for whatever the larger pages leave. One kind a
+/// run. (`minpage=large` or `huge` takes no 4 KiB pages.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegularPages {
+    Locked,
+    Pageable,
+}
+
+impl RegularPages {
+    /// Its `minpage=` value
+    pub fn label(self) -> &'static str {
+        match self {
+            RegularPages::Locked => "reg-lock",
+            RegularPages::Pageable => "reg-page",
+        }
+    }
+
+    /// The kind a page setting names: `reg-lock` locked, any other pageable (only a 4 KiB value names one)
+    pub fn from_config_str(s: &str) -> Self {
+        if s.eq_ignore_ascii_case("reg-lock") { RegularPages::Locked } else { RegularPages::Pageable }
     }
 }
 

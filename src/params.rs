@@ -372,19 +372,13 @@ impl ParamRegistry {
         params.insert("minpage", ParamDef {
             key: "minpage",
             can_override_config: true,
-            parser: |v| match v.to_lowercase().as_str() {
-                "regular" | "4kb" | "large" | "2mb" | "huge" | "1gb" => Ok(ParamValue::String(v.to_lowercase())),
-                _ => Err(format!("Invalid page size '{}'. Valid: regular/4kb, large/2mb, huge/1gb", v)),
-            },
+            parser: |v| crate::memory::allocator::check_page_setting(v).map(ParamValue::String),
         });
 
         params.insert("maxpage", ParamDef {
             key: "maxpage",
             can_override_config: true,
-            parser: |v| match v.to_lowercase().as_str() {
-                "regular" | "4kb" | "large" | "2mb" | "huge" | "1gb" => Ok(ParamValue::String(v.to_lowercase())),
-                _ => Err(format!("Invalid page size '{}'. Valid: regular/4kb, large/2mb, huge/1gb", v)),
-            },
+            parser: |v| crate::memory::allocator::check_page_setting(v).map(ParamValue::String),
         });
 
         // Block sizes and share rounding. Each parses here; how they fit together is checked by MemoryAllocationConfig::share_rounding.
@@ -512,7 +506,7 @@ pub fn parse_and_validate_args(args: &[String]) -> Result<HashMap<String, ParamV
             || arg.starts_with("--quick-test")
             || arg.starts_with("--ram-latency")
             || arg.starts_with("--cache-latency")
-            || arg == "--no-serials"
+            || arg == "--serials"
             || arg.starts_with("--startup-debug")
         {
             continue;

@@ -70,7 +70,7 @@ is two 32 B bursts, and they are equal (each starts afresh). The profiles:
 |---|---|---|---|---|
 | 64 | 512 | DDR to DDR4: one 64-bit channel a DIMM | standard | `a` for even `j`, `!a` for odd |
 | 32 | 512 | DDR5: two 32-bit subchannels a DIMM; LPDDR3 | standard | every `(a & 0xFFFFFFFF) \| (!a << 32)` |
-| 16 | 256 | LPDDR4, LPDDR5: 16-bit channels | standard | `p = (a & 0xFFFF) \| ((!a & 0xFFFF) << 16)`, every `p \| (p << 32)` |
+| 16 | 256 | LPDDR4, LPDDR5, LPDDR5X: 16-bit channels | standard | `p = (a & 0xFFFF) \| ((!a & 0xFFFF) << 16)`, every `p \| (p << 32)` |
 | 12 | 256 | LPDDR6: two 12-DQ subchannels a die, 32 B a 24-transfer burst | model | the rule |
 | 24 | 512 | DDR6 as drafted: four 24-bit subchannels; 64 B a burst assumed | model | the rule |
 
@@ -191,9 +191,10 @@ codes:   ident 0x1D, random 0x2A, switch 0x3C, lines 0x4B, linepair 0x5E, quiet 
 
 **The transfer width** for `switch`, resolved once, in this order:
 1. `beat=`: a width (`12`, `16`, `24`, `32`, `64`) or a memory type (`ddr4`, `ddr5`, `ddr6`,
-   `lpddr4`, `lpddr5`, `lpddr6`; `ddr3` and `lpddr3` too).
-2. The DIMMs' SMBIOS memory type: DDR-DDR4 64, LPDDR3 and DDR5 32, LPDDR4/5 16. TMR knows no
-   SMBIOS code for DDR6 or LPDDR6 yet: on those, set `beat=`.
+   `lpddr4`, `lpddr5`, `lpddr5x`, `lpddr6`; `ddr3` and `lpddr3` too).
+2. The DIMMs' SMBIOS memory type: DDR-DDR4 64, LPDDR3 and DDR5 32, LPDDR4/5 16 (LPDDR5X
+   reports LPDDR5's code, and keeps its 16-bit channels). TMR knows no SMBIOS code for DDR6 or
+   LPDDR6 yet: on those, set `beat=`.
 3. Unknown: successive `switch` pairs alternate 64 and 32, and the run logs a warning. Pair
    `pair`'s ordinal among the `switch` pairs is `n = (pair / len) * s + s_before`, with `s` the
    program's `switch` entries and `s_before` those before position `pair mod len`; it takes 64

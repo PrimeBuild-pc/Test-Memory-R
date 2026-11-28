@@ -23,6 +23,7 @@ use crate::dialogs::{self, Open};
 use crate::logger::{self, LogLine, LogLines};
 use crate::model::{Bar, DialogButton, Model, Opened, Slot, Status, StepRow};
 use crate::palette::{Palette, Palettes, brush};
+use crate::placement::{self, Placement};
 use crate::report::{Block, Report};
 use crate::settings::{Settings, Theme};
 use crate::{Feed, GuiFrontend, chart};
@@ -44,8 +45,9 @@ const LOG_SHOWN: usize = 1_000;
 fn icon_path() -> Option<&'static str> {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
     PATH.get_or_init(|| {
-        let path = std::env::temp_dir().join("tmr-icon.ico");
-        std::fs::write(&path, crate::ICON.get()?).ok()?;
+        let folder = if tmr::home::elevated() { tmr::home::dir().join(tmr::settings_file::FOLDER) } else { std::env::temp_dir() };
+        let path = folder.join("tmr-icon.ico");
+        tmr::atomic_file::write(&path, crate::ICON.get()?).ok()?;
         Some(path.to_string_lossy().into_owned())
     })
     .as_deref()
@@ -96,11 +98,20 @@ pub(crate) enum Message {
     Menu(String),
     /// A file or a folder opened, or why the shell couldn't
     Opened(Result<(), String>),
+    /// The ••• menu's Sanitize, or with `true` its Sanitize one file: the results file or the log the Open dialog gave, none when it was
+    /// cancelled
+    SanitizeChosen(bool, Result<Vec<PathBuf>, String>),
+    /// The pair sanitized, or the one file alone, on a pool thread: what it wrote and replaced, or why it wrote nothing
+    /// (`tmr::sanitize::sanitize`, `sanitize_single`)
+    Sanitized(Result<String, String>),
+    SanitizedClosed,
     AboutClosed,
     /// The Settings dialog (TODO 105): closed; its switches and the theme, each saved to window.json as it changes
     SettingsClosed,
     StartOnOpen(bool),
-    Serials(bool),
+    AllowAdmin(bool),
+    AdminAnswer(ContentDialogResult),
+    KeepSerials(bool),
     Theme(Option<usize>),
     Scheme(ColorScheme),
     Size(WindowSize),
@@ -154,7 +165,11 @@ pub(crate) struct Window {
     about: bool,
     /// The Settings dialog is open
     settings_open: bool,
-    /// `window.json`'s (TODO 109): the chart shown or hidden, the theme, the parameters, the size
+    launch_allows_admin: bool,
+    admin_answer: Option<mpsc::SyncSender<bool>>,
+    /// The ••• menu's Sanitize came back: its dialog is open with what it wrote, or why it wrote nothing, until it closes
+    sanitized: Option<Result<String, String>>,
+    /// `window.json`'s (TODO 109): the chart shown or hidden, the theme, the parameters, the size and where the window is
     settings: Settings,
     dark: bool,
     width: f64,
@@ -250,6 +265,11 @@ impl Window {
         tmr::session::reset_run();
         let log = self.log.take().unwrap_or_else(logger::install);
         let mut args = self.model.command();
+        // Only the process flag, the protected Settings switch or this launch's answer supplies consent. The parameter box is saved.
+        tmr::session::take_admin_flag(&mut args);
+        if self.launch_allows_admin || tmr::home::window_consent() {
+            args.push("--allow-admin".into());
+        }
         // No log file under record=off in the box (TODO 105), as the console has none
         self.model.log_path = tmr::logfile::wanted(&args).then(|| {
             logger::open_log_file();
@@ -257,9 +277,9 @@ impl Window {
         });
         let (tx, rx) = mpsc::channel();
         let fe = Arc::new(GuiFrontend { feed: tx.clone(), transcript: Some(log.transcript()) });
-        // Serials off in the Settings dialog: the run leaves them out, as --no-serials does (TODO 105)
-        if !self.settings.serials && !args.iter().any(|arg| arg == "--no-serials") {
-            args.push("--no-serials".to_string());
+        // Serials kept in the Settings dialog: the run keeps them, as --serials does; off, the default, it leaves them out (TODO 105)
+        if self.settings.keep_serials && !args.iter().any(|arg| arg == "--serials") {
+            args.push("--serials".to_string());
         }
         let session = std::thread::Builder::new().name("tmr-engine".to_string()).spawn(move || {
             let result = tmr::session::run(args, fe).map_err(|e| {
@@ -326,14 +346,19 @@ impl Window {
         let (tx, rx) = mpsc::channel();
         let transcript = log.transcript();
         let exe = self.model.command().first().cloned().unwrap_or_else(|| "tmr.exe".to_string());
-        // No `--yes`: a stored calibration asks the window whether to replace it (TODO 110). Nothing stored is saved without a question.
         let mut line = vec![exe, "--calibrate-all".to_string()];
-        // Serials off in the Settings dialog: left out of what it shows and logs, as start()'s run has it (TODO 105)
-        if !self.settings.serials {
-            line.push("--no-serials".to_string());
+        // Serials kept in the Settings dialog: in what it shows and logs, as start()'s run has them (TODO 105)
+        if self.settings.keep_serials {
+            line.push("--serials".to_string());
         }
         let ask = tx.clone();
+        let allow_admin = self.launch_allows_admin || tmr::home::window_consent();
+        let frontend = GuiFrontend { feed: tx.clone(), transcript: None };
         let calibration = std::thread::Builder::new().name("tmr-calibrate".to_string()).spawn(move || {
+            if let Err(e) = tmr::session::authorize_run(allow_admin, &frontend) {
+                let _ = tx.send(Feed::Calibrated(Err(e.to_string())));
+                return;
+            }
             let command = tmr::commands::Command::Calibrate(line);
             let mut out = logger::TranscriptWriter::new(transcript);
             let mut confirm = move |question: &str| crate::ask_save(&ask, question);
@@ -362,6 +387,7 @@ impl Window {
             match item {
                 Feed::Event(event) => self.model.apply(event),
                 Feed::Ask { question, reply } => self.model.ask_large_pages(question, reply),
+                Feed::AskAdmin(reply) => self.admin_answer = Some(reply),
                 Feed::Ended(result) => {
                     self.model.ended(result);
                     ended = true;
@@ -440,8 +466,16 @@ impl Window {
 
     /// Writes `window.json`, or says in the errors list why it couldn't
     fn save_settings(&mut self) {
+        self.keep_placement();
         if let Err(e) = self.settings.save() {
             self.model.errors.push(format!("window.json: {e}"));
+        }
+    }
+
+    /// Where the window is now, as `placement.rs` followed it, into the settings, for a save; not followed, they keep what they had
+    fn keep_placement(&mut self) {
+        if let Some(placement) = placement::last() {
+            (self.settings.position, self.settings.maximized) = (Some(placement.position), placement.maximized);
         }
     }
 
@@ -470,6 +504,22 @@ impl Window {
                 self.get_readings(context);
                 None
             }
+            MENU_SANITIZE | MENU_SANITIZE_SINGLE => {
+                let single = label == MENU_SANITIZE_SINGLE;
+                let ask = Open {
+                    title: if single {
+                        "Sanitize one file: a results file or a log, alone, its pair not looked for"
+                    } else {
+                        "Sanitize: a run's results file or its log, either names the pair"
+                    },
+                    filter: ("TMR results and logs", "*.json;*.log"),
+                    folder: tmr::home::results(),
+                    multiple: false,
+                };
+                let owner = dialogs::owner();
+                context.spawn_background(move |_| Message::SanitizeChosen(single, dialogs::open(owner, ask)));
+                None
+            }
             MENU_SETTINGS => {
                 self.settings_open = true;
                 None
@@ -496,12 +546,15 @@ const MENU_RESULTS: &str = "Open the results file";
 const MENU_RESULTS_FOLDER: &str = "Open the results folder";
 const MENU_CALIBRATE: &str = "Calibrate the caches and the seal";
 const MENU_READINGS: &str = "Get timings tools";
+const MENU_SANITIZE: &str = "Sanitize a results file and its log…";
+const MENU_SANITIZE_SINGLE: &str = "Sanitize one file…";
 const MENU_SETTINGS: &str = "Settings";
 const MENU_ABOUT: &str = "About TMR";
 
-/// The window's size, as it closes, into `window.json` (TODO 109): Run again's window opens as this one was
+/// The window's size and place, as it closes, into `window.json` (TODO 109): the next window opens as this one was
 impl Drop for Window {
     fn drop(&mut self) {
+        self.keep_placement();
         let _ = self.settings.save();
     }
 }
@@ -512,14 +565,16 @@ impl Component for Window {
 
     fn create(args: &Vec<String>, context: &ComponentContext<Self>) -> Self {
         crate::window_opened();
-        let (settings, palettes, problems) = Settings::load();
+        let (mut settings, palettes, problems) = Settings::load();
+        settings.allow_admin = tmr::home::window_consent();
         let start = args.iter().any(|arg| arg == START) || settings.start_on_open;
         let mut args: Vec<String> = args.iter().filter(|arg| *arg != START).cloned().collect();
+        let launch_allows_admin = tmr::session::take_admin_flag(&mut args);
         // Given no parameters, the last run's (TODO 109)
         if args.len() <= 1
             && let Some(parameters) = &settings.parameters
         {
-            args.extend(crate::model::args_of(parameters));
+            args.extend(crate::model::args_of(parameters).into_iter().filter(|arg| arg != "--allow-admin"));
         }
         let mut model = Model::new(&args);
         // The cache calibration a run finds, from tmr-cfg.json (TODO 110): the info line says it before Start
@@ -534,6 +589,9 @@ impl Component for Window {
             tab: Tab::Run,
             about: false,
             settings_open: false,
+            launch_allows_admin,
+            admin_answer: None,
+            sanitized: None,
             settings,
             dark,
             width,
@@ -542,7 +600,6 @@ impl Component for Window {
             getting_readings: false,
             readings_line: String::new(),
         };
-        // Not on this thread: a miss is a connect timeout, and the view rebuilds on every message
         window.sample_readings(context);
         if start {
             window.start(context);
@@ -556,7 +613,7 @@ impl Component for Window {
             // One session a process: the engine's run settings are set once (TODO 29), so another run is another process (Run again)
             Message::Start if self.model.status == Status::Ready && !self.model.calibrating() => {
                 // The parameters the window opens with next time, when given none
-                self.settings.parameters = Some(self.model.args.clone());
+                self.settings.parameters = Some(self.model.saved_parameters());
                 self.save_settings();
                 self.start(context);
             }
@@ -566,7 +623,7 @@ impl Component for Window {
                 self.model = self.model.again();
                 // Read again, not carried over: the run, or the window's Calibrate after it, may have saved a new one
                 self.model.stored_calibration = Some(crate::model::stored_calibration_text(tmr::session::stored_calibration().as_ref()));
-                self.settings.parameters = Some(self.model.args.clone());
+                self.settings.parameters = Some(self.model.saved_parameters());
                 self.save_settings();
                 self.start(context);
             }
@@ -689,14 +746,45 @@ impl Component for Window {
             Message::Menu(label) => self.menu(&label, context),
             Message::Opened(Ok(())) => {}
             Message::Opened(Err(e)) => self.model.errors.push(e),
+            // Copies of the pair the file names, or of the file alone, beside it, on a pool thread: reading and scrubbing a long run's
+            // files takes a moment
+            Message::SanitizeChosen(single, Ok(paths)) => {
+                if let Some(path) = paths.into_iter().next() {
+                    let file = path.display().to_string();
+                    let sanitize = if single { tmr::sanitize::sanitize_single } else { tmr::sanitize::sanitize };
+                    context.spawn_background(move |_| Message::Sanitized(sanitize(&file).map(|done| done.text())));
+                }
+            }
+            Message::SanitizeChosen(_, Err(e)) => self.model.errors.push(format!("Sanitize: the Open dialog failed: {e}")),
+            Message::Sanitized(outcome) => self.sanitized = Some(outcome),
+            Message::SanitizedClosed => self.sanitized = None,
             Message::AboutClosed => self.about = false,
             Message::SettingsClosed => self.settings_open = false,
+            Message::AdminAnswer(result) => {
+                if let Some(reply) = self.admin_answer.take() {
+                    let yes = result == ContentDialogResult::Secondary;
+                    self.launch_allows_admin |= yes;
+                    let _ = reply.send(yes);
+                    if !yes {
+                        crate::session_ended(&Err("Administrator run declined".into()));
+                        let _ = context.window().request_close();
+                    }
+                }
+            }
+            Message::AllowAdmin(on) => {
+                if tmr::home::elevated() {
+                    if let Err(e) = tmr::home::set_window_consent(on) {
+                        self.model.errors.push(e);
+                    }
+                    self.settings.allow_admin = tmr::home::window_consent();
+                }
+            }
             Message::StartOnOpen(on) => {
                 self.settings.start_on_open = on;
                 self.save_settings();
             }
-            Message::Serials(on) => {
-                self.settings.serials = on;
+            Message::KeepSerials(on) => {
+                self.settings.keep_serials = on;
                 self.save_settings();
             }
             Message::Theme(Some(index)) => {
@@ -716,10 +804,15 @@ impl Component for Window {
                     Theme::Dark => true,
                 }
             }
-            // Saved as the window closes (`Drop`)
+            // Saved as the window closes (`Drop`): maximized or minimized, the size it had before, which it restores to and opens at
             Message::Size(size) => {
                 self.width = size.width;
-                self.settings.size = Some((size.width, size.height));
+                // The first: the window is there now, so it goes where it last closed, and is followed from then on (`placement.rs`)
+                let (position, maximized) = (self.settings.position, self.settings.maximized);
+                placement::attach(position.map(|position| Placement { position, maximized }));
+                if placement::restored() {
+                    self.settings.size = Some((size.width, size.height));
+                }
             }
         }
     }
@@ -760,9 +853,11 @@ impl Component for Window {
                 self.tab_view(3, context),
                 self.large_page_dialog(context),
                 self.broad_dialog(context),
+                self.admin_dialog(context),
                 self.about_dialog(context),
                 self.settings_dialog(context),
                 self.save_dialog(context),
+                self.sanitized_dialog(context),
             ))
     }
 }
@@ -1014,6 +1109,9 @@ impl Window {
             MenuItem::separator(2usize),
             item(self.model.results_path().is_some(), 3, MENU_RESULTS),
             MenuItem::item(4usize, MENU_RESULTS_FOLDER),
+            // Copies of a run's pair to post, beside it, or of one file alone (the owner, 2026-11-23)
+            MenuItem::item(9usize, MENU_SANITIZE),
+            MenuItem::item(10usize, MENU_SANITIZE_SINGLE),
             MenuItem::separator(5usize),
             // A calibration of its own, before a run or after one, never during (TODO 110): they'd measure each other
             item(self.model.takes_parameters() && !self.model.calibrating(), 8, MENU_CALIBRATE),
@@ -1393,6 +1491,24 @@ impl Window {
             .content(content)
     }
 
+    fn admin_dialog(&self, context: &ViewContext<Self>) -> View {
+        ContentDialog::new()
+            .title("Run as Administrator?")
+            .primary_button_text("No")
+            .secondary_button_text("Yes")
+            .is_open(self.admin_answer.is_some())
+            .on_closed(context.callback(Message::AdminAnswer))
+            .content(
+                TextBlock::new()
+                    .text(if self.admin_answer.is_some() {
+                        format!("Run memory tests as Administrator using {}?", tmr::home::dir().display())
+                    } else {
+                        String::new()
+                    })
+                    .text_wrapping(TextWrapping::Wrap),
+            )
+    }
+
     /// The second dialog after a broad pick in the first (TODO 113): what the group reaches and risks, its secondary button the grant,
     /// its primary button No, as Esc is, which goes back to the first. The first button is No because WinUI focuses it when the text has
     /// nothing to focus, so Enter or Space pressed on, and a double-click's second click, which lands where the first dialog's grant was,
@@ -1413,7 +1529,7 @@ impl Window {
     /// Settings (TODO 105, the owner 2026-11-04): what the window keeps in window.json that a user sets, each saved as it changes; not open
     /// while the large-page question is, as WinUI opens one dialog at a time
     fn settings_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.settings_open && !self.model.large_pages_pending() && !self.model.save_pending();
+        let open = self.settings_open && !self.model.large_pages_pending() && !self.model.save_pending() && self.admin_answer.is_none();
         let dialog = ContentDialog::new()
             .title("Settings")
             .close_button_text("Close")
@@ -1425,17 +1541,41 @@ impl Window {
         dialog.content(settings_content(
             &self.settings,
             context.callback(Message::StartOnOpen),
-            context.callback(Message::Serials),
+            context.callback(Message::KeepSerials),
+            tmr::home::elevated(),
+            context.callback(Message::AllowAdmin),
             context.callback(Message::Notify),
             context.callback(Message::Theme),
         ))
+    }
+
+    /// The ••• menu's Sanitize, once it has run: the copies it wrote beside the pair (or the file alone) and what it replaced, or why it
+    /// wrote nothing, the text selectable for the copies' paths. Not open while the large-page question, About or Settings is, as WinUI
+    /// opens one dialog at a time.
+    fn sanitized_dialog(&self, context: &ViewContext<Self>) -> View {
+        let open = self.sanitized.is_some()
+            && !self.model.large_pages_pending()
+            && self.admin_answer.is_none()
+            && !self.about
+            && !self.settings_open;
+        let (title, text) = match &self.sanitized {
+            Some(Ok(text)) => ("Sanitized", text.clone()),
+            Some(Err(e)) => ("Not sanitized", format!("Nothing was written: {e}")),
+            None => ("Sanitized", String::new()),
+        };
+        ContentDialog::new()
+            .title(title)
+            .close_button_text("Close")
+            .is_open(open)
+            .on_closed(context.callback(|_: ContentDialogResult| Message::SanitizedClosed))
+            .content(sanitized_content(&text))
     }
 
     /// About (TODO 109): the logo, what TMR is, its version and build, its licence and its GitHub page. Its content is built only while it
     /// is open, so the logo isn't decoded at each redraw; and it isn't open while the large-page question is, as WinUI opens one dialog at
     /// a time. In the dialog's own colours, as the large-page dialog's.
     fn about_dialog(&self, context: &ViewContext<Self>) -> View {
-        let open = self.about && !self.model.large_pages_pending() && !self.model.save_pending();
+        let open = self.about && !self.model.large_pages_pending() && !self.model.save_pending() && self.admin_answer.is_none();
         let dialog = ContentDialog::new()
             .title("About TMR")
             .close_button_text("Close")
@@ -1811,7 +1951,8 @@ fn dialog_content(text: TextBlock, words: &crate::model::LargePageDialog, on_sel
 /// inside a dialog fails reactor 0.100.0 (`a_tooltip_in_a_dialog_still_fails`).
 fn settings_content(
     settings: &crate::settings::Settings, on_start: impl IntoPayloadCallback<bool>, on_serials: impl IntoPayloadCallback<bool>,
-    on_notify: impl IntoPayloadCallback<bool>, on_theme: impl IntoPayloadCallback<Option<usize>>,
+    elevated: bool, on_admin: impl IntoPayloadCallback<bool>, on_notify: impl IntoPayloadCallback<bool>,
+    on_theme: impl IntoPayloadCallback<Option<usize>>,
 ) -> View {
     let row = |words: &str, switch: ToggleSwitch| -> View {
         Grid::new().columns([GridLength::STAR, GridLength::Auto]).column_spacing(12.0).children((
@@ -1824,8 +1965,9 @@ fn settings_content(
         ToggleSwitch::new().is_on(settings.start_on_open).on_toggled(on_start),
     );
     let serials = row(
-        "Keep serial numbers, the DIMMs' and the system's UUID, in the run's output, log and results file (off: --no-serials)",
-        ToggleSwitch::new().is_on(settings.serials).on_toggled(on_serials),
+        "Keep the DIMMs' serial numbers, the system's UUID and the machine's fingerprints in the run's output, log and results file, \
+         as --serials does (off: left out)",
+        ToggleSwitch::new().is_on(settings.keep_serials).on_toggled(on_serials),
     );
     let notify = row("Sound at the first error, and when the run ends", ToggleSwitch::new().is_on(settings.notify).on_toggled(on_notify));
     let theme = StackPanel::new().spacing(4.0).children((
@@ -1836,8 +1978,22 @@ fn settings_content(
             .selected_index(settings.theme.index())
             .on_selection_changed(on_theme),
     ));
-    let kept = TextBlock::new().text("Kept in window.json, in TMR's folder, as each changes").text_wrapping(TextWrapping::Wrap);
-    StackPanel::new().spacing(14.0).children((start, serials, notify, theme, kept))
+    let kept = TextBlock::new().text("Saved in TMR's settings folder as each setting changes").text_wrapping(TextWrapping::Wrap);
+    let panel = StackPanel::new().spacing(14.0);
+    if elevated {
+        let admin = row(
+            "Allow administrator runs without asking in this home for my account",
+            ToggleSwitch::new().is_on(settings.allow_admin).on_toggled(on_admin),
+        );
+        panel.children((start, serials, admin, notify, theme, kept))
+    } else {
+        panel.children((start, serials, notify, theme, kept))
+    }
+}
+
+/// The Sanitize dialog's content: what `tmr::sanitize::sanitize` (or `sanitize_single`) said, selectable
+fn sanitized_content(text: &str) -> View {
+    TextBlock::new().text(text).text_wrapping(TextWrapping::Wrap).is_text_selection_enabled(true).into()
 }
 
 /// A sound, not a toast: an unpackaged window has no shortcut to hang a toast on. `alarm` is the error sound; a clean end is the asterisk.
@@ -1978,14 +2134,29 @@ mod tests {
     fn the_settings_dialog_opens_and_closes() {
         let mut settings = crate::settings::Settings::default();
         let content = |settings: &crate::settings::Settings| {
-            super::settings_content(settings, |_: bool| {}, |_: bool| {}, |_: bool| {}, |_: Option<usize>| {})
+            super::settings_content(settings, |_: bool| {}, |_: bool| {}, true, |_: bool| {}, |_: bool| {}, |_: Option<usize>| {})
         };
         let mut pump = Pump::new(RecordingRuntime::default());
         pump.mount_view(dialog(false, TextBlock::new().text("closed").into())).unwrap();
         pump.update_view(dialog(true, content(&settings))).unwrap();
-        (settings.serials, settings.start_on_open) = (false, true);
+        (settings.keep_serials, settings.start_on_open) = (true, true);
         pump.update_view(dialog(true, content(&settings))).unwrap();
         pump.update_view(dialog(false, content(&settings))).unwrap();
+    }
+
+    /// The Sanitize dialog opens with what it wrote, a pair's then one file's, then with a refusal, and closes, through reactor's planner,
+    /// as the Settings dialog's
+    #[test]
+    fn the_sanitize_dialog_opens_and_closes() {
+        let mut pump = Pump::new(RecordingRuntime::default());
+        pump.mount_view(dialog(false, TextBlock::new().text("closed").into())).unwrap();
+        let done = "🧹 Sanitized copies written, the originals as they were:\n   C:\\tmr\\results\\x.sanitized.json\n";
+        pump.update_view(dialog(true, super::sanitized_content(done))).unwrap();
+        let alone =
+            "🧹 Sanitized copy written, the original as it was:\n   C:\\tmr\\logs\\x.sanitized.log\n   Without its results file: …\n";
+        pump.update_view(dialog(true, super::sanitized_content(alone))).unwrap();
+        pump.update_view(dialog(true, super::sanitized_content("Nothing was written: x.json's log isn't there"))).unwrap();
+        pump.update_view(dialog(false, super::sanitized_content(""))).unwrap();
     }
 
     /// Reactor 0.100.0 can't plan a tooltip inside a dialog's content, so the dialogs have none. When this fails, a reactor upgrade

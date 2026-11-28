@@ -46,19 +46,32 @@ pub struct LegacyMetadata {
     pub tm5_window_mb: u32,
     #[serde(default)]
     pub tm5_lock_mb: u32,
+    /// The `.cfg`'s Interleave Type (TM5: 0-1, default 1): 0 walks each SimpleTest as TM5's 128-bit mode does (`interleave_0_walk`)
+    #[serde(default = "default_interleave_type")]
+    pub tm5_interleave_type: u32,
 }
 
 /// The original SimpleTest fields, retained only for import reporting. They never supply a native generator's inputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tm5PatternSource {
     pub mode: u32,
     pub param0: u64,
     pub param1: u64,
+    /// Parameter spellings from the .cfg, including wide values. Older exports have only the numeric fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written: Option<[String; 2]>,
+    /// This import selected TM5's 32-bit parameter arithmetic. The source spelling and number still describe the original .cfg.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy_inputs: bool,
 }
 
 fn default_channels() -> u32 {
     2
+}
+
+fn default_interleave_type() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,10 +158,10 @@ fn default_skip_spec() -> String {
 pub struct MemoryAllocationConfig {
     // Page size constraints (using your existing system)
     #[serde(default = "default_min_page_size")]
-    pub min_page_size: String, // "regular", "large", "huge"
+    pub min_page_size: String, // "reg-lock" (the default), "reg-page", "large", "huge" (`allocator::PAGE_SETTINGS`)
 
     #[serde(default = "default_max_page_size")]
-    pub max_page_size: String, // "regular", "large", "huge"
+    pub max_page_size: String, // as `min_page_size`; "huge" the default
 
     // Block sizes, checked by `block_sizing` (see `BlockSizing`). Sizes as `parse_size_string`.
     #[serde(default = "default_huge_chunk")]
@@ -165,8 +178,9 @@ pub struct MemoryAllocationConfig {
     pub share_round: String, // `blkround`: "up", "down", "nearest"
 }
 
+/// Large pages, and locked 4 KiB pages where they run short (TODO 131)
 fn default_min_page_size() -> String {
-    "large".to_string()
+    crate::memory::allocator::RegularPages::Locked.label().to_string()
 }
 fn default_max_page_size() -> String {
     "huge".to_string()
@@ -868,8 +882,12 @@ impl<'de> Deserialize<'de> for MirrorMode {
 /// The v1 code incorrectly funneled all of these into a single field.
 #[derive(Debug, Clone, Default)]
 pub struct TestParameterContext {
-    /// Explicit geometry. The legacy stride fields below carry its group-1 period too; `channels=` must not change it.
+    /// Explicit geometry. The legacy stride fields below carry its group-1 period too; `channels=` must not change it, but for
+    /// `interleave_0`'s.
     pub access: Option<AccessGeometry>,
+    /// A TM5 import's SimpleTest under Interleave Type 0: its walk follows the channels and the patterns (`interleave_0_walk`), so the
+    /// command line's `channels=` and `pattern-mode=` pick it again
+    pub interleave_0: bool,
     /// Raw TM5 parameter value, preserved for debugging.
     pub raw_parameter: u32,
     /// SimpleTest: stride in cache lines (64-byte units).
@@ -910,6 +928,35 @@ pub struct TestParameterContext {
     pub load_window_ms: Option<u32>,
 }
 
+/// TM5's SimpleTest stride in lines, `Channels * Parameter - 1` (`JumpStep = BlkSize * (Channels * Parameter - 1)`), capped at
+/// `AccessGeometry::MAX_PERIOD` so the period in words can't overflow: a `.cfg`'s Channels, as the command line's, has no ceiling.
+/// The product can't overflow: two u32 fit in a 64-bit usize.
+pub fn tm5_stride_lines(channels: u32, parameter: u32) -> usize {
+    (channels as usize * parameter as usize).saturating_sub(1).min(AccessGeometry::MAX_PERIOD)
+}
+
+/// A SimpleTest's walk under a TM5 import's Interleave Type 0 (`mtests0.asm` ST_Check ~244-288 and ~1787-1797), from `ctx`'s
+/// `raw_parameter`. On two channels or more TM5's bus is 128 bits, so a visit is 128 B, two lines, and the jump 128 B x (Parameter - 1)
+/// whatever the Channels: explicit geometry (TODO 126) of a 2 x Parameter-line period, Parameter 1 or less sequential. On one channel it
+/// is Interleave Type 1's walk. TMR's numbered modes have no grouped walk, so under one (`native` false) a visit is one line. Set when
+/// the test is built and again after the command line's `channels=` and `pattern-mode=` (`runner`).
+pub(crate) fn interleave_0_walk(ctx: &mut TestParameterContext, channels: u32, native: bool) {
+    let parameter = ctx.raw_parameter;
+    let (access, stride) = match () {
+        _ if channels < 2 => (None, (parameter > 0).then(|| tm5_stride_lines(channels, parameter))),
+        _ if parameter <= 1 => (None, None),
+        _ => {
+            // At most 2^33 lines, far below `AccessGeometry::MAX_PERIOD`, and even, so whole groups
+            let period_lines = 2 * parameter as usize;
+            (Some(AccessGeometry { period_lines, group_lines: if native { 2 } else { 1 } }), Some(period_lines - 1))
+        }
+    };
+    ctx.interleave_0 = true;
+    ctx.access = access;
+    ctx.stride_cachelines = stride;
+    ctx.stride_elements = stride.map(|lines| lines * 8);
+}
+
 /// Interpret TM5 Parameter correctly based on test function name.
 ///
 /// This replaces the old parameter mapping which incorrectly treated all
@@ -925,8 +972,7 @@ pub fn interpret_tm5_parameter_with_channels(function: &str, parameter: u32, cha
             if parameter == 0 {
                 TestParameterContext { raw_parameter: parameter, ..Default::default() }
             } else {
-                // TM5: JumpStep = BlkSize * (Channels * Parameter - 1)
-                let stride_cl = (channels as usize * parameter as usize).saturating_sub(1);
+                let stride_cl = tm5_stride_lines(channels, parameter);
                 TestParameterContext {
                     raw_parameter: parameter,
                     stride_cachelines: Some(stride_cl),
@@ -955,19 +1001,26 @@ pub struct LegacyMainSection {
     pub config_name: String,
     pub config_author: String,
     pub cores: u32,
+    /// `Tests` (TM5: 2-16, default 6; TMR takes 1-16): TM5 reads `[Test0]` to `[Test(Tests-1)]` only, and skips a `Test Sequence`
+    /// entry at or above it (`mt_ini.asm` ~338-340, `MainThread.asm` ~577-587)
+    pub tests: u32,
     pub time_percent: u32,
     pub cycles: u32,
-    pub test_sequence: Vec<u32>,
+    /// `None` when the `.cfg` has no `Test Sequence`: TM5's default sequence (`TM5_DEFAULT_SEQUENCE`) then runs
+    pub test_sequence: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct LegacyMemorySetup {
     pub testing_window_size_mb: u32,
     pub reserved_memory_mb: u32,
-    /// Memory channel count from .cfg (TM5: 1-3, default 2).
+    /// Memory channel count from .cfg (TM5: 1-3, default 2; TMR takes any from 1).
     /// Used in SimpleTest stride formula: `Channels * Parameter - 1` cache lines.
     pub channels: u32,
-    /// `Lock Memory Granularity (Mb)` (TM5: 1-512, default 16). TM5 floors a fractional block size to it (`MainThread.asm` ~627-650).
+    /// `Interleave Type` (TM5: 0-1, default 1). 0 on two channels or more walks a SimpleTest in 128 B visits (`interleave_0_walk`).
+    pub interleave_type: u32,
+    /// `Lock Memory Granularity (Mb)` (TM5: 1-512, TMR: 1-1024, default 16). TM5 floors a fractional block size to it (`MainThread.asm`
+    /// ~627-650).
     pub lock_granularity_mb: u32,
 }
 
@@ -980,6 +1033,7 @@ pub struct LegacyTest {
     pub pattern_mode: u32,
     pub pattern_param0: u64,
     pub pattern_param1: u64,
+    pub written_params: Option<[String; 2]>,
     pub parameter: u32,
     pub test_chunk_size_mb: u32,
 }
@@ -998,6 +1052,20 @@ const TM5_DEFAULT_PATTERN_MODE: [u32; 16] = [0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 const TM5_DEFAULT_PATTERN_PARAM0: [u64; 16] = [0, 7775, 1_354_423, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const TM5_DEFAULT_PATTERN_PARAM1: [u64; 16] = [0, 0x4535_7354, 0x6E72_A941, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const TM5_DEFAULT_BLOCK_SIZE_MB: [u32; 16] = [0, 16, 32, 0, 0, 0, 1, 2, 0, 16, 16, 16, 16, 16, 16, 16];
+/// TM5's `Test Sequence` when a `.cfg` has none (`mt_ini.inc` `szDefTestSequence`; the 0.12.3 binary holds the same text). Its entries
+/// at or above `Tests` are skipped, so with TM5's default 6 it runs 2, 5, 1, 4, 3, 0, 1.
+const TM5_DEFAULT_SEQUENCE: [u32; 17] = [6, 12, 14, 2, 15, 10, 5, 1, 4, 3, 0, 13, 9, 7, 8, 1, 11];
+
+/// A negative `Test Block Size (Mb)` (its two's complement) as TM5 runs it, in MiB (`mt_ini.asm` ~287-303, `MainThread.asm` ~644-650):
+/// the shift to bytes in 32 bits keeps its low 12 bits, a 0 there is 1 MiB, and 2048 or more is negative again, which the signed cap
+/// keeps and the unsigned one makes the window: `None`. So -1 to -2048 run the window, -3584 512 MiB and -4096 1 MiB.
+fn tm5_negative_block_mib(raw: u32) -> Option<u32> {
+    match raw & 0xFFF {
+        0 => Some(1),
+        low if low >= 2048 => None,
+        low => Some(low),
+    }
+}
 
 /// One enabled test of a config, as a cycle plan holds it (TODO 74).
 pub struct ConfigTest<'a> {
@@ -1072,7 +1140,7 @@ impl ModernConfig {
     pub fn save_to_file(&self, path: &str) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| format!("Failed to serialize config: {}", e))?;
 
-        fs::write(path, json).map_err(|e| format!("Failed to write config file: {}", e))
+        crate::atomic_file::write(std::path::Path::new(path), json.as_bytes()).map(drop)
     }
 
     // Convert to runtime allocation strategy (extent/chunk modes are now test-specific)
@@ -1144,7 +1212,7 @@ impl ModernConfig {
                 config: self.build_test(i, test)?,
                 id: test.id.as_deref(),
                 seal_opt_out: test.seal == Some(false),
-                tm5_pattern: test.tm5_pattern,
+                tm5_pattern: test.tm5_pattern.clone(),
                 latency: Self::latency_settings(i, test)?,
             });
         }
@@ -1187,11 +1255,14 @@ impl ModernConfig {
         Ok(settings)
     }
 
+    /// The channels the SimpleTest stride takes: `system.channels`, else the legacy TM5 metadata's, else 2
+    pub(crate) fn channels(&self) -> u32 {
+        if self.system.channels > 0 { self.system.channels } else { self.legacy_metadata.as_ref().map_or(2, |m| m.tm5_channels) }
+    }
+
     /// One test's runtime config from its entry `i` in `test_sequence`.
     fn build_test(&self, i: usize, test: &TestConfig) -> Result<TestMemoryConfig, String> {
-        // Channels: prefer JSON system.channels, fall back to legacy TM5 metadata, default 2
-        let channels =
-            if self.system.channels > 0 { self.system.channels } else { self.legacy_metadata.as_ref().map_or(2, |m| m.tm5_channels) };
+        let channels = self.channels();
         let extent_mode = self.parse_test_extent_mode(test).map_err(|e| Self::test_error(i, test, e))?;
         let chunk_mode = self.parse_test_chunk_mode(test).map_err(|e| Self::test_error(i, test, e))?;
         if let Some(mode) = test.pattern_mode
@@ -1379,7 +1450,11 @@ impl ModernConfig {
 
         // v2: Attach correctly interpreted parameter context
         if let Some(param) = test.parameter {
-            config = config.with_parameter_context(interpret_tm5_parameter_with_channels(&test.function, param, channels));
+            let mut ctx = interpret_tm5_parameter_with_channels(&test.function, param, channels);
+            if self.legacy_metadata.as_ref().is_some_and(|m| m.tm5_interleave_type == 0) && test.function.starts_with("Mem-SimpleV2") {
+                interleave_0_walk(&mut ctx, channels, config.native_program().is_some());
+            }
+            config = config.with_parameter_context(ctx);
         }
         if let Some(access) = explicit_access(test).map_err(|e| Self::test_error(i, test, e))? {
             config = config.with_parameter_context(TestParameterContext {
@@ -1686,86 +1761,501 @@ impl ModernConfig {
     }
 }
 
-impl LegacyConfig {
-    pub fn load_from_file(path: &str) -> Result<Self, String> {
-        let content = fs::read_to_string(path).map_err(|e| format!("Failed to read legacy config file: {}", e))?;
+/// The first size of an imported `.cfg`'s 2 MiB-page requests (`largechunk=`), half TMR's own default (`DEFAULT_LARGE_CHUNK`, 128 MiB):
+/// TMR's choice, not TM5's, which has no such setting (TODO 131, the owner). Threads end about one request apart when 2 MiB pages
+/// run out, and a TM5 setup's shares are often small (2.22 GiB on a 12-thread, 32 GiB box), so their 4 KiB tails come out more even.
+const IMPORT_LARGE_CHUNK: &str = "64MiB";
 
-        Self::parse_legacy_format(&content)
+/// Test numbers, sorted, runs of three or more written as a range: `1, 3-15`
+fn id_ranges(mut ids: Vec<u32>) -> String {
+    ids.sort_unstable();
+    ids.dedup();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < ids.len() {
+        let mut j = i;
+        while j + 1 < ids.len() && ids[j + 1] == ids[j] + 1 {
+            j += 1;
+        }
+        match j - i {
+            0 => parts.push(ids[i].to_string()),
+            1 => parts.extend([ids[i].to_string(), ids[j].to_string()]),
+            _ => parts.push(format!("{}-{}", ids[i], ids[j])),
+        }
+        i = j + 1;
+    }
+    parts.join(", ")
+}
+
+/// A structural problem in a TM5 `.cfg` (`LegacyConfig::parse_reporting`). Never an error: TM5 reads such a file, and community configs
+/// must keep loading. But a crash can damage a `.cfg` with no visible sign, and each of these changes what the file runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CfgWarning {
+    /// From 1, as an editor counts
+    pub line: usize,
+    pub message: String,
+}
+
+/// How many of a `.cfg`'s warnings are logged one by one; one line counts the rest (a file of garbage would fill the window's errors list)
+const MAX_CFG_WARNINGS: usize = 20;
+
+/// The keys TM5 reads in each of its `.cfg` sections (`TM5/mt_ini.inc`), lowercase, as TMR looks them up; TMR reads some of them
+const TM5_MAIN_KEYS: &[&str] = &["config name", "config author", "cores", "tests", "time (%)", "cycles", "language", "test sequence"];
+const TM5_MEMORY_KEYS: &[&str] = &[
+    "channels", "interleave type", "single dimm width, bits", "operation block, byts", "testing window size (mb)",
+    "lock memory granularity (mb)", "reserved memory for windows (mb)", "capable", "debug level",
+];
+const TM5_WINDOW_KEYS: &[&str] = &["windowposx", "windowposy"];
+const TM5_TEST_KEYS: &[&str] = &[
+    "enable", "time (%)", "function", "dll name", "pattern mode", "pattern param0", "pattern param1", "parameter", "test block size (mb)",
+];
+
+/// The keys TM5 reads in `section` (lowercase), `None` for a section it doesn't read. `[Test0]` to `[Test15]`, as TM5 names them
+/// (`Test%li`), so not `[Test05]`.
+fn tm5_section_keys(section: &str) -> Option<&'static [&'static str]> {
+    match section {
+        "main section" => Some(TM5_MAIN_KEYS),
+        "global memory setup" => Some(TM5_MEMORY_KEYS),
+        "window position" => Some(TM5_WINDOW_KEYS),
+        _ => {
+            let n = section.strip_prefix("test")?;
+            n.parse::<u32>().is_ok_and(|i| i < 16 && i.to_string() == n).then_some(TM5_TEST_KEYS)
+        }
+    }
+}
+
+/// `text` trimmed as `GetPrivateProfileString` trims a line, a section's name, a key and a value: every character from NUL to the space
+/// at both ends (measured, review of the `.cfg` warnings: a crash's run of NULs before a header or a key, or after a value, is read past),
+/// not Unicode's other spaces, nor DEL
+fn ini_trim(text: &str) -> &str {
+    text.trim_matches(|c: char| c <= ' ')
+}
+
+/// A value, `ini_trim`med, as TM5 0.12.3 takes it: one pair of matching quotes around it dropped, `"` or `'` (`GetPrivateProfileString`
+/// does, measured: `"4"` is 4, an unmatched `"8` stays), then cut at its first `;`, an inline comment (0.12.3, `tm5.cpp` ~998-1008, for
+/// every value; `TM5.asm`'s note of 2018-05-31 adds the comments, in an ini reader newer than the tree's `ini.asm`), and trimmed again.
+/// A value that is only a comment is then empty, the key's default.
+fn cfg_value(value: &str) -> &str {
+    let unquoted = match value.as_bytes() {
+        [quote @ (b'"' | b'\''), .., last] if last == quote => &value[1..value.len() - 1],
+        _ => value,
+    };
+    ini_trim(unquoted.split_once(';').map_or(unquoted, |(before, _)| before))
+}
+
+/// A `.cfg` number as TM5 reads it (`tm5_number`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Tm5Number {
+    /// Its low 32 bits, negated (two's complement) when it has a `-`, as TM5's register holds it
+    value: u32,
+    source: u64,
+    negative: bool,
+    /// Written in hex, so said in hex
+    hex: bool,
+    /// More than 32 bits were written: TM5 keeps the low 32 (`shl eax,4` in its hex loop, `atodw` in decimal)
+    wide: bool,
+}
+
+/// `text` as TM5 reads a number (`ini.asm` LoadIniSettingEx ~110-236; 0.12.3, `tm5.cpp` ~1009-1060, is the same): hex with a `0x`
+/// (TM5's is lowercase; TMR takes `0X` too), with an `h` or `H` after its digits, or with a letter A-F among them; otherwise decimal,
+/// after an optional `-` (TMR takes a `+` too). A `.` and the digits after it are dropped: TM5 scales the fraction only to divide it
+/// away, so 100.5 is 100. `None` for text TM5 reads only by accident, which TMR refuses: a word ("eight" is 0xE to TM5), a sign on hex,
+/// text after the number, `0x` alone. Any number of digits; only the low 32 bits count.
+fn tm5_number(text: &str) -> Option<Tm5Number> {
+    let (negative, unsigned) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let (digits, fraction, marked) = match unsigned.strip_prefix("0x").or_else(|| unsigned.strip_prefix("0X")) {
+        Some(digits) => (digits, "", true),
+        None => {
+            let (body, suffixed) = unsigned.strip_suffix(['h', 'H']).map_or((unsigned, false), |body| (body, true));
+            let (digits, fraction) = body.split_once('.').unwrap_or((body, ""));
+            (digits, fraction, suffixed)
+        }
+    };
+    let hex = marked || digits.chars().chain(fraction.chars()).any(|c| c.is_ascii_alphabetic());
+    let radix = if hex { 16 } else { 10 };
+    let all_digits = |s: &str| s.chars().all(|c| c.is_digit(radix));
+    if digits.is_empty() || !all_digits(digits) || !all_digits(fraction) || (hex && unsigned.len() != text.len()) {
+        return None;
+    }
+    let (mut value, mut wide) = (0u64, false);
+    for d in digits.chars().filter_map(|c| c.to_digit(radix)) {
+        value = value.wrapping_mul(radix as u64).wrapping_add(d as u64);
+        if value > u32::MAX as u64 {
+            wide = true;
+        }
+    }
+    let source = if negative { value.wrapping_neg() } else { value };
+    let value = if negative { (value as u32).wrapping_neg() } else { value as u32 };
+    Some(Tm5Number { value, source, negative: negative && value != 0, hex, wide })
+}
+
+/// TM5's `Test Sequence` buffer, 128 bytes with its NUL (`mt_ini.inc` `szTestSequenceBuff`), and its table of steps (`TstSequencySize`)
+const TM5_SEQUENCE_TEXT: usize = 127;
+const TM5_SEQUENCE_ENTRIES: usize = 32;
+
+/// `Test Sequence` read as TM5 reads it (`mt_ini.asm` SearchDigital and GetNumber ~352-423, the same in 0.12.3): its first 127 characters,
+/// each run of digits a test number and anything between them a separator, and the first 32 numbers. A number keeps its low byte, as
+/// TM5 stores it (`mov [edi],al`), so 258 is test 2, warned. A letter is refused: TM5 skips it as a separator, but it is a typo, not a
+/// list. A separator other than commas and spaces, and anything TM5 doesn't read, is warned on `line`. TM5's own bug at exactly 32
+/// entries (no end mark, so it runs two bytes after them as steps) isn't copied.
+fn tm5_sequence(text: &str, line: usize, warnings: &mut Vec<CfgWarning>) -> Result<Vec<u32>, String> {
+    let mut warn = |message: String| warnings.push(CfgWarning { line, message });
+    let length = text.chars().count();
+    if text.chars().skip(TM5_SEQUENCE_TEXT).any(|c| c.is_ascii_digit()) {
+        warn(format!("[Main Section] Test Sequence is {length} characters; TM5 reads only the first {TM5_SEQUENCE_TEXT}, and so does TMR"));
+    }
+    let read: Vec<char> = text.chars().take(TM5_SEQUENCE_TEXT).collect();
+    let (mut numbers, mut odd, mut wide, mut i) = (Vec::new(), None, Vec::new(), 0);
+    while i < read.len() {
+        let start = i;
+        if read[i].is_ascii_digit() {
+            while read.get(i).is_some_and(char::is_ascii_digit) {
+                i += 1;
+            }
+            let digits: String = read[start..i].iter().collect();
+            // The number mod 256: TM5's 32-bit sum, then its low byte
+            let byte = digits.bytes().fold(0u8, |n, d| n.wrapping_mul(10).wrapping_add(d - b'0'));
+            let significant = digits.trim_start_matches('0');
+            if significant.len() > 3 || significant.parse::<u16>().is_ok_and(|n| n > 255) {
+                wide.push(format!("{digits} as {byte}"));
+            }
+            numbers.push(byte as u32);
+        } else if read[i].is_alphanumeric() {
+            while read.get(i).is_some_and(|c| c.is_alphanumeric()) {
+                i += 1;
+            }
+            let word: String = read[start..i].iter().collect();
+            return Err(format!("TM5 config [Main Section] Test Sequence: '{}' is not a test number", cfg_quoted(&word)));
+        } else {
+            if read[i] != ',' && !read[i].is_whitespace() {
+                odd.get_or_insert(read[i]);
+            }
+            i += 1;
+        }
+    }
+    if let Some(c) = odd {
+        warn(format!(
+            "[Main Section] Test Sequence separates its numbers with '{}'; TM5 reads anything that isn't a digit as a separator, and \
+             so does TMR",
+            c.escape_debug()
+        ));
+    }
+    if !wide.is_empty() {
+        warn(format!(
+            "[Main Section] Test Sequence: TM5 keeps only the low byte of each number, so reads {}, and so does TMR",
+            wide.join(", ")
+        ));
+    }
+    // A number of 16 or more ends the list (`to_modern_config`), so entries after one are no loss
+    if numbers.len() > TM5_SEQUENCE_ENTRIES && !numbers[..TM5_SEQUENCE_ENTRIES].iter().any(|&n| n >= 16) {
+        warn(format!(
+            "[Main Section] Test Sequence has {} entries; TM5 runs only the first {TM5_SEQUENCE_ENTRIES}, and so does TMR",
+            numbers.len()
+        ));
+    }
+    numbers.truncate(TM5_SEQUENCE_ENTRIES);
+    Ok(numbers)
+}
+
+/// A `.cfg`'s bytes as text, and the line of the first that isn't UTF-8, if any. `GetPrivateProfileStringA` reads any bytes, so they
+/// must load, as an error stopped them: UTF-16 with its BOM (Notepad's "Unicode"), else UTF-8, a byte that isn't read as `�`, which a
+/// file saved as ANSI (a comment in another script) has, or garbage a crash left.
+fn cfg_text(bytes: &[u8]) -> (String, Option<usize>) {
+    let utf16 =
+        |pairs: &[[u8; 2]], unit: fn([u8; 2]) -> u16| String::from_utf16_lossy(&pairs.iter().map(|&pair| unit(pair)).collect::<Vec<_>>());
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => (utf16(rest.as_chunks::<2>().0, u16::from_le_bytes), None),
+        [0xFE, 0xFF, rest @ ..] => (utf16(rest.as_chunks::<2>().0, u16::from_be_bytes), None),
+        _ => match std::str::from_utf8(bytes) {
+            Ok(text) => (text.to_string(), None),
+            Err(e) => {
+                let line = bytes[..e.valid_up_to()].iter().filter(|&&b| b == b'\n').count() + 1;
+                (String::from_utf8_lossy(bytes).into_owned(), Some(line))
+            }
+        },
+    }
+}
+
+/// `warnings` logged as `<path>, line N: ...`, the first `MAX_CFG_WARNINGS`, then a count
+fn log_cfg_warnings(path: &str, warnings: &[CfgWarning]) {
+    for CfgWarning { line, message } in warnings.iter().take(MAX_CFG_WARNINGS) {
+        log::warn!("{path}, line {line}: {message}");
+    }
+    if warnings.len() > MAX_CFG_WARNINGS {
+        log::warn!("{path}: {} more warnings like these, not listed", warnings.len() - MAX_CFG_WARNINGS);
+    }
+}
+
+/// A `.cfg` line as a warning quotes it: control characters escaped, so a crash's NULs show, and cut at 40 characters
+fn cfg_quoted(text: &str) -> String {
+    let mut quoted = String::new();
+    for c in text.chars().take(40) {
+        if c.is_control() {
+            quoted.extend(c.escape_debug());
+        } else {
+            quoted.push(c);
+        }
+    }
+    if text.chars().nth(40).is_some() {
+        quoted.push_str("...");
+    }
+    quoted
+}
+
+/// One `.cfg` section as TM5 reads it: each key, lowercase, with its value and line, the first of a repeated key
+#[derive(Default)]
+struct CfgSection {
+    /// As its header writes it
+    name: String,
+    keys: HashMap<String, (String, usize)>,
+    /// Its header's
+    line: usize,
+}
+
+impl CfgSection {
+    fn get(&self, key: &str) -> Option<&String> {
+        self.keys.get(&key.to_ascii_lowercase()).map(|(value, _)| value)
     }
 
-    pub(crate) fn parse_legacy_format(content: &str) -> Result<Self, String> {
-        let mut sections: HashMap<String, HashMap<String, String>> = HashMap::new();
-        let mut current_section = String::new();
+    /// `key`'s line, the header's when it isn't there
+    fn line_of(&self, key: &str) -> usize {
+        self.keys.get(&key.to_ascii_lowercase()).map_or(self.line, |(_, line)| *line)
+    }
+}
 
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
+impl LegacyConfig {
+    /// A `.cfg` loaded, its warnings logged with its path and line (`read_file`). They are logged when the load then fails too: a
+    /// damaged header can be why `[Main Section]` is missing.
+    pub fn load_from_file(path: &str) -> Result<Self, String> {
+        let (parsed, warnings) = Self::read_file(path)?;
+        log_cfg_warnings(path, &warnings);
+        parsed
+    }
+
+    /// The `.cfg` at `path` read (`cfg_text`, a line that isn't UTF-8 warned) and parsed (`parse_reporting`), with its warnings, not
+    /// logged; or why it couldn't be read. `load_config` names the file in either error.
+    fn read_file(path: &str) -> Result<(Result<Self, String>, Vec<CfgWarning>), String> {
+        let bytes = fs::read(path).map_err(|e| format!("Failed to read legacy config file: {e}"))?;
+        let (content, not_utf8) = cfg_text(&bytes);
+        let mut warnings = Vec::new();
+        if let Some(line) = not_utf8 {
+            let message = "isn't UTF-8 text (a file saved as ANSI, or damage): TMR reads each byte that isn't as �".to_string();
+            warnings.push(CfgWarning { line, message });
+        }
+        let parsed = Self::parse_reporting(&content, &mut warnings, crate::pattern::legacy_import());
+        Ok((parsed, warnings))
+    }
+
+    /// `parse_reporting` without its warnings, for a test that checks only what a `.cfg`'s text loads as
+    #[cfg(test)]
+    pub(crate) fn parse_legacy_format(content: &str) -> Result<Self, String> {
+        Self::parse_reporting(content, &mut Vec::new(), false)
+    }
+
+    /// A `.cfg`'s text read as TM5 reads it, through `GetPrivateProfileString` (as measured on Windows Server 2025, build 26100): names
+    /// ignore case; lines, names and values ignore every character from NUL to the space around them (`ini_trim`), a crash's NULs among
+    /// them; a repeated key keeps its first value; a repeated section is never read, so only the first one's keys count (they aren't
+    /// merged); a header with no `]` names the section the rest of its line does, and text after the `]` is ignored; a value's matching
+    /// quotes and a `;` comment after it are dropped (`cfg_value`). TMR also drops a leading UTF-8 BOM, which would cost TM5 a header on
+    /// the first line.
+    ///
+    /// A missing key, an empty number and a missing section take TM5's defaults (`Tests` 6, `Cycles` 3, TM5's default `Test Sequence`).
+    /// An empty text value stays empty, as TM5 0.12.3 reads it: an empty `Function` is one TMR doesn't know, and an empty `Test Sequence`
+    /// every enabled test once (`to_modern_config`). A missing `[Main Section]` or `[Global Memory Setup]` is an error only in a file with
+    /// neither TM5's header line nor any TM5 section, which is no `.cfg` at all (a broken JSON config falls back to this reader). Numbers
+    /// are read as TM5 reads them (`tm5_number`), so a value TM5 reads only by accident is an error. `[TestN]` at or above `Tests` is left
+    /// out, as TM5 never reads it.
+    ///
+    /// The structure only warns, into `warnings`, whether the load then succeeds or not. It warns on a line with NULs, a line that is
+    /// neither a header nor a key=value (TM5's own text before the first header aside), a key before any section, a key or section TM5
+    /// doesn't read, a header with no `]` or with a key=value after it, a repeated section or key, a missing section, a `[TestN]` at or
+    /// above `Tests`, a number wider than 32 bits, a negative Parameter or Test Block Size, an odd `Test Sequence`, and a Tests, Channels
+    /// or Lock Memory Granularity TMR clamps.
+    fn parse_reporting(content: &str, warnings: &mut Vec<CfgWarning>, legacy_patterns: bool) -> Result<Self, String> {
+        // Where a key=value line goes: nowhere before the first header (TM5's own text is there), into a section TM5 reads, or nowhere,
+        // in one it doesn't or a repeated one
+        enum Place {
+            Preamble,
+            Read(String),
+            Unread,
+        }
+        let content = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+        // TM5's own first line (`mt_ini.inc` MainIniHeader), which every file TM5 wrote starts with
+        let tm5_header = content.lines().next().is_some_and(|line| ini_trim(line).starts_with("Memory Test config file"));
+        let mut sections: HashMap<String, CfgSection> = HashMap::new();
+        let mut place = Place::Preamble;
+        for (index, raw) in content.lines().enumerate() {
+            let mut warn = |message: String| warnings.push(CfgWarning { line: index + 1, message });
+            // A run of NULs is what a crash while the file was written leaves: read past at the ends of a line, a name or a value, as
+            // TM5 reads past them, but said, as damage
+            let nuls = raw.matches('\0').count();
+            if nuls > 0 {
+                warn(format!(
+                    "{nuls} NUL byte{}, as a crash while the file was written leaves; TM5 ignores them around a name or a value, and \
+                     so does TMR",
+                    if nuls == 1 { "" } else { "s" }
+                ));
+            }
+            let line = ini_trim(raw);
+            // `;` is the INI comment. `#` has always been TMR's; TM5 reads such a line as a key it never asks for, so ignores it too.
+            if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
                 continue;
             }
-
-            if line.starts_with('[') && line.ends_with(']') {
-                // TM5 uses GetPrivateProfileString: section and key names ignore case; values (including function names) do not.
-                current_section = line[1..line.len() - 1].to_ascii_lowercase();
-                sections.insert(current_section.clone(), HashMap::new());
-            } else if let Some(eq_pos) = line.find('=') {
-                let key = line[..eq_pos].trim().to_ascii_lowercase();
-                let value = line[eq_pos + 1..].trim().to_string();
-                if let Some(section) = sections.get_mut(&current_section) {
-                    section.insert(key, value);
+            if let Some(header) = line.strip_prefix('[') {
+                let (name, after) = header.split_once(']').unwrap_or((header, ""));
+                let name = ini_trim(name);
+                // Escaped for the text: a name a crash damaged may hold NULs, which a console doesn't show
+                let shown = cfg_quoted(name);
+                if !header.contains(']') {
+                    warn(format!("\"{}\" has no closing ']'; TM5 reads it as the header of [{shown}], and so does TMR", cfg_quoted(line)));
+                } else if after.contains('=') {
+                    // A lost line break. Other text there costs nothing: anta777's three 2020 configs have "[Test6]    `"
+                    warn(format!("\"{}\" has a key=value after its ']', which TM5 ignores, and so does TMR", cfg_quoted(line)));
+                }
+                let key = name.to_ascii_lowercase();
+                place = if tm5_section_keys(&key).is_none() {
+                    warn(format!("[{shown}] is not a section TM5 reads; TM5 and TMR ignore its keys"));
+                    Place::Unread
+                } else if let Some(first) = sections.get(&key) {
+                    warn(format!(
+                        "[{shown}] again (first at line {}): TM5 reads only the first, so it ignores the keys under this one, and so does \
+                         TMR",
+                        first.line
+                    ));
+                    Place::Unread
+                } else {
+                    sections.insert(key.clone(), CfgSection { name: name.to_string(), keys: HashMap::new(), line: index + 1 });
+                    Place::Read(key)
+                };
+                continue;
+            }
+            let setting = line.split_once('=').map(|(key, value)| (ini_trim(key), ini_trim(value))).filter(|(key, _)| !key.is_empty());
+            match (&place, setting) {
+                (Place::Preamble, None) => {}
+                (_, None) => warn(format!("\"{}\" is neither a [section] header nor a key=value; TM5 and TMR ignore it", cfg_quoted(line))),
+                (Place::Preamble, Some(_)) => warn(format!("\"{}\" comes before any [section]; TM5 and TMR ignore it", cfg_quoted(line))),
+                (Place::Unread, Some(_)) => {}
+                (Place::Read(key_of_section), Some((key, value))) => {
+                    let Some(section) = sections.get_mut(key_of_section) else { continue };
+                    let lower = key.to_ascii_lowercase();
+                    if !tm5_section_keys(key_of_section).unwrap_or_default().contains(&lower.as_str()) {
+                        warn(format!("\"{}\" in [{}]: not a key TM5 reads, so TM5 and TMR ignore it", cfg_quoted(line), section.name));
+                    } else if let Some((first, first_line)) = section.keys.get(&lower) {
+                        warn(format!(
+                            "\"{}\" in [{}] repeats the key of line {first_line}; TM5 keeps that first value, {}, and so does TMR",
+                            cfg_quoted(line),
+                            section.name,
+                            cfg_quoted(first)
+                        ));
+                    } else {
+                        section.keys.insert(lower, (cfg_value(value).to_string(), index + 1));
+                    }
                 }
             }
         }
 
-        // A key that is there must parse: an unparsable value used to become its default silently (an unreadable Parameter made a strided
-        // test sequential)
-        fn num<T: std::str::FromStr>(section: &HashMap<String, String>, name: &str, key: &str, default: T) -> Result<T, String> {
-            match section.get(&key.to_ascii_lowercase()) {
+        // A key's number (`tm5_number`), `None` when it is missing or empty: TM5 reads an empty value as a missing one. Text that isn't a
+        // number is an error, not the default TM5 makes it: an unreadable Parameter used to make a strided test sequential, silently. A
+        // number wider than 32 bits keeps its low 32, as TM5's register does, with a warning
+        fn number(
+            section: &CfgSection, name: &str, key: &str, warnings: &mut Vec<CfgWarning>, warn_wide: bool,
+        ) -> Result<Option<Tm5Number>, String> {
+            let Some(text) = section.get(key).filter(|text| !text.is_empty()) else { return Ok(None) };
+            let n = tm5_number(text).ok_or_else(|| format!("TM5 config [{name}] {key}={}: not a number", cfg_quoted(text)))?;
+            if n.wide && warn_wide {
+                let kept = if n.hex { format!("0x{:X}", n.value) } else { n.value.to_string() };
+                let handling = if matches!(key, "Pattern Param0" | "Pattern Param1") {
+                    "patterns=legacy uses that value; the original is recorded"
+                } else {
+                    "TMR uses that value"
+                };
+                let message =
+                    format!("[{name}] {key}={} is wider than 32 bits; TM5 keeps the low 32 bits, {kept}; {handling}", cfg_quoted(text));
+                warnings.push(CfgWarning { line: section.line_of(key), message });
+            }
+            Ok(Some(n))
+        }
+        // A key TM5 takes from 0 up. A '-' is refused: TM5 checks the number without it against the range, then stores it negated, which
+        // no such key reads as meant (Cycles=-3 is 253 cycles)
+        fn num(section: &CfgSection, name: &str, key: &str, default: u32, warnings: &mut Vec<CfgWarning>) -> Result<u32, String> {
+            match number(section, name, key, warnings, true)? {
                 None => Ok(default),
-                Some(s) => s.parse().map_err(|_| format!("TM5 config [{name}] {key}={s}: not a number")),
+                Some(n) if n.negative => Err(format!(
+                    "TM5 config [{name}] {key}={}: negative, which TM5 checks against its range without the '-' and then stores negated; \
+                     TMR refuses it",
+                    cfg_quoted(section.get(key).map_or("", String::as_str))
+                )),
+                Some(n) => Ok(n.value),
             }
         }
-        // TM5 writes the pattern parameters in hex, with or without 0x
-        fn hex(section: &HashMap<String, String>, name: &str, key: &str, default: u64) -> Result<u64, String> {
-            match section.get(&key.to_ascii_lowercase()) {
-                None => Ok(default),
-                Some(s) => {
-                    let digits = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
-                    u64::from_str_radix(digits, 16).map_err(|_| format!("TM5 config [{name}] {key}={s}: not a 64-bit hex number"))
-                }
+        // A key whose TM5 range is every 32-bit number, 0x80000000 to 0x7FFFFFFF (Pattern Mode, Pattern Param0 and Param1, Parameter,
+        // Test Block Size): a negative one is its two's complement, as TM5 stores it
+        fn signed(section: &CfgSection, name: &str, key: &str, default: u32, warnings: &mut Vec<CfgWarning>) -> Result<u32, String> {
+            Ok(number(section, name, key, warnings, true)?.map_or(default, |n| n.value))
+        }
+        // A value TMR takes only within `lo..=hi` is clamped into it, with a warning
+        fn clamped(section: &CfgSection, name: &str, key: &str, value: u32, (lo, hi): (u32, u32), warnings: &mut Vec<CfgWarning>) -> u32 {
+            let kept = value.clamp(lo, hi);
+            if kept != value {
+                let bound = if value < lo { format!("below {lo}") } else { format!("above {hi}") };
+                let message = format!("[{name}] {key}={value} is {bound}; TMR uses {kept}");
+                warnings.push(CfgWarning { line: section.line_of(key), message });
             }
+            kept
         }
 
-        // Parse main section
-        let main = sections.get("main section").ok_or("Missing [Main Section]")?;
+        // A missing section is every one of its keys missing, as TM5 reads it, in a file TM5 would take for its own: one with TM5's first
+        // line or any section TM5 reads. A file with neither is no .cfg (load_config falls back to this reader for a JSON config that
+        // doesn't parse, whose run on defaults would hide it)
+        let tm5_file = tm5_header || !sections.is_empty();
+        for (key, name) in [("main section", "Main Section"), ("global memory setup", "Global Memory Setup")] {
+            if sections.contains_key(key) {
+                continue;
+            }
+            if !tm5_file {
+                return Err(format!("Missing [{name}]"));
+            }
+            warnings.push(CfgWarning { line: 1, message: format!("no [{name}]: TM5 gives each of its keys its default, and so does TMR") });
+        }
+        let absent = CfgSection::default();
 
+        let main = sections.get("main section").unwrap_or(&absent);
+        let ms = "Main Section";
+        let tests_in_play = clamped(main, ms, "Tests", num(main, ms, "Tests", 6, warnings)?, (1, 16), warnings);
         let test_sequence = match main.get("test sequence") {
-            None => Vec::new(),
-            Some(s) => s
-                .split(',')
-                .map(|n| n.trim())
-                .filter(|n| !n.is_empty())
-                .map(|n| n.parse::<u32>().map_err(|_| format!("TM5 config [Main Section] Test Sequence: '{n}' is not a test number")))
-                .collect::<Result<Vec<_>, _>>()?,
+            None => None,
+            Some(text) => Some(tm5_sequence(text, main.line_of("test sequence"), warnings)?),
         };
-
         let main_section = LegacyMainSection {
-            config_name: main.get("config name").unwrap_or(&"Unknown".to_string()).clone(),
-            config_author: main.get("config author").unwrap_or(&"Unknown".to_string()).clone(),
-            cores: num(main, "Main Section", "Cores", 0)?,
-            time_percent: num(main, "Main Section", "Time (%)", 100)?,
-            cycles: num(main, "Main Section", "Cycles", 1)?,
+            // TM5's own defaults (`mt_ini.inc` szDefCfgName, szDefCfgAuthor)
+            config_name: main.get("config name").map_or("Default", String::as_str).to_string(),
+            config_author: main.get("config author").map_or("serj", String::as_str).to_string(),
+            cores: num(main, ms, "Cores", 0, warnings)?,
+            tests: tests_in_play,
+            time_percent: num(main, ms, "Time (%)", 100, warnings)?,
+            // TM5's DefTestingCycles
+            cycles: num(main, ms, "Cycles", 3, warnings)?,
             test_sequence,
         };
 
-        // Parse memory setup
-        let memory = sections.get("global memory setup").ok_or("Missing [Global Memory Setup]")?;
+        let memory = sections.get("global memory setup").unwrap_or(&absent);
         let gms = "Global Memory Setup";
-
+        let lock = "Lock Memory Granularity (Mb)";
         let memory_setup = LegacyMemorySetup {
-            testing_window_size_mb: num(memory, gms, "Testing Window Size (Mb)", 880)?,
-            reserved_memory_mb: num(memory, gms, "Reserved Memory for Windows (Mb)", 128)?,
-            channels: num::<u32>(memory, gms, "Channels", 2)?.clamp(1, 8),
-            lock_granularity_mb: num::<u32>(memory, gms, "Lock Memory Granularity (Mb)", 16)?.clamp(1, 512),
+            // TM5's own default when the key is missing (mt_ini.inc: DefWindowSizeMB = 1024). In TMR it only sizes the import's blocks
+            // (codes 0-3 are fractions of it, larger blocks are capped at it): a thread's memory is its whole share, not a window
+            testing_window_size_mb: num(memory, gms, "Testing Window Size (Mb)", 1024, warnings)?,
+            reserved_memory_mb: num(memory, gms, "Reserved Memory for Windows (Mb)", 128, warnings)?,
+            // TM5 takes 1-3; TMR any from 1, as its command line's channels=: it only multiplies the SimpleTest stride
+            channels: clamped(memory, gms, "Channels", num(memory, gms, "Channels", 2, warnings)?, (1, u32::MAX), warnings),
+            interleave_type: num(memory, gms, "Interleave Type", 1, warnings)?,
+            // TM5 takes 1-512; TMR up to 1024, its largest request (`hugechunk`, 1 GiB), which the step each thread's share rounds to
+            // (`memory_allocation`) must not exceed
+            lock_granularity_mb: clamped(memory, gms, lock, num(memory, gms, lock, 16, warnings)?, (1, 1024), warnings),
         };
 
         // TM5 loads its default enabled RefreshStable slot even when [Test0] is absent. Feed an empty section through the same
@@ -1774,27 +2264,79 @@ impl LegacyConfig {
 
         // Parse tests. A field a present `[TestN]` omits takes TM5's own per-slot default (`DefTestParam.inc`), not TMR's generic
         // 0/"Unknown": deleting `Enable=1` from a declared test leaves it enabled in TM5 (`TableEnableTst` is all 1), and e.g. Test2's
-        // own default `Parameter` is 254, not 0. Entirely undeclared slots 1-15 are still left out: TM5's `Tests=` governs which
-        // ordinary slots are in play, and no shipped `.cfg` both uses one and omits its whole section.
+        // own default `Parameter` is 254, not 0. TM5 reads only the slots below `Tests` (`mt_ini.asm` ~338-340), so one at or above it is
+        // left out before its function is looked at. An undeclared slot below it is left out too, the owner's call (2026-11-12,
+        // `doc/tm5_absolutnew_validation_2026-11-12.md`), so a Test Sequence that names one is an error.
         let mut tests = Vec::new();
-        for i in 0..=15 {
-            let test_section = format!("Test{}", i);
-            if let Some(test) = sections.get(&test_section.to_ascii_lowercase()) {
-                let name = test_section.as_str();
-                let d = i as usize;
-                let legacy_test = LegacyTest {
-                    id: i,
-                    enabled: num::<u32>(test, name, "Enable", 1)? == 1,
-                    time_percent: num(test, name, "Time (%)", 100)?,
-                    function: test.get("function").cloned().unwrap_or_else(|| TM5_DEFAULT_FUNCTION[d].to_string()),
-                    pattern_mode: num(test, name, "Pattern Mode", TM5_DEFAULT_PATTERN_MODE[d])?,
-                    pattern_param0: hex(test, name, "Pattern Param0", TM5_DEFAULT_PATTERN_PARAM0[d])?,
-                    pattern_param1: hex(test, name, "Pattern Param1", TM5_DEFAULT_PATTERN_PARAM1[d])?,
-                    parameter: num(test, name, "Parameter", TM5_DEFAULT_PARAMETER[d])?,
-                    test_chunk_size_mb: num(test, name, "Test Block Size (Mb)", TM5_DEFAULT_BLOCK_SIZE_MB[d])?,
-                };
-                tests.push(legacy_test);
+        for i in 0..16u32 {
+            let Some(test) = sections.get(&format!("test{i}")) else { continue };
+            if i >= tests_in_play {
+                let message = format!(
+                    "[{}] is at or above Tests={tests_in_play}: TM5 reads only [Test0] to [Test{}], so it ignores this one, and so \
+                     does TMR",
+                    test.name,
+                    tests_in_play - 1
+                );
+                warnings.push(CfgWarning { line: test.line, message });
+                continue;
             }
+            let name = format!("Test{i}");
+            let name = name.as_str();
+            let d = i as usize;
+            // TM5's range for these two is every 32-bit number, read as signed: 0x80000000 and up, and 3000000000 too, are negative to it
+            let parameter = signed(test, name, "Parameter", TM5_DEFAULT_PARAMETER[d], warnings)?;
+            let written = |key: &str| cfg_quoted(test.get(key).map_or("", String::as_str));
+            // Each test TMR imports runs a negative Parameter as 0 (`mtests0.asm`): SimpleTest's `Channels * Parameter - 1` is then below
+            // 1, MirrorMove128's jump is skipped (`jle NoJump`), and MirrorMove's only other values are 2 to 4
+            let parameter = if (parameter as i32) < 0 {
+                let message = format!(
+                    "[{name}] Parameter={} is {} to TM5, which runs a negative one as 0 (SimpleTest sequential, MirrorMove the whole \
+                     block, MirrorMove128 no jump), and so does TMR",
+                    written("parameter"),
+                    parameter as i32
+                );
+                warnings.push(CfgWarning { line: test.line_of("parameter"), message });
+                0
+            } else {
+                parameter
+            };
+            // A negative one runs as TM5's shift to bytes leaves it (`chunk_spec`)
+            let block = "Test Block Size (Mb)";
+            let test_chunk_size_mb = signed(test, name, block, TM5_DEFAULT_BLOCK_SIZE_MB[d], warnings)?;
+            if (test_chunk_size_mb as i32) < 0 {
+                let leaves = match tm5_negative_block_mib(test_chunk_size_mb) {
+                    None => "it negative, so runs the window".to_string(),
+                    Some(1) if test_chunk_size_mb & 0xFFF == 0 => "0, so runs 1 MiB".to_string(),
+                    Some(mib) => format!("{mib} MiB"),
+                };
+                let message = format!(
+                    "[{name}] {block}={} is {} to TM5, which shifts it to bytes in 32 bits; that leaves {leaves}, and so does TMR",
+                    written("test block size (mb)"),
+                    test_chunk_size_mb as i32
+                );
+                warnings.push(CfgWarning { line: test.line_of(block), message });
+            }
+            let mut param = |key: &str, default: u64| -> Result<(u64, String), String> {
+                let n = number(test, name, key, warnings, legacy_patterns)?;
+                Ok((
+                    n.map_or(default, |n| n.source),
+                    test.get(key).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("{default:#x}")),
+                ))
+            };
+            let (pattern_param0, text0) = param("Pattern Param0", TM5_DEFAULT_PATTERN_PARAM0[d])?;
+            let (pattern_param1, text1) = param("Pattern Param1", TM5_DEFAULT_PATTERN_PARAM1[d])?;
+            tests.push(LegacyTest {
+                id: i,
+                enabled: num(test, name, "Enable", 1, warnings)? == 1,
+                time_percent: num(test, name, "Time (%)", 100, warnings)?,
+                function: test.get("function").cloned().unwrap_or_else(|| TM5_DEFAULT_FUNCTION[d].to_string()),
+                pattern_mode: signed(test, name, "Pattern Mode", TM5_DEFAULT_PATTERN_MODE[d], warnings)?,
+                pattern_param0,
+                pattern_param1,
+                written_params: Some([text0, text1]),
+                parameter,
+                test_chunk_size_mb,
+            });
         }
 
         Ok(LegacyConfig { main_section, memory_setup, tests })
@@ -1803,14 +2345,37 @@ impl LegacyConfig {
     // Convert legacy config to modern config v2.0
     /// Every `[TestN]` becomes a test with the id `"N"` and its `Enable=`, `Test Sequence` the `cycle_order` and `Cycles` the run's cycles
     /// (TODO 74). Test 0 is TM5's RefreshStable, which TM5 runs around every step: TMR's seal. Enabled, the run is sealed and a `0` step is
-    /// a seal check (`Seal-Check`); disabled, the run is unsealed. TM5 skips a disabled step, and stops reading `Test Sequence` at a number
-    /// of 16 or more.
+    /// a seal check (`Seal-Check`); disabled, the run is unsealed. TM5 skips a disabled step and one at or above `Tests`, and stops reading
+    /// `Test Sequence` at a number of 16 or more. Without a `Test Sequence`, TM5's default one runs. What the import changes or skips is
+    /// logged.
     pub fn to_modern_config(&self) -> Result<ModernConfig, String> {
+        let mut notes = Vec::new();
+        let modern = self.convert(&mut notes);
+        for (level, line) in &notes {
+            log::log!(*level, "{line}");
+        }
+        modern
+    }
+
+    /// `to_modern_config`, its notes (each a level and a line) into `notes` rather than the log
+    fn convert(&self, notes: &mut Vec<(log::Level, String)>) -> Result<ModernConfig, String> {
+        self.convert_with_patterns(notes, crate::pattern::legacy_import())
+    }
+
+    fn convert_with_patterns(&self, notes: &mut Vec<(log::Level, String)>, legacy_patterns: bool) -> Result<ModernConfig, String> {
         let mut test_sequence = Vec::new();
         let mut sealed = false;
+        // TM5's Interleave Type 0 on two channels or more: a SimpleTest's bus is 128 bits, so it walks in 128 B visits
+        let interleave_0 = self.memory_setup.interleave_type == 0 && self.memory_setup.channels >= 2;
+        if interleave_0 {
+            let line = "TM5 config: Interleave Type=0, TM5's 128-bit bus: each strided SimpleTest visits 128 B every 2 x Parameter \
+                        lines, as TM5's does; TM5's pattern words for it aren't reproduced";
+            notes.push((log::Level::Info, line.to_string()));
+        }
         for test in &self.tests {
             if test.id == 0 {
-                if test.function != "RefreshStable" {
+                // TM5 never calls a disabled test 0 (`MainThread.asm` ~373-381), so its function doesn't matter then
+                if test.enabled && test.function != "RefreshStable" {
                     return Err(format!(
                         "TM5 Test0 is {}, not RefreshStable: TM5 runs test 0 around every step, \
                                     as TMR's seal, and TMR only runs it as RefreshStable",
@@ -1828,12 +2393,16 @@ impl LegacyConfig {
                 });
                 continue;
             }
-            // A disabled test is declared, so a `Test Sequence` that names it skips it; one whose function TMR doesn't know is left out
-            // (naming it is then an error)
+            // A disabled test is declared, so a `Test Sequence` that names it skips it. TM5 never loads a disabled test's function
+            // (`callDLL.asm` ~558-565), so one TMR doesn't know stays declared, disabled, under the name the .cfg gives
             let function = match Self::map_legacy_function(&test.function) {
                 Ok(function) => function,
                 Err(e) if test.enabled => return Err(e),
-                Err(_) => continue,
+                Err(_) => {
+                    let id = Some(test.id.to_string());
+                    test_sequence.push(TestConfig { id, enabled: false, function: test.function.clone(), ..Default::default() });
+                    continue;
+                }
             };
             {
                 let (verify_reps, write_read_cycles, test_reps) = self.repetition(test);
@@ -1851,28 +2420,52 @@ impl LegacyConfig {
                 // (`width=`, else the widest the CPU has, TODO 99), every width writing one image.
                 // With patterns=legacy it keeps TMR's numbered mode (spec 1), to compare, on the same test (there is no scalar test). No
                 // other function reads the pattern fields, so they get none.
-                let tm5_pattern = (function == "Mem-SimpleV2-Auto").then_some(Tm5PatternSource {
-                    mode: test.pattern_mode,
+                let simple = function == "Mem-SimpleV2-Auto";
+                let mode = if simple { Self::tm5_pattern_mode(test, notes) } else { test.pattern_mode };
+                let tm5_pattern = simple.then_some(Tm5PatternSource {
+                    mode,
                     param0: test.pattern_param0,
                     param1: test.pattern_param1,
+                    written: test.written_params.clone(),
+                    legacy_inputs: legacy_patterns,
                 });
                 let (function, program, pattern) = match function.as_str() {
-                    "Mem-SimpleV2-Auto" if crate::pattern::legacy_import() => {
-                        (function, None, Some((test.pattern_mode, test.pattern_param0, test.pattern_param1)))
+                    "Mem-SimpleV2-Auto" if legacy_patterns => {
+                        (function, None, Some((mode, u64::from(test.pattern_param0 as u32), u64::from(test.pattern_param1 as u32))))
                     }
-                    "Mem-SimpleV2-Auto" => match crate::pattern::Program::from_tm5_mode(test.pattern_mode)
-                        .or_else(|| crate::pattern::Family::from_number(test.pattern_mode).map(crate::pattern::Program::single))
+                    "Mem-SimpleV2-Auto" => match crate::pattern::Program::from_tm5_mode(mode)
+                        .or_else(|| crate::pattern::Family::from_number(mode).map(crate::pattern::Program::single))
                     {
                         Some(program) => (function, Some(program.names()), None),
-                        // Not one of TM5's: kept as the TMR mode it names (build_test refuses one TMR doesn't have)
-                        None => (function, None, Some((test.pattern_mode, test.pattern_param0, test.pattern_param1))),
+                        // Not one of TM5's: kept as the TMR mode it names
+                        None => (function, None, Some((mode, test.pattern_param0, test.pattern_param1))),
                     },
                     _ => (function, None, None),
                 };
+                // A mirror test's Parameter becomes its mode; a SimpleTest's is its stride, or under Interleave Type 0 its walk's
+                // (`interleave_0_walk`, when the test is built), which TMR's numbered modes walk a line a visit
+                let parameter = mirror.is_none().then_some(test.parameter);
+                if simple && interleave_0 && test.parameter > 1 && program.is_none() {
+                    let period = 2 * test.parameter as u64;
+                    let line = format!(
+                        "TM5 Test{}: Interleave Type=0 visits 128 B, two lines, every {period} lines; TMR's numbered modes have no grouped \
+                         walk, so this one visits one line every {period}",
+                        test.id
+                    );
+                    notes.push((log::Level::Warn, line));
+                }
                 // An imported RefreshStable flushes each chunk before its sleep, as the scalar Mem-Refresh it ran on until TODO 99 did
                 // always: a chunk the .cfg sizes inside the caches would otherwise verify cached copies. The built-in Mem-RefreshAuto
                 // doesn't (its extent is twice the caches)
                 let flush_before_verify = (function == "Mem-RefreshAuto").then_some(true);
+                if interleave_0 && test.enabled && function == "Mem-BlockMove" {
+                    let line = format!(
+                        "TM5 Test{} (BlockMove): Interleave Type=0 moves TM5's blocks 128 B at a time; TMR's Mem-BlockMove runs as for \
+                         type 1",
+                        test.id
+                    );
+                    notes.push((log::Level::Warn, line));
+                }
                 test_sequence.push(TestConfig {
                     id: Some(test.id.to_string()),
                     enabled: test.enabled,
@@ -1894,31 +2487,77 @@ impl LegacyConfig {
                     pattern_param0: pattern.map(|p| p.1),
                     pattern_param1: pattern.map(|p| p.2),
                     tm5_pattern,
-                    // A mirror test's Parameter becomes its mode
                     mirror,
-                    parameter: if mirror.is_some() { None } else { Some(test.parameter) },
+                    parameter,
                     flush_before_verify,
                     ..Default::default()
                 });
             }
         }
         let declared: std::collections::HashSet<u32> = test_sequence.iter().filter_map(|t| t.id.as_deref()?.parse().ok()).collect();
-        let mut cycle_order = Vec::new();
-        for &n in &self.main_section.test_sequence {
+        let tests_in_play = self.main_section.tests;
+        let sequence = match &self.main_section.test_sequence {
+            Some(sequence) => sequence.as_slice(),
+            None => {
+                let line = format!(
+                    "TM5 config: no Test Sequence, so TM5 runs its default, {}, and so does TMR",
+                    TM5_DEFAULT_SEQUENCE.map(|n| n.to_string()).join(",")
+                );
+                notes.push((log::Level::Info, line));
+                &TM5_DEFAULT_SEQUENCE[..]
+            }
+        };
+        let written = self.main_section.test_sequence.is_some();
+        let (mut cycle_order, mut above, mut undefined) = (Vec::new(), Vec::new(), Vec::new());
+        for (k, &n) in sequence.iter().enumerate() {
             if n >= 16 {
-                if cycle_order.is_empty() {
+                if k == 0 {
                     return Err(format!(
                         "TM5 Test Sequence starts with {n}: TM5 stops reading it at a number of 16 or more, so the cycle would run nothing"
                     ));
                 }
                 break;
             }
+            // TM5 loads no test at or above Tests, so its entries find it disabled (`MainThread.asm` ~577-587): TM5's own default MT.cfg
+            // has Tests=6 and ten such entries, so they are one line, not a warning each
+            if n >= tests_in_play {
+                above.push(n);
+                continue;
+            }
             if !declared.contains(&n) {
-                return Err(format!("TM5 Test Sequence names test {n}, which the .cfg doesn't define"));
+                if written {
+                    return Err(format!("TM5 Test Sequence names test {n}, which the .cfg doesn't define"));
+                }
+                undefined.push(n);
+                continue;
             }
             cycle_order.push(n.to_string());
         }
+        if !above.is_empty() {
+            let line = format!(
+                "TM5 Test Sequence: TM5 skips its entries for tests {}, which are at or above Tests={tests_in_play}, and so does TMR",
+                id_ranges(above)
+            );
+            notes.push((log::Level::Info, line));
+        }
+        if !undefined.is_empty() {
+            let line = format!(
+                "TM5's default Test Sequence names tests {} the .cfg doesn't define; TMR skips them (TM5 would run its own default \
+                 for each)",
+                id_ranges(undefined)
+            );
+            notes.push((log::Level::Warn, line));
+        }
+        if !sequence.is_empty() && cycle_order.is_empty() {
+            return Err(format!(
+                "TM5 Test Sequence runs no test: each of its entries is at or above Tests={tests_in_play}{}, so the cycle would run \
+                 nothing",
+                if written { "" } else { " or a test the .cfg doesn't define" }
+            ));
+        }
 
+        self.log_repetition();
+        self.warn_cores_above(crate::cpu_topology::logical_cpu_ids().len());
         Ok(ModernConfig {
             config_format_version: CONFIG_VERSION.to_string(),
             application_name: format!("{} ({})", APP_NAME, APP_SHORT_NAME),
@@ -1958,7 +2597,7 @@ impl LegacyConfig {
                 // (`default_skip_spec`), not TM5's. Without this, Cores=0 would still leave out the weakest core, and a positive
                 // Cores at or above the machine's full count would be capped one short of it for no TM5 reason.
                 cpu_pinning: CpuPinningConfig { skip_spec: "0".to_string(), ..CpuPinningConfig::default() },
-                memory_allocation: MemoryAllocationConfig::default(),
+                memory_allocation: self.memory_allocation(),
                 channels: self.memory_setup.channels,
                 seal: Some(if sealed { "tmr" } else { "off" }.to_string()),
                 record: None,
@@ -1967,22 +2606,40 @@ impl LegacyConfig {
                 thread_priority: None,
             },
             test_sequence,
-            // Without a Test Sequence, every enabled test once, in file order
-            cycle_order: if self.main_section.test_sequence.is_empty() { None } else { Some(cycle_order) },
+            // An empty Test Sequence, every enabled test once, in file order
+            cycle_order: if sequence.is_empty() { None } else { Some(cycle_order) },
             legacy_metadata: Some(LegacyMetadata {
                 tm5_cycles: self.main_section.cycles,
                 tm5_time_percent: self.main_section.time_percent,
                 tm5_channels: self.memory_setup.channels,
                 tm5_window_mb: self.memory_setup.testing_window_size_mb,
                 tm5_lock_mb: self.memory_setup.lock_granularity_mb.max(1),
+                tm5_interleave_type: self.memory_setup.interleave_type,
             }),
         })
+    }
+
+    /// TMR's allocation settings, each thread's share rounded as TM5 rounds it (TODO 131): down to the `.cfg`'s Lock Memory Granularity
+    /// (`MainThread.asm` ~153-262), never up into the reserve the `.cfg` asks for. As `blkround=down blkroundtarget=`, at least
+    /// `largefloor` and a multiple of it, as the step must be: TM5's default 16 MiB is exactly that, an odd one goes up to the next.
+    /// And 2 MiB pages asked for `IMPORT_LARGE_CHUNK` at a time.
+    fn memory_allocation(&self) -> MemoryAllocationConfig {
+        let defaults = MemoryAllocationConfig::default();
+        let floor_mib = parse_size_string(&defaults.large_floor).map_or(16, |b| b / BYTES_PER_MIB as usize);
+        let step_mib = (self.memory_setup.lock_granularity_mb as usize).max(1).next_multiple_of(floor_mib);
+        MemoryAllocationConfig {
+            share_round: RoundDirection::Down.to_string(),
+            share_round_step: format!("{step_mib}MiB"),
+            large_chunk: Some(IMPORT_LARGE_CHUNK.to_string()),
+            ..defaults
+        }
     }
 
     /// TM5 `Test Block Size (Mb)` as a TMR chunk (TODO 79 B1), based on `mt_ini.asm:287-303` and `MainThread.asm:627-661`.
     /// Codes 0-3 resolve against the thread's memory (`ChunkMode::Tm5Block`): the smaller of tm5_window and the extent, / (V + 1).
     /// Codes 1-3 floor to Lock Memory Granularity; code 0 keeps the whole size to avoid almost doubling work through overlap.
-    /// 4 and up are binary megabytes, clamped to tm5_window and floored to 4 KiB. tm5_window is the `.cfg`'s own `Testing Window Size`,
+    /// 4 and up are binary megabytes, clamped to tm5_window and floored to 4 KiB; a negative one is what TM5's shift to bytes leaves
+    /// (`tm5_negative_block_mib`). tm5_window is the `.cfg`'s own `Testing Window Size`,
     /// not TMR's extent, which for an import is the full allocation. A size that differs from the plain fraction or value is logged.
     fn chunk_spec(&self, test: &LegacyTest) -> ChunkSpec {
         let tm5_window = self.memory_setup.testing_window_size_mb as u64 * BYTES_PER_MIB;
@@ -2006,6 +2663,11 @@ impl LegacyConfig {
                     );
                 }
                 return ChunkSpec::tm5_block(tm5_window / BYTES_PER_MIB, divisor, lock / BYTES_PER_MIB);
+            }
+            // A negative one as TM5's shift to bytes leaves it, warned when the .cfg is read
+            raw if (raw as i32) < 0 => {
+                let size = tm5_negative_block_mib(raw).map_or(tm5_window, |mib| mib as u64 * BYTES_PER_MIB);
+                (size.min(tm5_window), format!("{} MiB", size / BYTES_PER_MIB))
             }
             mb => {
                 let requested = mb as u64 * BYTES_PER_MIB;
@@ -2036,6 +2698,26 @@ impl LegacyConfig {
         ChunkSpec::absolute(&format!("{}KiB", chunk / 1024))
     }
 
+    /// The Pattern Mode a SimpleTest runs. TM5 reads only its low byte, 1 or 2 that mode and anything else mode 0 (`mtests0.asm`
+    /// ~1887-1894), from any 32-bit number. A number TMR names (one of its numbered modes or a native family's) stays TMR's, though TM5
+    /// runs it as mode 0: TMR's extension, which no shipped config uses.
+    fn tm5_pattern_mode(test: &LegacyTest, notes: &mut Vec<(log::Level, String)>) -> u32 {
+        let mode = test.pattern_mode;
+        if crate::pattern::is_pattern_mode(mode) {
+            return mode;
+        }
+        let runs = match mode & 0xFF {
+            low @ (1 | 2) => low,
+            _ => 0,
+        };
+        let line = format!(
+            "TM5 Test{} ({}): Pattern Mode {} isn't a mode TMR names; TM5 reads only its low byte, so runs mode {runs}, and so does TMR",
+            test.id, test.function, mode as i32
+        );
+        notes.push((log::Level::Warn, line));
+        runs
+    }
+
     /// TM5's MirrorMove and MirrorMove128 read `Parameter` differently; TMR's mirror tests take one `MirrorMode` (TODO 85). MirrorMove: 2
     /// or 4 is that many subblocks, 3 is refused, and any other value is the whole block (`mtests0.asm` ~1152-1157). MirrorMove128: the
     /// jump, in 128 B units (~1527-1543). `None` for every other test.
@@ -2064,22 +2746,57 @@ impl LegacyConfig {
     /// default.
     fn repetition(&self, test: &LegacyTest) -> (Option<u32>, Option<u32>, Option<u32>) {
         let n = (test.time_percent as u64 * self.main_section.time_percent as u64 / 2000).max(1) as u32;
-        let reps = match test.function.as_str() {
+        match test.function.as_str() {
             "SimpleTest" => (Some(n), Some(4), None),
             "MirrorMove" | "MirrorMove128" => (None, None, Some(n)),
             _ => (None, None, None),
-        };
-        if n != 5 && reps != (None, None, None) {
-            log::info!(
-                "TM5 Test{} ({}): Time (%) {} x global {} = {} passes per chunk (TM5's default is 5)",
-                test.id,
-                test.function,
-                test.time_percent,
-                self.main_section.time_percent,
-                n
-            );
         }
-        reps
+    }
+
+    /// `repetition`'s passes per chunk where they aren't TM5's default 5, in one line for the import, the tests grouped by their figure:
+    /// `TM5 Time (%) x global 50 = passes per chunk (TM5's default is 5): Tests 1, 3-15 at 100% = 2; Test 2 at 255% = 6`
+    /// A `.cfg` whose Cores asks for more testers than the PC has logical CPUs: TM5 runs that many testers, sharing the CPUs; TMR runs
+    /// one thread a CPU, so each takes a bigger share of the memory (`cpu_selection::thread_count` clamps the count). Said, not refused.
+    fn warn_cores_above(&self, cpus: usize) -> Option<String> {
+        let cores = self.main_section.cores as usize;
+        if cores <= cpus || cpus == 0 {
+            return None;
+        }
+        let line = format!(
+            "TM5 config: Cores={cores} is more than this PC's {cpus} logical CPUs. TM5 runs {cores} testers sharing them; TMR runs {cpus} \
+             threads, one a CPU, each with a bigger share of the memory"
+        );
+        log::warn!("{line}");
+        Some(line)
+    }
+
+    fn log_repetition(&self) {
+        let mut groups: Vec<(u32, u32, Vec<u32>)> = Vec::new();
+        for test in self.tests.iter().filter(|t| t.id != 0 && Self::map_legacy_function(&t.function).is_ok()) {
+            let n = (test.time_percent as u64 * self.main_section.time_percent as u64 / 2000).max(1) as u32;
+            if n == 5 || !matches!(test.function.as_str(), "SimpleTest" | "MirrorMove" | "MirrorMove128") {
+                continue;
+            }
+            match groups.iter_mut().find(|(percent, passes, _)| (*percent, *passes) == (test.time_percent, n)) {
+                Some((_, _, ids)) => ids.push(test.id),
+                None => groups.push((test.time_percent, n, vec![test.id])),
+            }
+        }
+        if groups.is_empty() {
+            return;
+        }
+        let parts: Vec<String> = groups
+            .into_iter()
+            .map(|(percent, passes, ids)| {
+                let noun = if ids.len() == 1 { "Test" } else { "Tests" };
+                format!("{noun} {} at {percent}% = {passes}", id_ranges(ids))
+            })
+            .collect();
+        log::info!(
+            "TM5 Time (%) x global {} = passes per chunk (TM5's default is 5): {}",
+            self.main_section.time_percent,
+            parts.join("; ")
+        );
     }
 
     // Map legacy function names to modern equivalents
@@ -2113,7 +2830,7 @@ impl LegacyConfig {
             "Mem-MirrorV2-256" => Ok("Mem-MirrorV2-256".to_string()),
             "Mem-MirrorV2-512" => Ok("Mem-MirrorV2-512".to_string()),
             "Mem-MirrorV2-Auto" => Ok("Mem-MirrorV2-Auto".to_string()),
-            _ => Err(format!("Unknown legacy test function: '{}'", legacy_name)),
+            _ => Err(format!("Unknown legacy test function: '{}'", cfg_quoted(legacy_name))),
         }
     }
 }
@@ -2121,27 +2838,33 @@ impl LegacyConfig {
 // Configuration loader that handles both formats. `path` as typed, from the current folder; a relative one not there, from the configs
 // folder in TMR's home (`home::find`, TODO 104).
 pub fn load_config(path: &str) -> Result<ModernConfig, String> {
-    let found =
-        crate::home::find(path, &crate::home::configs()).map_err(|looked| format!("Config file does not exist: {path} ({looked})"))?;
+    let found = crate::home::config_path(path).map_err(|looked| format!("Config file does not exist: {path} ({looked})"))?;
     let found = found.display().to_string();
     let path = found.as_str();
 
-    // Try to detect format by file extension or content
-    let config = if path.ends_with(".json") {
+    // Try to detect format by file extension (in any case: `MT.CFG`) or content
+    let extension = std::path::Path::new(path).extension().map(|extension| extension.to_ascii_lowercase());
+    let config = if extension.as_deref() == Some("json".as_ref()) {
         ModernConfig::load_from_file(path)?
-    } else if path.ends_with(".cfg") {
-        // Legacy format (v1.0)
-        let legacy = LegacyConfig::load_from_file(path)?;
-        legacy.to_modern_config()?
+    } else if extension.as_deref() == Some("cfg".as_ref()) {
+        // Legacy format (v1.0). Its errors name it: "Missing [Main Section]" alone doesn't say which file
+        LegacyConfig::load_from_file(path).and_then(|legacy| legacy.to_modern_config()).map_err(|e| format!("{path}: {e}"))?
     } else {
         // Try JSON first, then legacy. If neither parses, say why for both: one of the two messages is the real problem, and it isn't
-        // always the second.
+        // always the second. The .cfg's warnings are logged only when it loads as one: a JSON file that doesn't parse would have its
+        // lines warned as TM5's
         match ModernConfig::load_from_file(path) {
             Ok(config) => config,
-            Err(json_err) => match LegacyConfig::load_from_file(path).and_then(|l| l.to_modern_config()) {
-                Ok(config) => config,
-                Err(cfg_err) => return Err(format!("{path} is neither a TMR JSON config ({json_err}) nor a TM5 .cfg ({cfg_err})")),
-            },
+            Err(json_err) => {
+                let (legacy, warnings) = LegacyConfig::read_file(path).unwrap_or_else(|e| (Err(e), Vec::new()));
+                match legacy.and_then(|l| l.to_modern_config()) {
+                    Ok(config) => {
+                        log_cfg_warnings(path, &warnings);
+                        config
+                    }
+                    Err(cfg_err) => return Err(format!("{path} is neither a TMR JSON config ({json_err}) nor a TM5 .cfg ({cfg_err})")),
+                }
+            }
         }
     };
     config.validate_system()?;
@@ -2163,6 +2886,7 @@ mod tests {
             pattern_mode: 0,
             pattern_param0: 0,
             pattern_param1: 0,
+            written_params: None,
             parameter: 0,
             test_chunk_size_mb: block,
         }
@@ -2175,11 +2899,19 @@ mod tests {
                 config_name: "t".to_string(),
                 config_author: "t".to_string(),
                 cores: 0,
+                tests: 16,
                 time_percent: global_time,
                 cycles: 3,
-                test_sequence: Vec::new(),
+                // An empty Test Sequence: every enabled test once, in file order
+                test_sequence: Some(Vec::new()),
             },
-            memory_setup: LegacyMemorySetup { testing_window_size_mb: 880, reserved_memory_mb: 128, channels: 2, lock_granularity_mb: 16 },
+            memory_setup: LegacyMemorySetup {
+                testing_window_size_mb: 880,
+                reserved_memory_mb: 128,
+                channels: 2,
+                interleave_type: 1,
+                lock_granularity_mb: 16,
+            },
             tests,
         }
     }
@@ -2205,6 +2937,51 @@ mod tests {
         assert_eq!(modern.system.memory_strategy.default_extent.mode, "full_allocation");
         let meta = modern.legacy_metadata.as_ref().unwrap();
         assert_eq!((meta.tm5_window_mb, meta.tm5_lock_mb), (880, 16));
+    }
+
+    /// A .cfg's Cores above the PC's logical CPUs is said (TMR runs one thread a CPU, TM5 that many testers), never refused; a missing
+    /// Testing Window Size is TM5's 1024
+    #[test]
+    fn cores_above_the_cpus_warn_and_a_missing_window_is_tm5s_default() {
+        let mut cfg = legacy(100, Vec::new());
+        cfg.main_section.cores = 32;
+        let line = cfg.warn_cores_above(12).expect("a warning");
+        assert!(line.contains("Cores=32 is more than this PC's 12 logical CPUs") && line.contains("TMR runs 12 threads"), "{line}");
+        assert_eq!(cfg.warn_cores_above(32), None);
+        cfg.main_section.cores = 0;
+        assert_eq!(cfg.warn_cores_above(12), None, "0 is every CPU");
+        let text = "[Main Section]\nCores=0\n[Global Memory Setup]\nChannels=2\n";
+        assert_eq!(LegacyConfig::parse_legacy_format(text).unwrap().memory_setup.testing_window_size_mb, 1024);
+    }
+
+    /// The import's one Time (%) line lists its tests as ranges: sorted, runs of three or more joined
+    #[test]
+    fn test_numbers_read_as_ranges() {
+        assert_eq!(id_ranges(vec![15, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]), "1, 3-15");
+        assert_eq!(id_ranges(vec![2]), "2");
+        assert_eq!(id_ranges(vec![7, 6, 9]), "6, 7, 9");
+    }
+
+    /// TODO 131: an import rounds each share down to the `.cfg`'s Lock Memory Granularity, as TM5 does, never up into the reserve; at
+    /// least `largefloor` (16 MiB) and a multiple of it, as the step must be. It asks for 2 MiB pages 64 MiB at a time, half TMR's own
+    /// default. The rest of the allocation settings are TMR's own.
+    #[test]
+    fn an_import_rounds_shares_down_to_its_lock_granularity() {
+        let step = |lock_mb: u32| {
+            let mut cfg = legacy(100, vec![test(1, "SimpleTest", 100, 16)]);
+            cfg.memory_setup.lock_granularity_mb = lock_mb;
+            let alloc = cfg.to_modern_config().unwrap().system.memory_allocation;
+            assert_eq!(alloc.share_round, "down");
+            let rounding = alloc.share_rounding().unwrap();
+            assert_eq!(rounding.direction, RoundDirection::Down);
+            (rounding.step_bytes / BYTES_PER_MIB) as u32
+        };
+        assert_eq!([step(16), step(1), step(20), step(32), step(512)], [16, 16, 32, 32, 512]);
+        let alloc = legacy(100, Vec::new()).to_modern_config().unwrap().system.memory_allocation;
+        assert_eq!(alloc.block_sizing().unwrap().large_chunk, 64 * MIB, "half TMR's own 128 MiB");
+        let defaults = MemoryAllocationConfig::default();
+        assert_eq!(defaults.block_sizing().unwrap().large_chunk, 128 * MIB);
+        assert_eq!((alloc.min_page_size, alloc.max_page_size), (defaults.min_page_size, defaults.max_page_size));
     }
 
     /// Code 0 keeps the window size even when it is not a multiple of lock granularity (`Ollie.cfg`: 1236 MiB, lock 16 MiB).
@@ -2628,7 +3405,7 @@ mod tests {
         let cfg = |line: &str| {
             format!(
                 "[Main Section]\nTest Sequence=1\n[Global Memory Setup]\nChannels=2\n\
-            [Test1]\nEnable=1\nFunction=SimpleTest\nPattern Mode=0\n{line}\n"
+            [Test1]\nEnable=1\nFunction=SimpleTest\n{line}\n"
             )
         };
         assert!(LegacyConfig::parse_legacy_format(&cfg("Parameter=8")).is_ok());
@@ -2645,6 +3422,221 @@ mod tests {
         }
         let seq = "[Main Section]\nTest Sequence=1,x\n[Global Memory Setup]\n";
         assert!(LegacyConfig::parse_legacy_format(seq).unwrap_err().contains("'x'"));
+        // A value's NULs inside it (not around it, which are read past) show, escaped: a console doesn't show them
+        let err = LegacyConfig::parse_legacy_format(&cfg("Parameter=4\0x")).unwrap_err();
+        assert!(err.ends_with("Parameter=4\\0x: not a number"), "{err}");
+        let legacy = LegacyConfig::parse_legacy_format(&cfg("").replace("Function=SimpleTest", "Function=Simple\0Test")).unwrap();
+        let err = legacy.to_modern_config().unwrap_err();
+        assert_eq!(err, "Unknown legacy test function: 'Simple\\0Test'");
+    }
+
+    /// A `.cfg`'s text parsed, and its warnings as (line, message)
+    fn cfg_warnings(text: &str) -> (Result<LegacyConfig, String>, Vec<(usize, String)>) {
+        let mut warnings = Vec::new();
+        let parsed = LegacyConfig::parse_reporting(text, &mut warnings, false);
+        (parsed, warnings.into_iter().map(|w| (w.line, w.message)).collect())
+    }
+
+    /// A `.cfg` as TM5 writes one (`TM5/MT.cfg`'s shape) warns nothing: text before the first header, CRLF, every key TM5 reads in each
+    /// section whether TMR reads it or not, and `[Window Position]`. The warnings are for damage, not for TM5's own file.
+    #[test]
+    fn a_tm5_written_cfg_warns_nothing() {
+        let mut cfg = "Memory Test config file v0.02\r\nA line of its author's\r\nexample.org\r\n\r\n\
+            [Main Section]\r\nConfig Name=Default\r\nConfig Author=someone\r\nCores=0\r\nTests=16\r\nTime (%)=100\r\nCycles=3\r\n\
+            Language=0\r\nTest Sequence=1,2,0\r\n\r\n\
+            [Global Memory Setup]\r\nChannels=2\r\nInterleave Type=1\r\nSingle DIMM width, bits=64\r\nOperation Block, byts=64\r\n\
+            Testing Window Size (Mb)=880\r\nLock Memory Granularity (Mb)=16\r\nReserved Memory for Windows (Mb)=128\r\nCapable=0x0\r\n\
+            Debug Level=7\r\n\r\n[Window Position]\r\nWindowPosX=2179\r\nWindowPosY=4\r\n"
+            .to_string();
+        for (i, function) in ["RefreshStable", "SimpleTest", "MirrorMove"].into_iter().enumerate() {
+            cfg += &format!(
+                "\r\n[Test{i}]\r\nEnable=1\r\nTime (%)=100\r\nFunction={function}\r\nDLL Name=bin\\MT0.dll\r\nPattern Mode=0\r\n\
+                Pattern Param0=0x0\r\nPattern Param1=0x0\r\nParameter=0\r\nTest Block Size (Mb)=0\r\n"
+            );
+        }
+        let (parsed, warnings) = cfg_warnings(&cfg);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let legacy = parsed.unwrap();
+        assert_eq!((legacy.main_section.config_name.as_str(), legacy.tests.len()), ("Default", 3));
+        legacy.to_modern_config().unwrap();
+        // A UTF-8 BOM (Notepad's) is dropped, names ignore the spaces around them, and `;` and `#` lines are comments
+        let (parsed, warnings) =
+            cfg_warnings(&format!("\u{FEFF}; saved by an editor\r\n# a note\r\n{}", cfg.replace("[Test1]", "[ Test1 ]")));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(parsed.unwrap().tests.len(), 3);
+    }
+
+    /// The TM5 configs beside the repo (`../TM5_Source`, `../TM5_configs/bin`, `../TM5`) load, convert and plan without warnings.
+    /// Legacy import warns about 1usmus_v3's four 9-digit Pattern Param1 values, of which TM5 keeps the low 32 bits. None is in git;
+    /// `a_tm5_written_cfg_warns_nothing` stands in for them. The home's `configs\` is left out: a `.cfg` there is the owner's own, and
+    /// may be one damaged on purpose. TM5's own default `MT.cfg` (Tests=6) runs 2, 5, 1, 4, 3, 0, 1, as TM5 does.
+    #[test]
+    fn the_workspaces_tm5_configs_warn_nothing() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for dir in ["../TM5_Source", "../TM5_configs/bin", "../TM5"] {
+            let Ok(entries) = fs::read_dir(root.join(dir)) else { continue };
+            for path in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("cfg"))) {
+                let text = fs::read_to_string(&path).unwrap();
+                let (parsed, warnings) = cfg_warnings(&text);
+                let shown = path.display();
+                assert!(warnings.is_empty(), "{shown}: {warnings:?}");
+                let mut warnings = Vec::new();
+                LegacyConfig::parse_reporting(&text, &mut warnings, true).unwrap();
+                let wide = warnings
+                    .iter()
+                    .filter(|w| w.message.contains("Pattern Param1=0x") && w.message.contains("keeps the low 32 bits"))
+                    .count();
+                let expected = if path.file_name().is_some_and(|name| name == "1usmus_v3.cfg") { 4 } else { 0 };
+                assert!(parsed.is_ok() && wide == expected && warnings.len() == wide, "{shown}: {:?} {warnings:?}", parsed.err());
+                let mut notes = Vec::new();
+                let modern = parsed.unwrap().convert(&mut notes).unwrap_or_else(|e| panic!("{shown}: {e}"));
+                assert!(notes.iter().all(|(level, _)| *level == log::Level::Info), "{shown}: {notes:?}");
+                let plan = modern.plan().unwrap_or_else(|e| panic!("{shown}: {e}"));
+                if modern.metadata.name == "Default (Legacy Converted)" && modern.metadata.author == "serj" {
+                    let steps: Vec<_> = plan.steps.iter().map(|&i| plan.tests[i].id.unwrap()).collect();
+                    assert_eq!(steps, ["2", "5", "1", "4", "3", "0", "1"], "{shown}");
+                    assert!(notes.iter().any(|(_, n)| n.contains("tests 6-15, which are at or above Tests=6")), "{notes:?}");
+                }
+            }
+        }
+    }
+
+    /// Each kind of `.cfg` damage warns once, on its line, and the file still loads, read as TM5 reads it. Lines 1-6 are clean; the
+    /// damage is line 7 on.
+    #[test]
+    fn cfg_damage_warns_on_its_line_and_still_loads() {
+        let cfg = |damage: &str| {
+            format!("[Main Section]\nTest Sequence=1\n[Global Memory Setup]\n[Test1]\nFunction=SimpleTest\nParameter=4\n{damage}\n")
+        };
+        let test = |legacy: &LegacyConfig, id: u32| legacy.tests.iter().find(|t| t.id == id).map(|t| (t.parameter, t.pattern_mode));
+        for (damage, phrase, test1, test2) in [
+            ("Enable 1", "\"Enable 1\" is neither a [section] header nor a key=value", (4, 1), None),
+            // A crash's NULs: said, and read past around a name or a value, as GetPrivateProfileString reads past them (review: TMR took
+            // a header or key after them for neither, and a value before them for one that doesn't parse)
+            ("\0\0\0\0", "4 NUL bytes, as a crash while the file was written leaves", (4, 1), None),
+            ("\0\0\0\0Pattern Mode=2", "4 NUL bytes", (4, 2), None),
+            ("Pattern Mode=2\0\0\0\0", "4 NUL bytes", (4, 2), None),
+            ("\0\0[Test2]\nParameter=8", "2 NUL bytes", (4, 1), Some((8, 2))),
+            ("[Test2\0]\nParameter=8", "1 NUL byte,", (4, 1), Some((8, 2))),
+            // A misspelt key is ignored, so the setting it meant keeps TM5's default (Test1's Pattern Mode is 1)
+            ("Patern Mode=2", "\"Patern Mode=2\" in [Test1]: not a key TM5 reads", (4, 1), None),
+            // The first of a repeated key, as TM5
+            ("Parameter=8", "\"Parameter=8\" in [Test1] repeats the key of line 6; TM5 keeps that first value, 4", (4, 1), None),
+            // A repeated section is never read, not merged: its Pattern Mode doesn't reach Test1 either
+            ("[test1]\nParameter=8\nPattern Mode=2", "[test1] again (first at line 4): TM5 reads only the first", (4, 1), None),
+            // A header with no `]` is the section it names (TM5's reading), so its keys don't overwrite Test1's
+            ("[Test2\nParameter=8", "\"[Test2\" has no closing ']'; TM5 reads it as the header of [Test2]", (4, 1), Some((8, 2))),
+            // Text after the `]` is ignored, a key in it too: Test2 keeps its own default Parameter, 254
+            ("[Test2] Parameter=8", "\"[Test2] Parameter=8\" has a key=value after its ']'", (4, 1), Some((254, 2))),
+            ("[Tset2]\nParameter=8", "[Tset2] is not a section TM5 reads", (4, 1), None),
+            // TM5 names its sections `Test%li`
+            ("[Test02]\nParameter=8", "[Test02] is not a section TM5 reads", (4, 1), None),
+        ] {
+            let (parsed, warnings) = cfg_warnings(&cfg(damage));
+            let legacy = parsed.unwrap_or_else(|e| panic!("{damage:?}: {e}"));
+            assert_eq!(warnings.len(), 1, "{damage:?}: {warnings:?}");
+            assert_eq!(warnings[0].0, 7, "{damage:?}: {warnings:?}");
+            assert!(warnings[0].1.contains(phrase), "{damage:?}: {}", warnings[0].1);
+            assert_eq!((test(&legacy, 1), test(&legacy, 2)), (Some(test1), test2), "{damage:?}");
+        }
+
+        // Other text after a header's `]` costs nothing, so warns nothing (a community config has "[Test6]    `"): the header is
+        // Test2's, whose keys then don't overwrite Test1's, as they did when TMR took such a line for no header
+        let (parsed, warnings) = cfg_warnings(&cfg("[Test2]    `\nParameter=8"));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let legacy = parsed.unwrap();
+        assert_eq!((test(&legacy, 1), test(&legacy, 2)), (Some((4, 1)), Some((8, 2))));
+
+        // A key before any section is ignored, though TM5's own text there isn't warned on
+        let (parsed, warnings) = cfg_warnings(&format!("Memory Test config file v0.02\nCores=4\n{}", cfg("")));
+        assert_eq!(warnings, [(2, "\"Cores=4\" comes before any [section]; TM5 and TMR ignore it".to_string())]);
+        assert_eq!(parsed.unwrap().main_section.cores, 0);
+
+        // A damaged [Main Section] header in a file with another TM5 section: TM5 reads each key of a missing section as missing, so
+        // takes their defaults, and so does TMR, saying so; the key under the damaged header comes before any section
+        let (parsed, warnings) = cfg_warnings("Main Section]\nTest Sequence=1\n[Global Memory Setup]\n");
+        assert_eq!(warnings.iter().map(|w| w.0).collect::<Vec<_>>(), [2, 1]);
+        assert!(warnings[1].1.starts_with("no [Main Section]: TM5 gives each of its keys its default"), "{warnings:?}");
+        let main = parsed.unwrap().main_section;
+        assert_eq!((main.tests, main.cycles, main.test_sequence), (6, 3, None));
+        // A load that then fails has warned first: a file with no TM5 section and no TM5 header line is no .cfg
+        let (parsed, warnings) = cfg_warnings("Main Section]\nTest Sequence=1\n");
+        assert_eq!(parsed.unwrap_err(), "Missing [Main Section]");
+        assert_eq!(warnings.iter().map(|w| w.0).collect::<Vec<_>>(), [2]);
+
+        // A header a crash cut off in NULs is the section it names, warned twice; a name with NULs inside is quoted escaped
+        let (parsed, warnings) = cfg_warnings(&cfg("[Test2\0\0\0\0\0\0\0\0\nParameter=8"));
+        assert_eq!(warnings.iter().map(|w| w.0).collect::<Vec<_>>(), [7, 7], "{warnings:?}");
+        assert!(warnings[0].1.starts_with("8 NUL bytes") && warnings[1].1.contains("the header of [Test2]"), "{warnings:?}");
+        assert_eq!(test(&parsed.unwrap(), 2), Some((8, 2)));
+        let (_, warnings) = cfg_warnings(&cfg("[Tset2\0\0x]"));
+        assert!(warnings[1].1.starts_with("[Tset2\\0\\0x] is not a section TM5 reads"), "{warnings:?}");
+        // A file of NULs only, the usual crash damage for one this small, says so on its line
+        let (parsed, warnings) = cfg_warnings(&"\0".repeat(3400));
+        assert_eq!(parsed.unwrap_err(), "Missing [Main Section]");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].0, 1);
+        assert!(warnings[0].1.starts_with("3400 NUL bytes"), "{warnings:?}");
+    }
+
+    /// A `.cfg` that isn't UTF-8 loads as `GetPrivateProfileStringA` reads it (review: one such byte stopped the load, unnamed): UTF-16
+    /// with its BOM, and a byte that isn't UTF-8, a comment saved as ANSI or garbage, read as `�` and warned on its line. A `.cfg` that
+    /// doesn't load names its file, `.CFG` too.
+    #[test]
+    fn a_cfg_that_isnt_utf8_loads_and_its_errors_name_it() {
+        let text = "[Main Section]\r\nTest Sequence=1\r\n[Global Memory Setup]\r\n[Test1]\r\nFunction=SimpleTest\r\n";
+        let utf16le: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let utf16be: Vec<u8> = [0xFE, 0xFF].into_iter().chain(text.encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(cfg_text(&utf16le), (text.to_string(), None));
+        assert_eq!(cfg_text(&utf16be), (text.to_string(), None));
+        let ansi: Vec<u8> = [b"; \xcf\xf0\xe8\r\n".as_slice(), text.as_bytes()].concat();
+        let (read, not_utf8) = cfg_text(&ansi);
+        assert_eq!((read.lines().next(), not_utf8), (Some("; \u{FFFD}\u{FFFD}\u{FFFD}"), Some(1)));
+
+        let dir = crate::results::TempDir::new("cfg-not-utf8");
+        let path = dir.file("ansi.cfg");
+        fs::write(&path, [text.as_bytes(), b"\xff\xfe\x80\x81\r\nParameter=4\r\n".as_slice()].concat()).unwrap();
+        let (parsed, warnings) = LegacyConfig::read_file(&path).unwrap();
+        assert_eq!(parsed.unwrap().tests.iter().find(|t| t.id == 1).map(|t| t.parameter), Some(4));
+        assert_eq!(warnings.iter().map(|w| w.line).collect::<Vec<_>>(), [6, 6], "{warnings:?}");
+        assert!(warnings[0].message.starts_with("isn't UTF-8 text"), "{warnings:?}");
+
+        let upper = dir.file("CRASHED.CFG");
+        fs::write(&upper, "\0".repeat(3400)).unwrap();
+        assert_eq!(load_config(&upper).unwrap_err(), format!("{upper}: Missing [Main Section]"));
+    }
+
+    /// A Tests, Channels or Lock Memory Granularity TMR clamps warns with its line and the value TMR takes. TM5's own ranges (Tests 2-16,
+    /// Channels 1-3, Lock 1-512) widen to TMR's (the owner, 2026-11-23): Tests from 1, Channels any from 1, Lock to 1024 MiB, TMR's
+    /// largest request, so those load as written.
+    #[test]
+    fn clamped_cfg_values_warn() {
+        for (line, kept, warning) in [
+            ("Channels=0", (1, 16, 6), "[Global Memory Setup] Channels=0 is below 1; TMR uses 1"),
+            ("Lock Memory Granularity (Mb)=0", (2, 1, 6), "[Global Memory Setup] Lock Memory Granularity (Mb)=0 is below 1; TMR uses 1"),
+            ("lock memory granularity (mb)=1025", (2, 1024, 6), "Lock Memory Granularity (Mb)=1025 is above 1024; TMR uses 1024"),
+            ("[Main Section]\nTests=0", (2, 16, 1), "[Main Section] Tests=0 is below 1; TMR uses 1"),
+            ("[Main Section]\nTests=17", (2, 16, 16), "[Main Section] Tests=17 is above 16; TMR uses 16"),
+        ] {
+            let main = if line.starts_with("[Main Section]") { "" } else { "[Main Section]\n" };
+            let (parsed, warnings) = cfg_warnings(&format!("{main}[Global Memory Setup]\nDebug Level=7\n{line}\n"));
+            let legacy = parsed.unwrap();
+            let memory = &legacy.memory_setup;
+            assert_eq!((memory.channels, memory.lock_granularity_mb, legacy.main_section.tests), kept, "{line}");
+            assert_eq!(warnings.len(), 1, "{line}: {warnings:?}");
+            assert_eq!(warnings[0].0, 4, "{line}");
+            assert!(warnings[0].1.ends_with(warning), "{line}: {}", warnings[0].1);
+        }
+        for (line, kept) in [("Channels=12", (12, 16)), ("Lock Memory Granularity (Mb)=1024", (2, 1024)), ("Channels=1", (1, 16))] {
+            let (parsed, warnings) = cfg_warnings(&format!("[Main Section]\n[Global Memory Setup]\n{line}\n"));
+            let memory = parsed.unwrap().memory_setup;
+            assert_eq!((memory.channels, memory.lock_granularity_mb), kept, "{line}");
+            assert!(warnings.is_empty(), "{line}: {warnings:?}");
+        }
+        // Channels has no ceiling, so the stride can't overflow: it is capped where a period would
+        let ctx = interpret_tm5_parameter_with_channels("SimpleTest", u32::MAX, u32::MAX);
+        assert_eq!(ctx.stride_cachelines, Some(AccessGeometry::MAX_PERIOD));
+        assert_eq!(ctx.stride_elements, Some(AccessGeometry::MAX_PERIOD * 8));
     }
 
     /// A field a present `[TestN]` omits takes TM5's own per-slot default (`DefTestParam.inc`), not TMR's generic 0/"Unknown":
@@ -2699,7 +3691,7 @@ mod tests {
     /// INI names are case-insensitive as in TM5: changing their spelling must not turn a strided test into a sequential one.
     #[test]
     fn tm5_ini_case_keeps_the_same_workload() {
-        let cfg = "[Main Section]\nConfig Name=Case Check\nConfig Author=anta777\nCores=4\nTime (%)=1250\nCycles=3\n\
+        let cfg = "[Main Section]\nConfig Name=Case Check\nConfig Author=anta777\nCores=4\nTests=16\nTime (%)=1250\nCycles=3\n\
             Test Sequence=15,15\n[Global Memory Setup]\nChannels=2\nTesting Window Size (Mb)=1536\n\
             Reserved Memory for Windows (Mb)=512\nLock Memory Granularity (Mb)=64\n[Test15]\nEnable=1\n\
             Function=SimpleTest\nPattern Mode=0\nPattern Param0=0x77777777\nPattern Param1=0x33333333\n\
@@ -2951,7 +3943,7 @@ mod tests {
         let mut tests = vec![test(0, "RefreshStable", 100, 0), test(1, "SimpleTest", 100, 0), test(2, "MirrorMove", 100, 0)];
         tests[2].enabled = false;
         let mut cfg = legacy(100, tests.clone());
-        cfg.main_section.test_sequence = vec![1, 0, 2, 1, 16, 1];
+        cfg.main_section.test_sequence = Some(vec![1, 0, 2, 1, 16, 1]);
         cfg.main_section.cycles = 0;
         let modern = cfg.to_modern_config().unwrap();
         assert_eq!(modern.cycle_order, Some(["1", "0", "2", "1"].map(String::from).to_vec()));
@@ -2962,13 +3954,16 @@ mod tests {
 
         tests[0].enabled = false;
         let mut cfg = legacy(100, tests.clone());
-        cfg.main_section.test_sequence = vec![0, 1];
+        cfg.main_section.test_sequence = Some(vec![0, 1]);
         assert_eq!(cfg.to_modern_config().unwrap().system.seal.as_deref(), Some("off"));
-        cfg.main_section.test_sequence = vec![1, 7];
+        cfg.main_section.test_sequence = Some(vec![1, 7]);
         assert!(cfg.to_modern_config().unwrap_err().contains("test 7"));
-        cfg.main_section.test_sequence = vec![16, 1];
+        cfg.main_section.test_sequence = Some(vec![16, 1]);
         assert!(cfg.to_modern_config().unwrap_err().contains("run nothing"));
+        // TM5 never calls a disabled Test0, so its function doesn't matter; an enabled one must be RefreshStable
         tests[0].function = "SimpleTest".to_string();
+        assert_eq!(legacy(100, tests.clone()).to_modern_config().unwrap().system.seal.as_deref(), Some("off"));
+        tests[0].enabled = true;
         assert!(legacy(100, tests).to_modern_config().unwrap_err().contains("RefreshStable"));
     }
 
@@ -3038,6 +4033,352 @@ mod tests {
         for (ms, shown) in [(64, "Wait(64ms)"), (1500, "Wait(1500ms)"), (90_000, "Wait(90s)"), (0, "Wait(0ms)")] {
             let ctx = Some(TestParameterContext { wait_ms: Some(ms), ..Default::default() });
             assert_eq!(format_parameter_context(&ctx), shown);
+        }
+    }
+
+    /// An imported config, its conversion's notes and its parse's warnings (line, message)
+    type Import = (ModernConfig, Vec<String>, Vec<(usize, String)>);
+
+    /// A `.cfg` of `main` and `global` section lines and the given test sections, parsed and converted
+    fn imported(main: &str, global: &str, tests: &str) -> Result<Import, String> {
+        let (parsed, warnings) = cfg_warnings(&format!("[Main Section]\n{main}\n[Global Memory Setup]\n{global}\n{tests}"));
+        let mut notes = Vec::new();
+        let modern = parsed?.convert(&mut notes)?;
+        Ok((modern, notes.into_iter().map(|(_, n)| n).collect(), warnings))
+    }
+
+    fn steps(modern: &ModernConfig) -> Vec<String> {
+        let plan = modern.plan().unwrap();
+        plan.steps.iter().map(|&i| plan.tests[i].id.unwrap().to_string()).collect()
+    }
+
+    /// TM5's number syntax (`ini.asm` LoadIniSettingEx, 0.12.3 the same): `0x`, an `h` or a letter A-F makes hex, anything else is
+    /// decimal with its fraction dropped; a `-` negates decimal; only the low 32 bits count. Text TM5 reads only by accident is refused.
+    #[test]
+    fn tm5_numbers_read_as_tm5_reads_them() {
+        let n = |value: u32, negative: bool, hex: bool, wide: bool| Some((value, negative, hex, wide));
+        for (text, read) in [
+            ("7775", n(7775, false, false, false)),
+            ("0x1E5F", n(0x1E5F, false, true, false)),
+            ("0X10", n(16, false, true, false)),
+            ("10h", n(16, false, true, false)),
+            ("1AH", n(0x1A, false, true, false)),
+            ("1A", n(0x1A, false, true, false)),
+            ("1e5", n(0x1E5, false, true, false)),
+            ("100.5", n(100, false, false, false)),
+            ("100.", n(100, false, false, false)),
+            ("1.5h", n(1, false, true, false)),
+            ("+5", n(5, false, false, false)),
+            ("-1", n(u32::MAX, true, false, false)),
+            ("-0", n(0, false, false, false)),
+            ("007", n(7, false, false, false)),
+            ("0x143FBC767", n(0x43FB_C767, false, true, true)),
+            ("4294967296", n(0, false, false, true)),
+            ("4294967301", n(5, false, false, true)),
+            ("0x00000000FFFFFFFF", n(u32::MAX, false, true, false)),
+        ] {
+            assert_eq!(tm5_number(text).map(|n| (n.value, n.negative, n.hex, n.wide)), read, "{text}");
+        }
+        for text in ["eight", "two", "lots", "0xZZ", "0x", "h", "-0x10", "-1A", "+0x10", "1 2", "4\0x", "12g", ".5", "1.2.3", "-", ""] {
+            assert_eq!(tm5_number(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn wide_source_parameters_survive_import_and_only_legacy_truncates() {
+        let source = LegacyConfig::parse_legacy_format("[Main Section]\nTest Sequence=1\n[Global Memory Setup]\n[Test1]\nFunction=SimpleTest\nPattern Mode=2\nPattern Param1=0xC50552FE6").unwrap();
+        for legacy in [false, true] {
+            let modern = source.convert_with_patterns(&mut Vec::new(), legacy).unwrap();
+            let test = modern.test_sequence.iter().find(|t| t.id.as_deref() == Some("1")).unwrap();
+            let recorded = test.tm5_pattern.as_ref().unwrap();
+            assert_eq!(recorded.legacy_inputs, legacy);
+            assert_eq!(recorded.param1, 0xC_5055_2FE6);
+            assert_eq!(recorded.written.as_ref().unwrap()[1], "0xC50552FE6");
+            assert_eq!(test.pattern_param1, legacy.then_some(0x5055_2FE6));
+            assert_eq!(test.program.is_some(), !legacy);
+        }
+    }
+
+    /// TODO 135: a `.cfg` value TM5 reads loads as TM5 reads it. Digits only is decimal for the pattern parameters too (`7775` is 0x1E5F),
+    /// and a negative one is its two's complement; an empty value is the key's default, as a missing key; GetPrivateProfileString's quotes
+    /// and TM5 0.12.3's `;` comment are dropped; a negative Parameter runs as 0 and a negative Test Block Size as TM5's shift leaves it;
+    /// a negative Cycles is refused, said.
+    #[test]
+    fn cfg_values_take_tm5s_number_syntax() {
+        let test1 = |line: &str| {
+            let text = format!("[Main Section]\nTest Sequence=1\n[Global Memory Setup]\n[Test1]\nFunction=SimpleTest\n{line}\n");
+            let (parsed, warnings) = cfg_warnings(&text);
+            parsed.map(|legacy| (legacy.tests.into_iter().find(|t| t.id == 1).unwrap(), warnings))
+        };
+        let (t, _) = test1("Pattern Param0=7775\nPattern Param1=-1").unwrap();
+        assert_eq!((t.pattern_param0, t.pattern_param1), (0x1E5F, u64::MAX));
+        let (t, _) = test1("Pattern Param0=0x1E5F\nPattern Param1=6E72A941").unwrap();
+        assert_eq!((t.pattern_param0, t.pattern_param1), (0x1E5F, 0x6E72_A941));
+        let (t, warnings) = test1("Pattern Param1=0xC50552FE6").unwrap();
+        assert_eq!(t.pattern_param1, 0xC_5055_2FE6);
+        assert!(warnings.is_empty());
+        let mut warnings = Vec::new();
+        LegacyConfig::parse_reporting(
+            "[Main Section]\nTest Sequence=1\n[Global Memory Setup]\n[Test1]\nFunction=SimpleTest\nPattern Param1=0xC50552FE6",
+            &mut warnings,
+            true,
+        )
+        .unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].line, 6);
+        assert!(warnings[0].message.contains("low 32 bits, 0x50552FE6"));
+        // Test1's own defaults for empty values; a value's quotes and comment dropped
+        let (t, warnings) = test1("Parameter=\nPattern Mode=\"2\"\nTime (%)=100.5 ; a comment\nTest Block Size (Mb)='0x20'").unwrap();
+        assert_eq!((t.parameter, t.pattern_mode, t.time_percent, t.test_chunk_size_mb), (0, 2, 100, 32));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (t, warnings) = test1("Pattern Mode=2 ; lines\nParameter=-3").unwrap();
+        assert_eq!((t.pattern_mode, t.parameter), (2, 0));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].1.starts_with("[Test1] Parameter=-3 is -3 to TM5, which runs a negative one as 0"), "{warnings:?}");
+        // TM5 reads Parameter as signed, so 0x80000000 and up is negative to it too
+        let (t, warnings) = test1("Parameter=0xFFFFFFFE").unwrap();
+        assert_eq!((t.parameter, warnings.len()), (0, 1));
+        // An unmatched quote stays, so isn't a number; a quoted comment is cut after the quotes are kept
+        assert!(test1("Parameter=\"8").unwrap_err().ends_with("Parameter=\"8: not a number"));
+        assert!(test1("Parameter=\"8\" ; x").unwrap_err().contains("not a number"));
+        // A negative Test Block Size runs as TM5's shift to bytes in 32 bits leaves it (`mt_ini.asm` ~287-303): its low 12 bits in MiB,
+        // 0 there 1 MiB, 2048 or more negative again, so the window; written as 0x80000000 and up too
+        let (t, warnings) = test1("Test Block Size (Mb)=-1").unwrap();
+        assert_eq!(t.test_chunk_size_mb, u32::MAX);
+        assert_eq!(warnings, [(
+            6,
+            "[Test1] Test Block Size (Mb)=-1 is -1 to TM5, which shifts it to bytes in 32 bits; that leaves it negative, so runs the \
+             window, and so does TMR"
+                .to_string()
+        )]);
+        for (written, chunk_mib, leaves) in [
+            ("-1", 1024, "it negative, so runs the window"),
+            ("-2048", 1024, "it negative, so runs the window"),
+            ("-2049", 1024, "2047 MiB"),
+            ("-3072", 1024, "1024 MiB"),
+            ("-3584", 512, "512 MiB"),
+            ("-4000", 96, "96 MiB"),
+            ("-4095", 1, "1 MiB"),
+            ("-4096", 1, "0, so runs 1 MiB"),
+            ("-4097", 1024, "it negative, so runs the window"),
+            ("0xFFFFF200", 512, "512 MiB"),
+        ] {
+            let (t, warnings) = test1(&format!("Test Block Size (Mb)={written}")).unwrap();
+            assert!(warnings[0].1.ends_with(&format!("that leaves {leaves}, and so does TMR")), "{written}: {warnings:?}");
+            let mut cfg = legacy(100, vec![t]);
+            cfg.memory_setup.testing_window_size_mb = 1024;
+            let modern = cfg.to_modern_config().unwrap();
+            let chunk = modern.get_test_configs().unwrap()[0].1.calculate_chunk_size("Mem-SimpleV2-Auto", 4096 * MIB);
+            assert_eq!(chunk / MIB, chunk_mib, "{written}");
+        }
+
+        let main = |line: &str| {
+            let text = format!("[Main Section]\n{line}\n[Global Memory Setup]\n");
+            LegacyConfig::parse_legacy_format(&text).map(|legacy| legacy.main_section)
+        };
+        let m = main("Cycles=\nCores=0x4\nTime (%)=50 ; half\nConfig Name=Mine ; text keys lose their comment too").unwrap();
+        assert_eq!((m.cycles, m.cores, m.time_percent, m.config_name.as_str()), (3, 4, 50, "Mine"));
+        let err = main("Cycles=-3").unwrap_err();
+        assert!(err.contains("Cycles=-3: negative, which TM5 checks against its range without the '-'"), "{err}");
+        // TM5's own defaults when the keys are missing
+        let m = main("").unwrap();
+        assert_eq!((m.config_name.as_str(), m.config_author.as_str(), m.cycles, m.tests, m.test_sequence), ("Default", "serj", 3, 6, None));
+    }
+
+    /// TODO 135: `Test Sequence` as TM5 reads it: any run of non-digits separates (one other than commas and spaces is warned), a `;`
+    /// starts a comment, the first 127 characters and then the first 32 numbers count, each cut warned, and a number keeps its low byte,
+    /// warned. A letter is still refused.
+    #[test]
+    fn tm5_sequences_take_any_separator_and_tm5s_limits() {
+        let read = |text: &str| {
+            let mut warnings = Vec::new();
+            tm5_sequence(text, 2, &mut warnings).map(|numbers| (numbers, warnings.into_iter().map(|w| w.message).collect::<Vec<_>>()))
+        };
+        assert_eq!(read("1 2  3").unwrap(), (vec![1, 2, 3], vec![]));
+        assert_eq!(read("1,,2, 03").unwrap(), (vec![1, 2, 3], vec![]));
+        let (numbers, warnings) = read("1.2/3").unwrap();
+        assert_eq!(numbers, [1, 2, 3]);
+        assert_eq!(warnings, ["[Main Section] Test Sequence separates its numbers with '.'; TM5 reads anything that isn't a digit as a \
+            separator, and so does TMR"]);
+        let forty = (0..40).map(|i| (i % 6).to_string()).collect::<Vec<_>>().join(",");
+        let (numbers, warnings) = read(&forty).unwrap();
+        assert_eq!(numbers.len(), 32);
+        assert_eq!(warnings, ["[Main Section] Test Sequence has 40 entries; TM5 runs only the first 32, and so does TMR"]);
+        // A number of 16 or more in the first 32 ends the list first, so the cut is no loss and isn't said
+        let (_, warnings) = read(&format!("16,{forty}")).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let long = format!("{}1,2", " ".repeat(126));
+        let (numbers, warnings) = read(&long).unwrap();
+        assert_eq!(numbers, [1]);
+        assert_eq!(warnings, ["[Main Section] Test Sequence is 129 characters; TM5 reads only the first 127, and so does TMR"]);
+        assert_eq!(read("1,x").unwrap_err(), "TM5 config [Main Section] Test Sequence: 'x' is not a test number");
+        assert!(read("1,2x3").unwrap_err().contains("'x3'"));
+        // TM5 stores a number's low byte (`mov [edi],al`), so 258 is test 2, said; 255 and a leading 0 aren't
+        let (numbers, warnings) = read("1,258,2,0256,99999999999999,255,007").unwrap();
+        assert_eq!(numbers, [1, 2, 2, 0, 255, 255, 7]);
+        assert_eq!(warnings, ["[Main Section] Test Sequence: TM5 keeps only the low byte of each number, so reads 258 as 2, 0256 as 0, \
+            99999999999999 as 255, and so does TMR"]);
+        let sections = (0..3).map(|i| format!("[Test{i}]\nFunction={}\n", TM5_DEFAULT_FUNCTION[i])).collect::<String>();
+        for (sequence, runs) in [("1,258,2", ["1", "2", "2"].as_slice()), ("258,1", &["2", "1"]), ("1,272,2", &["1"])] {
+            let (modern, _, warnings) = imported(&format!("Tests=3\nTest Sequence={sequence}"), "", &sections).unwrap();
+            assert_eq!(steps(&modern), runs, "{sequence}");
+            assert_eq!(warnings.len(), 1, "{sequence}: {warnings:?}");
+        }
+        // In a .cfg, a `;` is a comment
+        let legacy = LegacyConfig::parse_legacy_format("[Main Section]\nTest Sequence=1,2 ; 3\n[Global Memory Setup]\n").unwrap();
+        assert_eq!(legacy.main_section.test_sequence, Some(vec![1, 2]));
+    }
+
+    /// TODO 135: TM5 reads `[Test0]` to `[Test(Tests-1)]` only (Tests defaults to 6) and skips a Test Sequence entry at or above it, said
+    /// in one line: TM5's own default MT.cfg's shape runs 2, 5, 1, 4, 3, 0, 1. A section at or above Tests is warned and left out before
+    /// its function is looked at. Without a Test Sequence, TM5's default one runs, an entry the .cfg doesn't define skipped and warned.
+    #[test]
+    fn tests_limits_the_slots_and_a_missing_sequence_is_tm5s_default() {
+        let sections = |ids: std::ops::Range<u32>| {
+            ids.map(|i| format!("[Test{i}]\nFunction={}\n", TM5_DEFAULT_FUNCTION[i as usize])).collect::<String>()
+        };
+        let mt_cfg = "Tests=6\nTest Sequence=6,12,14,2,15,10,5,1,4,3,0,13,9,7,8,1,11";
+        let (modern, notes, warnings) = imported(mt_cfg, "", &sections(0..6)).unwrap();
+        assert_eq!(steps(&modern), ["2", "5", "1", "4", "3", "0", "1"]);
+        assert_eq!(notes, ["TM5 Test Sequence: TM5 skips its entries for tests 6-15, which are at or above Tests=6, and so does TMR"]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // No Tests= is TM5's 6; a [Test6] is then left out, warned, even with a function TMR doesn't know
+        let (modern, _, warnings) = imported("Test Sequence=1,6", "", "[Test1]\n[Test6]\nFunction=Unknown\n").unwrap();
+        assert_eq!(steps(&modern), ["1"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].1.starts_with("[Test6] is at or above Tests=6: TM5 reads only [Test0] to [Test5]"), "{warnings:?}");
+        assert!(!modern.test_sequence.iter().any(|t| t.id.as_deref() == Some("6")));
+        // A sequence that only names tests at or above Tests runs nothing, which TMR refuses (TM5 would run its fill and check alone)
+        let err = imported("Tests=2\nTest Sequence=3,4", "", &sections(0..2)).unwrap_err();
+        assert!(err.contains("runs no test: each of its entries is at or above Tests=2"), "{err}");
+        // A written sequence's undefined slot below Tests is still an error (the owner, 2026-11-12)
+        assert!(imported("Tests=16\nTest Sequence=1,7", "", &sections(0..2)).unwrap_err().contains("test 7"));
+
+        // No Test Sequence: TM5's default, filtered by Tests, then by what the .cfg defines
+        let (modern, notes, _) = imported("Tests=16", "", &sections(0..16)).unwrap();
+        assert_eq!(steps(&modern), TM5_DEFAULT_SEQUENCE.map(|n| n.to_string()));
+        assert!(notes[0].starts_with("TM5 config: no Test Sequence, so TM5 runs its default, 6,12,14,2,15,10,5,1,4,3,0,13,9,7,8,1,11"));
+        let (modern, notes, _) = imported("", "", &sections(0..6)).unwrap();
+        assert_eq!(steps(&modern), ["2", "5", "1", "4", "3", "0", "1"]);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let (modern, notes, _) = imported("Tests=16", "", &sections(0..3)).unwrap();
+        assert_eq!(steps(&modern), ["2", "1", "0", "1"]);
+        assert!(notes[1].starts_with("TM5's default Test Sequence names tests 3-15 the .cfg doesn't define; TMR skips them"), "{notes:?}");
+        // An empty one is still every enabled test once, in file order
+        let (modern, _, _) = imported("Test Sequence=", "", &sections(0..3)).unwrap();
+        assert_eq!((steps(&modern), modern.cycle_order), (vec!["0".to_string(), "1".into(), "2".into()], None));
+    }
+
+    /// TODO 135: a disabled test's function is never loaded by TM5, so one TMR doesn't know stays declared, disabled, and the sequence
+    /// skips it; a disabled Test0 may name any function. An enabled one is still refused.
+    #[test]
+    fn disabled_tests_load_whatever_their_function() {
+        let tests = "[Test0]\nEnable=0\nFunction=SimpleTest\n[Test1]\n[Test3]\nEnable=0\nFunction=NoSuchTest\n";
+        let (modern, _, _) = imported("Test Sequence=1,3,1", "", tests).unwrap();
+        assert_eq!((steps(&modern), modern.system.seal.as_deref()), (vec!["1".to_string(), "1".into()], Some("off")));
+        let order = modern.plan().unwrap().order.unwrap();
+        assert_eq!(order[1], ("3".to_string(), false));
+        let err = imported("Test Sequence=1,3", "", &tests.replace("Enable=0\nFunction=NoSuch", "Enable=1\nFunction=NoSuch")).unwrap_err();
+        assert!(err.contains("Unknown legacy test function: 'NoSuchTest'"), "{err}");
+        let err = imported("Test Sequence=1", "", &tests.replace("[Test0]\nEnable=0", "[Test0]\nEnable=1")).unwrap_err();
+        assert!(err.contains("not RefreshStable"), "{err}");
+    }
+
+    /// TODO 135: a SimpleTest Pattern Mode TMR doesn't name runs as TM5 runs it, by its low byte: 1 or 2 that mode, anything else mode 0.
+    /// TMR's own numbers keep their meaning (TM5 runs them as mode 0).
+    #[test]
+    fn unknown_pattern_modes_run_their_low_byte() {
+        for (written, runs) in [("3", 0), ("257", 1), ("258", 2), ("-1", 0), ("0x102", 2), ("13", 13), ("32", 32)] {
+            let (modern, notes, _) =
+                imported("Test Sequence=1", "", &format!("[Test1]\nFunction=SimpleTest\nPattern Mode={written}\n")).unwrap();
+            let t = &modern.test_sequence[1];
+            assert_eq!(t.tm5_pattern.as_ref().map(|p| p.mode), Some(runs), "{written}");
+            modern.get_test_configs().unwrap();
+            let warned = notes.iter().any(|n| n.contains(&format!("so runs mode {runs}, and so does TMR")));
+            assert_eq!(warned, !matches!(written, "13" | "32"), "{written}: {notes:?}");
+        }
+    }
+
+    /// TODO 135: Interleave Type 0 on two channels or more walks a strided SimpleTest as TM5's 128-bit bus does: 128 B, two lines, a visit,
+    /// every 2 x Parameter lines whatever the Channels; Parameter 1 is sequential. On one channel it is type 1's walk.
+    #[test]
+    fn interleave_type_0_walks_128_byte_visits() {
+        let simple = |parameter: u32| format!("[Test1]\nFunction=SimpleTest\nParameter={parameter}\n");
+        let built = |global: &str, parameter: u32| {
+            let (modern, notes, _) = imported("Test Sequence=1", global, &simple(parameter)).unwrap();
+            let configs = modern.get_test_configs().unwrap();
+            let ctx = configs[1].1.parameter_context.clone();
+            (modern.test_sequence[1].clone(), ctx, notes)
+        };
+        for channels in [2, 3] {
+            let (entry, ctx, notes) = built(&format!("Channels={channels}\nInterleave Type=0"), 8);
+            // The import keeps the Parameter: the walk is picked when the test is built, so channels= and pattern-mode= can pick it again
+            assert_eq!((entry.parameter, entry.period_lines, entry.group_lines), (Some(8), None, None), "{channels}");
+            let ctx = ctx.unwrap();
+            assert_eq!((ctx.access, ctx.stride_cachelines), (Some(AccessGeometry { period_lines: 16, group_lines: 2 }), Some(15)));
+            assert!(ctx.interleave_0);
+            assert!(notes[0].starts_with("TM5 config: Interleave Type=0"), "{notes:?}");
+        }
+        let (_, ctx, _) = built("Channels=2\nInterleave Type=0", 1);
+        assert_eq!(ctx.map(|c| (c.access, c.stride_cachelines)), Some((None, None)));
+        let (entry, ctx, notes) = built("Channels=1\nInterleave Type=0", 8);
+        let ctx = ctx.unwrap();
+        assert_eq!((entry.parameter, ctx.access, ctx.stride_cachelines, ctx.interleave_0, notes.len()), (Some(8), None, Some(7), true, 0));
+        let (entry, ctx, _) = built("Channels=2", 8);
+        let ctx = ctx.unwrap();
+        assert_eq!((entry.parameter, ctx.access, ctx.stride_cachelines, ctx.interleave_0), (Some(8), None, Some(15), false));
+        // TMR's numbered modes have no grouped walk: one line a period, said
+        let (modern, notes, _) =
+            imported("Test Sequence=1", "Channels=2\nInterleave Type=0", "[Test1]\nFunction=SimpleTest\nParameter=8\nPattern Mode=13\n")
+                .unwrap();
+        assert!(notes.iter().any(|n| n.contains("every 16 lines; TMR's numbered modes have no grouped walk")), "{notes:?}");
+        let ctx = modern.get_test_configs().unwrap()[1].1.parameter_context.clone().unwrap();
+        assert_eq!(ctx.access, Some(AccessGeometry { period_lines: 16, group_lines: 1 }));
+
+        // The walk again, as the command line's channels= and pattern-mode= leave it: one channel is type 1's walk, two or more TM5's
+        // 128-bit one, whatever the .cfg's Channels; a numbered mode visits a line
+        let mut ctx = interpret_tm5_parameter_with_channels("Mem-SimpleV2-Auto", 8, 2);
+        for (channels, native, access, stride) in [
+            (1, true, None, Some(7)),
+            (2, true, Some((16, 2)), Some(15)),
+            (4, true, Some((16, 2)), Some(15)),
+            (2, false, Some((16, 1)), Some(15)),
+            (1, false, None, Some(7)),
+        ] {
+            interleave_0_walk(&mut ctx, channels, native);
+            let access = access.map(|(period_lines, group_lines)| AccessGeometry { period_lines, group_lines });
+            assert_eq!((ctx.access, ctx.stride_cachelines, ctx.stride_elements), (access, stride, stride.map(|s| s * 8)), "{channels}");
+        }
+    }
+
+    /// TODO 135: a missing `[Main Section]` or `[Global Memory Setup]` takes TM5's defaults, said, in a file TM5 would read as its own
+    /// (its header line, or another of its sections); a file with neither is no `.cfg`.
+    #[test]
+    fn missing_sections_take_tm5s_defaults() {
+        let (parsed, warnings) = cfg_warnings("Memory Test config file v0.02\r\n");
+        let legacy = parsed.unwrap();
+        assert_eq!(warnings.iter().map(|w| w.1.as_str()).collect::<Vec<_>>(), [
+            "no [Main Section]: TM5 gives each of its keys its default, and so does TMR",
+            "no [Global Memory Setup]: TM5 gives each of its keys its default, and so does TMR"
+        ]);
+        let memory = &legacy.memory_setup;
+        assert_eq!((memory.channels, memory.interleave_type, memory.testing_window_size_mb, memory.lock_granularity_mb), (2, 1, 1024, 16));
+        let mut notes = Vec::new();
+        let modern = legacy.convert(&mut notes).unwrap();
+        assert_eq!((steps(&modern), modern.system.timing.global_cycles), (vec!["0".to_string()], Some(3)));
+        let (parsed, warnings) = cfg_warnings("[Test1]\nFunction=SimpleTest\n");
+        assert_eq!((parsed.unwrap().tests.len(), warnings.len()), (2, 2));
+        assert_eq!(cfg_warnings("{\"not\": \"a cfg\"\n").0.unwrap_err(), "Missing [Main Section]");
+    }
+
+    /// TODO 135: a Lock Memory Granularity up to TMR's 1024 MiB rounds each share to a step the 1 GiB requests can take.
+    #[test]
+    fn a_lock_granularity_up_to_1024_rounds_within_the_largest_request() {
+        for (lock_mb, step_mb) in [(513, 528), (1000, 1008), (1024, 1024)] {
+            let mut cfg = legacy(100, vec![test(1, "SimpleTest", 100, 16)]);
+            cfg.memory_setup.lock_granularity_mb = lock_mb;
+            let rounding = cfg.to_modern_config().unwrap().system.memory_allocation.share_rounding().unwrap();
+            assert_eq!(rounding.step_bytes / BYTES_PER_MIB, step_mb, "{lock_mb}");
         }
     }
 }

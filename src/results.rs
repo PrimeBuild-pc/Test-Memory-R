@@ -18,16 +18,6 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Writes `bytes` to `path` and flushes them to the disk (`FlushFileBuffers`) before it returns (TODO 72). NTFS logs a rename at once but
-/// writes a file's data back later, so without the flush a system that went down just after a save could keep the rename and lose the data
-/// it names. `new`: only as a new file, never one already there (`save_atomic`'s temp).
-fn write_to_disk(path: &str, bytes: &[u8], new: bool) -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).create_new(new).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
 /// A run's results file. Its figures are saved as the run has them, none rounded (the owner, TODO 72): the file is for tools, and a replay
 /// of what the console showed needs the raw values, which a reader rounds as it shows them. Rounded, a speed of 43122.8 MiB/s read back as
 /// 43123, and a test run twice a cycle at 100.6 and 101.6 MiB/s averaged 101.5 from the file, not the 101.1 the console showed.
@@ -335,9 +325,9 @@ pub fn op_records(ops: &crate::ops::OpTally) -> OpRecords {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverallStats {
-    /// Saved between cycles with the run still going (TODO 72): after the first cycle, then at most once a minute
-    /// (`runner::RESULTS_SAVE_INTERVAL`), and the figures are the cycles that had finished. A run killed, lost or crashed leaves its last
-    /// such save. False in the final save, and in results written before it.
+    /// Saved with the run still going (TODO 72): at the end of setup, with no cycle, then after the first cycle, then at most once a minute
+    /// (`runner::SaveSchedule`), and the figures are the cycles that had finished. A run killed, lost or crashed leaves its last such
+    /// save. False in the final save, and in results written before it.
     #[serde(default)]
     pub in_progress: bool,
     /// How the run ended, in the final save: `completed` (its cycle limit), `time_limit`, `interrupted` (Ctrl+C) or `halted` (errors=halt);
@@ -435,7 +425,9 @@ pub struct TestComparison {
     /// What differs between the two runs' plans, their steps matched by test (`run_context::compare_plans`): the steps only one has, and
     /// the settings that differ of the tests both have. When they differ, the overall figures cover different work.
     pub plan_changes: crate::run_context::PlanChanges,
-    pub overall_comparison: OverallComparison,
+    /// `None` when either run has no figures, a run with no cycle, saved mid-run or finished (its `Results file` row in
+    /// `run_differences` says which): its changes would be the other run's figures whole
+    pub overall_comparison: Option<OverallComparison>,
     /// The steps both plans have, in the current run's order
     pub per_test_comparisons: Vec<TestComparisonResult>,
     /// Hardware and configuration differences between the two runs (TODO #67). Non-empty means the percentages above are at least partly
@@ -446,9 +438,10 @@ pub struct TestComparison {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverallComparison {
     pub runtime_diff_secs: i64,
-    pub runtime_diff_percent: f64,
+    /// `None` when the baseline has none to take a percentage of, as a file with no cycle (TODO 72)
+    pub runtime_diff_percent: Option<f64>,
     pub throughput_diff_mib_s: f64,
-    pub throughput_diff_percent: f64,
+    pub throughput_diff_percent: Option<f64>,
     pub data_processed_diff_gib: f64,
     pub errors_diff: i64,
 }
@@ -921,26 +914,16 @@ impl TestRunResult {
         crate::home::dir().join(self.metadata.filename.replace('/', std::path::MAIN_SEPARATOR_STR)).display().to_string()
     }
 
-    /// Writes the file whole or not at all (TODO 72): to `<path>.tmp`, on the disk, then renamed over `path`, so a run killed mid-write, or
-    /// a system that went down, leaves its last save, not part of one. A refused rename, as when a viewer holds the file without letting it
-    /// be deleted, falls back to writing `path` in place, with a warning; the next save tries the rename again. When the viewer won't let
-    /// it be written either, the save stays in the `.tmp`, and the error names both.
+    /// Writes the file whole or not at all (TODO 72, `atomic_file::write`): to `<path>.tmp`, on the disk, then put in `path`'s place, so
+    /// a run killed mid-write, or a system that went down, leaves its last save, not part of one. A refused replace, as when a viewer
+    /// holds the file without letting it be deleted, falls back to writing `path` in place, with a warning, as does a temp that can't be
+    /// made; the next save tries the replace again. When the viewer won't let it be written either, the save stays in the `.tmp`, and
+    /// the error names both.
     pub fn save_atomic(&self, path: &str) -> Result<(), String> {
         // Indented but for record=compact (TODO 105): a file that size is read by TMR, not by eye
         let json = if self.metadata.record == Record::Compact { serde_json::to_string(self) } else { serde_json::to_string_pretty(self) }
             .map_err(|e| format!("Failed to serialize test result: {}", e))?;
-        let temp = format!("{path}.tmp");
-        // A new file (TODO 104): in an install for all users results\ is writable by every user, and TMR may run elevated, so the temp is
-        // never a file someone else put there, a link among them. One a failed save left is removed first (a link, not what it names).
-        let _ = fs::remove_file(&temp);
-        write_to_disk(&temp, json.as_bytes(), true).map_err(|e| format!("Failed to write test result file {temp}: {e}"))?;
-        if let Err(refused) = fs::rename(&temp, path) {
-            log::warn!("Couldn't replace {path} with {temp} ({refused}): writing it in place");
-            write_to_disk(path, json.as_bytes(), false)
-                .map_err(|e| format!("Couldn't replace {path} ({refused}) or write it in place ({e}): this save is in {temp}"))?;
-            let _ = fs::remove_file(&temp);
-        }
-        Ok(())
+        crate::atomic_file::write(Path::new(path), json.as_bytes()).map(drop)
     }
 
     pub fn load_from_file(path: &str) -> Result<Self, String> {
@@ -967,25 +950,24 @@ impl TestComparison {
     pub fn of(baseline: TestRunResult, current: TestRunResult) -> Self {
         let comparison_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
 
+        // A run with no cycle has no figures, so nothing in it compares, whether it was saved mid-run or finished: its first save is at
+        // the end of setup, and a first cycle stopped before its first step saves none either, the final save included
         let (b, c) = (&baseline.overall_stats, &current.overall_stats);
-        let runtime_diff_secs = c.total_runtime_secs as i64 - b.total_runtime_secs as i64;
-        let throughput_diff_mib_s = c.overall_throughput_mib_s - b.overall_throughput_mib_s;
-        let overall_comparison = OverallComparison {
-            runtime_diff_secs,
-            runtime_diff_percent: if b.total_runtime_secs > 0 {
-                (runtime_diff_secs as f64 / b.total_runtime_secs as f64) * 100.0
-            } else {
-                0.0
-            },
-            throughput_diff_mib_s,
-            throughput_diff_percent: if b.overall_throughput_mib_s > 0.0 {
-                (throughput_diff_mib_s / b.overall_throughput_mib_s) * 100.0
-            } else {
-                0.0
-            },
-            data_processed_diff_gib: c.total_data_processed_gib - b.total_data_processed_gib,
-            errors_diff: c.total_errors as i64 - b.total_errors as i64,
-        };
+        let figureless = b.cycles_completed == 0 || c.cycles_completed == 0;
+        let overall_comparison = (!figureless).then(|| {
+            let runtime_diff_secs = c.total_runtime_secs as i64 - b.total_runtime_secs as i64;
+            let throughput_diff_mib_s = c.overall_throughput_mib_s - b.overall_throughput_mib_s;
+            OverallComparison {
+                runtime_diff_secs,
+                runtime_diff_percent: (b.total_runtime_secs > 0)
+                    .then_some((runtime_diff_secs as f64 / b.total_runtime_secs as f64) * 100.0),
+                throughput_diff_mib_s,
+                throughput_diff_percent: (b.overall_throughput_mib_s > 0.0)
+                    .then_some((throughput_diff_mib_s / b.overall_throughput_mib_s) * 100.0),
+                data_processed_diff_gib: c.total_data_processed_gib - b.total_data_processed_gib,
+                errors_diff: c.total_errors as i64 - b.total_errors as i64,
+            }
+        });
 
         // Each step both plans have, matched by test, with its figures from each run's averages for its step there: a run that stopped
         // before a step has none for it, or none that ran
@@ -1013,16 +995,37 @@ impl TestComparison {
             .collect();
 
         // A file saved mid-run first (TODO 72): its figures are only the cycles that had finished, of a run that was killed or lost, or is
-        // still going. Then identity, then configuration: a hardware change is the more fundamental explanation, and on a new machine the
-        // config differences are usually downstream of it.
+        // still going; a finished one whose run stopped before its end (Ctrl+C, errors=halt), whose figures are of less work too (review:
+        // it had no row, the comparison read as one of the same work); and a file with no figures, saved mid-run or finished. Whole cycles
+        // are the plan's steps, so the overall speed compares, the totals plainly not; a last cycle cut short is some of its steps, so the
+        // overall figures are of other work, which invalidates them, as no figures do. Then identity, then configuration: a hardware
+        // change is the more fundamental explanation, and on a new machine the config differences are usually downstream of it.
+        let stopped = |run: &TestRunResult| {
+            let cut = run.cycles.last().is_some_and(|cycle| cycle.partial);
+            let outcome = run.overall_stats.outcome.as_deref();
+            (!run.overall_stats.in_progress && (cut || matches!(outcome, Some("interrupted" | "halted")))).then_some(cut)
+        };
         let mut run_differences = Vec::new();
-        if b.in_progress || c.in_progress {
-            let saved = |stats: &OverallStats| {
+        if b.in_progress || c.in_progress || figureless || stopped(&baseline).is_some() || stopped(&current).is_some() {
+            let saved = |run: &TestRunResult| {
+                let (stats, cycles) = (&run.overall_stats, run.overall_stats.cycles_completed);
                 let state = if stats.in_progress { "saved mid-run" } else { "finished" };
-                let cycles = stats.cycles_completed;
-                format!("{state} after {cycles} cycle{}", if cycles == 1 { "" } else { "s" })
+                if cycles == 0 {
+                    return format!("{state} with no cycle, so no figures");
+                }
+                let after = format!("after {cycles} cycle{}", if cycles == 1 { "" } else { "s" });
+                match stopped(run) {
+                    Some(cut) => format!(
+                        "{} {after}{}",
+                        stats.outcome.as_deref().unwrap_or("stopped"),
+                        if cut { ", the last cut short" } else { "" }
+                    ),
+                    None => format!("{state} {after}"),
+                }
             };
-            run_differences.push(crate::run_context::RunDifference::new("Results file", saved(b), saved(c), false));
+            let cut = stopped(&baseline) == Some(true) || stopped(&current) == Some(true);
+            let (was, is) = (saved(&baseline), saved(&current));
+            run_differences.push(crate::run_context::RunDifference::new("Results file", was, is, figureless || cut));
         }
         run_differences.extend(crate::run_context::compare_identity(&baseline.identity, &current.identity));
         run_differences.extend(crate::run_context::compare_config(&baseline.run_config, &current.run_config));
@@ -1076,28 +1079,35 @@ impl TestComparison {
         report.push_str(&self.plan_text());
 
         report.push_str("Overall Performance Changes:\n");
+        let Some(overall) = &self.overall_comparison else {
+            report.push_str("  None: a run with no cycle has no figures (Results file, above)\n\n");
+            return report;
+        };
         if self.plan_changes.differ() {
             report.push_str("  ⚠️  The plans differ (Plan Changes, above): these totals cover different work\n");
         }
+        // A percentage of a baseline of none is no figure: "from 0"
+        let percent = |change: Option<f64>| change.map_or("from 0".to_string(), |change| format!("{change:+.1}%"));
         report.push_str(&format!(
-            "  Runtime: {}{} seconds ({:+.1}%)\n",
-            if self.overall_comparison.runtime_diff_secs >= 0 { "+" } else { "" },
-            self.overall_comparison.runtime_diff_secs,
-            self.overall_comparison.runtime_diff_percent
+            "  Runtime: {}{} seconds ({})\n",
+            if overall.runtime_diff_secs >= 0 { "+" } else { "" },
+            overall.runtime_diff_secs,
+            percent(overall.runtime_diff_percent)
         ));
 
         report.push_str(&format!(
-            "  Throughput: {:+.1} MiB/s ({:+.1}%)\n",
-            self.overall_comparison.throughput_diff_mib_s, self.overall_comparison.throughput_diff_percent
+            "  Throughput: {:+.1} MiB/s ({})\n",
+            overall.throughput_diff_mib_s,
+            percent(overall.throughput_diff_percent)
         ));
 
-        report.push_str(&format!("  Data Processed: {:+.2} GiB\n", self.overall_comparison.data_processed_diff_gib));
+        report.push_str(&format!("  Data Processed: {:+.2} GiB\n", overall.data_processed_diff_gib));
 
-        if self.overall_comparison.errors_diff != 0 {
+        if overall.errors_diff != 0 {
             report.push_str(&format!(
                 "  Errors: {:+} ({})\n",
-                self.overall_comparison.errors_diff,
-                if self.overall_comparison.errors_diff > 0 { "WORSE" } else { "BETTER" }
+                overall.errors_diff,
+                if overall.errors_diff > 0 { "WORSE" } else { "BETTER" }
             ));
         } else {
             report.push_str("  Errors: No change\n");
@@ -1189,9 +1199,10 @@ pub(crate) struct TempDir(std::path::PathBuf);
 #[cfg(any(test, feature = "test-support"))]
 impl TempDir {
     pub(crate) fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("tmr-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = crate::test_support::test_home().join(format!("{name}-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        fs::create_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         TempDir(dir)
     }
 
@@ -1430,9 +1441,9 @@ mod tests {
         }
     }
 
-    /// TODO 72: a save replaces the file whole, by renaming a temp file over it, and leaves nothing of the temp file: a reader that had the
-    /// old file open, and lets it be deleted, still reads the old one, which a write in place wouldn't leave it. When a viewer holds the
-    /// file without letting it be deleted, so it can't be renamed over, the save writes it in place instead; when the viewer won't let it
+    /// TODO 72: a save replaces the file whole, by putting a temp file in its place, and leaves nothing of the temp file: a reader that had
+    /// the old file open, and lets it be deleted, still reads the old one, which a write in place wouldn't leave it. When a viewer holds
+    /// the file without letting it be deleted, so it can't be replaced, the save writes it in place instead; when the viewer won't let it
     /// be written either, the save stays in the temp file, which the error names, and the file is as it was.
     /// TODO 105: record=compact keeps only the erring threads' rows, an alarm or a seal error counting, and writes the file unindented; it
     /// loads back with the setting named; full keeps every row, indented, and names none
@@ -1545,6 +1556,71 @@ mod tests {
 
         let same = run_of("same", &[planned("Mem-StuckBitAuto", 1000.0)], &[]);
         assert!(!TestComparison::of(same.clone(), same).head_text().contains("Memory timings"));
+    }
+
+    /// A finished run that stopped before its end, halted in its first cycle or interrupted after it, compared with one that ran to its
+    /// end, either way round, has its Results file row, as a file saved mid-run has (review: it had none, and the header said nothing
+    /// invalidated the comparison, its totals, of less work, given as changes). Stopped after whole cycles, like a mid-run file, the row
+    /// doesn't invalidate it; with its last cycle cut short, of some of the plan's steps, it does. A run that completed its cycles, or
+    /// reached its time limit, has none.
+    #[test]
+    fn a_comparison_warns_of_a_finished_run_that_stopped_before_its_end() {
+        let (_, finished) = written_before_todo_72();
+        let stopped = |outcome: &str, cut: bool| {
+            let mut stopped = finished.clone();
+            stopped.cycles.truncate(1);
+            stopped.cycles[0].partial = cut;
+            stopped.finalize(std::time::Duration::from_secs(20));
+            stopped.overall_stats.outcome = Some(outcome.to_string());
+            stopped
+        };
+        let (halted, interrupted) = (stopped("halted", true), stopped("interrupted", false));
+        for (stopped, state, invalidates) in
+            [(&halted, "halted after 1 cycle, the last cut short", true), (&interrupted, "interrupted after 1 cycle", false)]
+        {
+            for (baseline, current) in [(stopped, &finished), (&finished, stopped)] {
+                let comparison = TestComparison::of(baseline.clone(), current.clone());
+                let rows: Vec<_> = comparison.run_differences.iter().filter(|d| d.field == "Results file").collect();
+                let [row] = rows[..] else { panic!("one Results file row: {:?}", comparison.run_differences) };
+                let (figures, other) =
+                    if std::ptr::eq(baseline, stopped) { (&row.baseline, &row.current) } else { (&row.current, &row.baseline) };
+                assert_eq!((figures.as_str(), other.as_str(), row.invalidates), (state, "finished after 2 cycles", invalidates));
+                assert!(comparison.overall_comparison.is_some());
+            }
+        }
+        let ended = |outcome: &str| {
+            let mut ended = finished.clone();
+            ended.overall_stats.outcome = Some(outcome.to_string());
+            ended
+        };
+        let comparison = TestComparison::of(ended("completed"), ended("time_limit"));
+        assert!(comparison.run_differences.iter().all(|d| d.field != "Results file"), "{:?}", comparison.run_differences);
+    }
+
+    /// A run with no cycle has no figures, saved mid-run (at the end of setup) or finished (stopped before its first step): a comparison
+    /// with it, either way round, says so in its Results file row, which invalidates it, and has no overall changes, which would be the
+    /// other run's figures whole ("+756.0 MiB/s (from 0)")
+    #[test]
+    fn a_comparison_with_a_run_with_no_figures_has_no_overall_changes() {
+        let (_, finished) = written_before_todo_72();
+        let mut stopped = finished.clone();
+        stopped.cycles.clear();
+        stopped.finalize(std::time::Duration::from_secs(4));
+        stopped.overall_stats.outcome = Some("interrupted".to_string());
+        let mut setup = stopped.clone();
+        (setup.overall_stats.in_progress, setup.overall_stats.outcome) = (true, None);
+        for (none, state) in [(&stopped, "finished with no cycle, so no figures"), (&setup, "saved mid-run with no cycle, so no figures")] {
+            for (baseline, current) in [(none, &finished), (&finished, none)] {
+                let comparison = TestComparison::of(baseline.clone(), current.clone());
+                let rows: Vec<_> = comparison.run_differences.iter().filter(|d| d.field == "Results file").collect();
+                let [row] = rows[..] else { panic!("one Results file row: {:?}", comparison.run_differences) };
+                let figures = if std::ptr::eq(baseline, none) { &row.baseline } else { &row.current };
+                assert_eq!((figures.as_str(), row.invalidates), (state, true));
+                let head = comparison.head_text();
+                let overall = &head[head.find("Overall Performance Changes").unwrap()..];
+                assert_eq!(overall, "Overall Performance Changes:\n  None: a run with no cycle has no figures (Results file, above)\n\n");
+            }
+        }
     }
 
     /// A step of a plan, for the comparisons' tests: the test as its plan or config names it, its config id, the name it ran as, the width
